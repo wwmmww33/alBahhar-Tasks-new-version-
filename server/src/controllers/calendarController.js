@@ -2,24 +2,228 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 
+async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
+  const normalizedBaseDepartmentId = String(baseDepartmentId || '').trim();
+  if (!normalizedBaseDepartmentId || !/^\d+$/.test(normalizedBaseDepartmentId)) return [];
+
+  const schema = await pool.request().query(`
+    SELECT
+      CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
+      CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+      CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDepartmentType
+  `);
+  const s = schema.recordset[0] || {};
+  const parentCol = s.HasParentDepartmentID ? 'ParentDepartmentID' : (s.HasParentID ? 'ParentID' : null);
+  if (!parentCol) return [normalizedBaseDepartmentId];
+
+  let rootDepartmentId = normalizedBaseDepartmentId;
+  if (s.HasDepartmentType) {
+    const root = await pool.request()
+      .input('DepartmentID', sql.NVarChar, normalizedBaseDepartmentId)
+      .query(`
+        ;WITH UpTree AS (
+          SELECT DepartmentID, ${parentCol} AS ParentDepartmentID, 0 AS Depth
+          FROM dbo.Departments
+          WHERE DepartmentID = @DepartmentID
+          UNION ALL
+          SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
+          FROM dbo.Departments d
+          INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
+        )
+        SELECT TOP 1 u.DepartmentID
+        FROM UpTree u
+        INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
+        WHERE TRY_CAST(d.[Type] AS INT) = 1 OR LTRIM(RTRIM(CAST(d.[Type] AS NVARCHAR(50)))) = N'1'
+        ORDER BY u.Depth ASC
+        OPTION (MAXRECURSION 100)
+      `);
+    if (root.recordset[0]?.DepartmentID != null) {
+        rootDepartmentId = String(root.recordset[0].DepartmentID).trim();
+    }
+  }
+  if (!rootDepartmentId || !/^\d+$/.test(String(rootDepartmentId))) return [normalizedBaseDepartmentId];
+
+  const tree = await pool.request()
+      .input('RootDepartmentID', sql.NVarChar, rootDepartmentId)
+    .query(`
+      ;WITH DeptTree AS (
+        SELECT DepartmentID, ${parentCol} AS ParentDepartmentID
+        FROM dbo.Departments
+        WHERE DepartmentID = @RootDepartmentID
+        UNION ALL
+        SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
+        FROM dbo.Departments d
+        INNER JOIN DeptTree dt ON d.${parentCol} = dt.DepartmentID
+      )
+      SELECT DISTINCT DepartmentID
+      FROM DeptTree
+      OPTION (MAXRECURSION 300)
+    `);
+
+  const ids = (tree.recordset || [])
+    .map(r => String(r.DepartmentID || '').trim())
+    .filter(v => /^\d+$/.test(v));
+
+  return ids.length > 0 ? ids : [normalizedBaseDepartmentId];
+}
+
 exports.getDepartmentCalendarSubtasks = async (req, res) => {
   const pool = req.app.locals.db;
-  const { userId, limit, startDate, days, includePast } = req.query;
+  const { userId, limit, startDate, days, includePast, includeAllSubtasks } = req.query;
 
   if (!userId) {
     return res.status(400).json({ message: 'userId is required' });
   }
 
   try {
-    // الحصول على قسم المستخدم
-    const userRes = await pool.request()
-      .input('UserID', sql.NVarChar, userId)
-      .query('SELECT DepartmentID FROM Users WHERE UserID = @UserID');
+    const schemaProbe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubAssignedToVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedTo') IS NOT NULL THEN 1 ELSE 0 END AS HasSubAssignedToUser
+    `);
+    const probe = schemaProbe.recordset[0] || {};
+    const usesVacancySchema = !!probe.HasSubAssignedToVacancy;
 
-    const userHasDept = !(userRes.recordset.length === 0 || userRes.recordset[0].DepartmentID == null);
-    const departmentId = userHasDept ? userRes.recordset[0].DepartmentID : null;
-    const safeLimit = Number.isInteger(parseInt(limit)) ? parseInt(limit) : 20;
+    const assignedCol = usesVacancySchema ? 'AssignedToVacancyID' : 'AssignedTo';
+    const hasLegacyAssignedCol = usesVacancySchema && !!probe.HasSubAssignedToUser;
+    const identityTable = usesVacancySchema ? 'JobVacancies' : 'Users';
+    const identityKey = usesVacancySchema ? 'VacancyID' : 'UserID';
+    const identityName = usesVacancySchema ? 'Name' : 'FullName';
+
+    // الحصول على قسم المستخدم ومعرّف الهوية التشغيلي الحالي
+    const profileProbe = await pool.request().query(`
+      SELECT
+        CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+        CASE WHEN COL_LENGTH('dbo.Users', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasUsersDepartmentID,
+        CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+        CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
+    `);
+    const pp = profileProbe.recordset[0] || {};
+
+    let profileRes = { recordset: [] };
+    if (pp.HasProfileView) {
+      const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+      if (pp.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+      if (pp.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+
+      profileRes = await pool.request()
+        .input('LoginID', sql.NVarChar, String(userId).trim())
+        .query(`
+          SELECT TOP 1
+            p.DepartmentID AS ProfileDepartmentID,
+            ${pp.HasUsersDepartmentID ? 'u.DepartmentID AS UserDepartmentID,' : 'CAST(NULL as int) AS UserDepartmentID,'}
+            p.VacancyID,
+            u.UserID
+          FROM dbo.Users u
+          LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
+          WHERE (${whereParts.join(' OR ')})
+             OR (TRY_CAST(@LoginID AS INT) IS NOT NULL AND p.VacancyID = TRY_CAST(@LoginID AS INT))
+        `);
+    }
+
+    const currentProfile = profileRes.recordset[0] || null;
+    const currentLegacyUserId = currentProfile && currentProfile.UserID != null
+      ? String(currentProfile.UserID).trim()
+      : String(userId).trim();
+
+    const toNumericDepartmentId = (value) => {
+      const text = String(value ?? '').trim();
+      if (!/^\d+$/.test(text)) return null;
+      const parsed = parseInt(text, 10);
+      return Number.isInteger(parsed) ? parsed : null;
+    };
+
+    let resolvedVacancyId = currentProfile && currentProfile.VacancyID != null
+      ? String(currentProfile.VacancyID).trim()
+      : '';
+    let resolvedDepartmentId = currentProfile
+      ? (toNumericDepartmentId(currentProfile.ProfileDepartmentID) ?? toNumericDepartmentId(currentProfile.UserDepartmentID))
+      : null;
+
+    if (usesVacancySchema && (!resolvedVacancyId || resolvedDepartmentId == null)) {
+      const assignmentIdentity = await pool.request().query(`
+        SELECT
+          CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
+          CASE WHEN COL_LENGTH('dbo.JobVacancies', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDepartmentID
+      `);
+      const ai = assignmentIdentity.recordset[0] || {};
+
+      if (ai.HasAssignmentsTable) {
+        const assignmentRes = await pool.request()
+          .input('UserID', sql.NVarChar, currentLegacyUserId)
+          .query(`
+            SELECT TOP 1
+              a.VacancyID,
+              ${ai.HasVacancyDepartmentID ? 'jv.DepartmentID' : 'CAST(NULL as int) as DepartmentID'}
+            FROM dbo.Assignments a
+            ${ai.HasVacancyDepartmentID ? 'LEFT JOIN dbo.JobVacancies jv ON jv.VacancyID = a.VacancyID' : ''}
+            WHERE a.UserID = @UserID
+              AND a.VacancyID IS NOT NULL
+            ORDER BY
+              CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,
+              ISNULL(a.StartDate, '1900-01-01') DESC,
+              a.AssignmentID DESC
+          `);
+
+        const assignmentRow = assignmentRes.recordset[0] || null;
+        if (assignmentRow) {
+          if (!resolvedVacancyId && assignmentRow.VacancyID != null) {
+            resolvedVacancyId = String(assignmentRow.VacancyID).trim();
+          }
+          if (resolvedDepartmentId == null && assignmentRow.DepartmentID != null) {
+            resolvedDepartmentId = toNumericDepartmentId(assignmentRow.DepartmentID);
+          }
+        }
+      }
+    }
+
+    const currentActorIdRaw = usesVacancySchema
+      ? (resolvedVacancyId || currentLegacyUserId || String(userId).trim())
+      : (currentLegacyUserId || String(userId).trim());
+    const currentActorId = currentActorIdRaw != null ? String(currentActorIdRaw).trim() : null;
+    const actorMatchCondition = hasLegacyAssignedCol
+      ? `(s.${assignedCol} = @ActorID OR (s.${assignedCol} IS NULL AND LTRIM(RTRIM(CAST(s.AssignedTo AS NVARCHAR(255)))) = @LegacyUserID))`
+      : `s.${assignedCol} = @ActorID`;
+    const legacyUserJoinParts = [`LTRIM(RTRIM(CAST(s.AssignedTo AS NVARCHAR(255)))) = LTRIM(RTRIM(legacyUser.UserID))`];
+    if (pp.HasLegacyUserID) legacyUserJoinParts.push(`LTRIM(RTRIM(CAST(s.AssignedTo AS NVARCHAR(255)))) = LTRIM(RTRIM(legacyUser.LegacyUserID))`);
+    if (pp.HasServiceID) legacyUserJoinParts.push(`LTRIM(RTRIM(CAST(s.AssignedTo AS NVARCHAR(255)))) = LTRIM(RTRIM(legacyUser.ServiceID))`);
+    const assignedNameSelect = hasLegacyAssignedCol
+      ? (pp.HasProfileView
+        ? `COALESCE(u.${identityName}, legacyVac.Name, legacyUser.FullName) as AssignedToName`
+        : `COALESCE(u.${identityName}, legacyUser.FullName) as AssignedToName`)
+      : `u.${identityName} as AssignedToName`;
+    const assignedNameJoins = hasLegacyAssignedCol
+      ? (pp.HasProfileView
+        ? `
+          LEFT JOIN dbo.Users legacyUser ON s.${assignedCol} IS NULL AND (${legacyUserJoinParts.join(' OR ')})
+          LEFT JOIN dbo.vw_UserCurrentProfile legacyProfile ON legacyUser.UserID = legacyProfile.UserID
+          LEFT JOIN dbo.JobVacancies legacyVac ON legacyProfile.VacancyID = legacyVac.VacancyID`
+        : `
+          LEFT JOIN dbo.Users legacyUser ON s.${assignedCol} IS NULL AND (${legacyUserJoinParts.join(' OR ')})`)
+      : '';
+
+    let fallbackDepartmentId = null;
+    if (resolvedDepartmentId == null && usesVacancySchema) {
+      const vacancyDeptRes = await pool.request()
+        .input('VacancyID', sql.Int, parseInt(String(resolvedVacancyId || userId), 10))
+        .query(`
+          SELECT TOP 1 DepartmentID
+          FROM dbo.JobVacancies
+          WHERE VacancyID = @VacancyID
+        `);
+      if (vacancyDeptRes.recordset[0] && vacancyDeptRes.recordset[0].DepartmentID != null) {
+        fallbackDepartmentId = vacancyDeptRes.recordset[0].DepartmentID;
+      }
+    }
+
+    const userHasDept = !!(resolvedDepartmentId != null || fallbackDepartmentId != null);
+    const departmentId = resolvedDepartmentId != null
+      ? resolvedDepartmentId
+      : fallbackDepartmentId;
+    const parsedLimit = Number.isInteger(parseInt(limit)) ? parseInt(limit) : 20;
+    const safeLimit = Math.min(Math.max(parsedLimit, 1), 500);
     const includePastFlag = typeof includePast === 'string' && includePast.toLowerCase() === 'true';
+    const includeAllFlag = typeof includeAllSubtasks === 'string' && includeAllSubtasks.toLowerCase() === 'true';
 
     let useRange = false;
     let startDateParam = null;
@@ -53,7 +257,16 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
     // بناء استعلام حسب القسم إن وجد، وإلا السقوط الاحتياطي لعناصر المستخدم نفسه
     let items = [];
     if (userHasDept) {
-      const request = pool.request().input('DepartmentID', sql.Int, departmentId);
+      const scopeDepartmentIds = await resolveDirectorateScopeByDepartment(pool, departmentId);
+      const scopeParams = scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ');
+      const departmentScopeCondition = scopeDepartmentIds.length > 0
+        ? `t.DepartmentID IN (${scopeParams})`
+        : `t.DepartmentID = @DepartmentID`;
+
+      const request = pool.request().input('DepartmentID', sql.NVarChar, String(departmentId || '').trim()).input('Limit', sql.Int, safeLimit).input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0);
+      scopeDepartmentIds.forEach((deptId, index) => {
+        request.input(`ScopeDepartmentID${index}`, sql.NVarChar, deptId);
+      });
       let query;
       if (useRange) {
         request.input('StartDate', sql.Date, startDateParam)
@@ -66,38 +279,40 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             s.DueDate,
             t.Title as TaskTitle,
             t.DepartmentID,
-            s.AssignedTo,
-            u.FullName as AssignedToName
+            s.${assignedCol} as AssignedToID,
+            ${assignedNameSelect}
           FROM Subtasks s
           INNER JOIN Tasks t ON s.TaskID = t.TaskID
-          LEFT JOIN Users u ON s.AssignedTo = u.UserID
-          WHERE s.ShowInCalendar = 1
+          LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey}
+          ${assignedNameJoins}
+          WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
             AND s.IsCompleted = 0
             AND s.DueDate IS NOT NULL
             AND CAST(s.DueDate AS DATE) >= @StartDate
             AND CAST(s.DueDate AS DATE) < @EndDate
-            AND t.DepartmentID = @DepartmentID
+            AND ${departmentScopeCondition}
           ORDER BY s.DueDate ASC
         `;
       } else {
         query = `
-          SELECT TOP(${safeLimit})
+          SELECT TOP(@Limit)
             s.SubtaskID,
             s.TaskID,
             s.Title as SubtaskTitle,
             s.DueDate,
             t.Title as TaskTitle,
             t.DepartmentID,
-            s.AssignedTo,
-            u.FullName as AssignedToName
+            s.${assignedCol} as AssignedToID,
+            ${assignedNameSelect}
           FROM Subtasks s
           INNER JOIN Tasks t ON s.TaskID = t.TaskID
-          LEFT JOIN Users u ON s.AssignedTo = u.UserID
-          WHERE s.ShowInCalendar = 1
+          LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey}
+          ${assignedNameJoins}
+          WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
             AND s.IsCompleted = 0
             AND s.DueDate IS NOT NULL
             AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
-            AND t.DepartmentID = @DepartmentID
+            AND ${departmentScopeCondition}
           ORDER BY s.DueDate ASC
         `;
       }
@@ -107,7 +322,17 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
 
       // إذا لم نجد عناصر للقسم، نسقط تلقائياً لعناصر المستخدم نفسه
       if (!items || items.length === 0) {
-        const fallbackReq = pool.request().input('UserID', sql.NVarChar, userId);
+        if (currentActorId == null) {
+          return res.status(200).json([]);
+        }
+
+        const fallbackReq = pool.request()
+          .input('ActorID', sql.NVarChar, currentActorId)
+          .input('Limit', sql.Int, safeLimit)
+          .input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0);
+        if (hasLegacyAssignedCol) {
+          fallbackReq.input('LegacyUserID', sql.NVarChar, currentLegacyUserId);
+        }
         if (useRange) {
           fallbackReq.input('StartDate', sql.Date, startDateParam)
                      .input('EndDate', sql.Date, endDateParam);
@@ -120,36 +345,38 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             s.DueDate,
             t.Title as TaskTitle,
             t.DepartmentID,
-            s.AssignedTo,
-            u.FullName as AssignedToName
+            s.${assignedCol} as AssignedToID,
+            ${assignedNameSelect}
           FROM Subtasks s
           INNER JOIN Tasks t ON s.TaskID = t.TaskID
-          LEFT JOIN Users u ON s.AssignedTo = u.UserID
-          WHERE s.ShowInCalendar = 1
+          LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey}
+          ${assignedNameJoins}
+          WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
             AND s.IsCompleted = 0
             AND s.DueDate IS NOT NULL
             AND CAST(s.DueDate AS DATE) >= @StartDate
             AND CAST(s.DueDate AS DATE) < @EndDate
-            AND s.AssignedTo = @UserID
+            AND ${actorMatchCondition}
           ORDER BY s.DueDate ASC
         ` : `
-          SELECT TOP(${safeLimit})
+          SELECT TOP(@Limit)
             s.SubtaskID,
             s.TaskID,
             s.Title as SubtaskTitle,
             s.DueDate,
             t.Title as TaskTitle,
             t.DepartmentID,
-            s.AssignedTo,
-            u.FullName as AssignedToName
+            s.${assignedCol} as AssignedToID,
+            ${assignedNameSelect}
           FROM Subtasks s
           INNER JOIN Tasks t ON s.TaskID = t.TaskID
-          LEFT JOIN Users u ON s.AssignedTo = u.UserID
-          WHERE s.ShowInCalendar = 1
+          LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey}
+          ${assignedNameJoins}
+          WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
             AND s.IsCompleted = 0
             AND s.DueDate IS NOT NULL
             AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
-            AND s.AssignedTo = @UserID
+            AND ${actorMatchCondition}
           ORDER BY s.DueDate ASC
         `;
         const fbResult = await fallbackReq.query(fallbackQuery);
@@ -157,7 +384,17 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
       }
     } else {
       // لا يوجد قسم للمستخدم، نرجع عناصر المستخدم نفسه مباشرةً
-      const request = pool.request().input('UserID', sql.NVarChar, userId);
+      if (currentActorId == null) {
+        return res.status(200).json([]);
+      }
+
+      const request = pool.request()
+        .input('ActorID', sql.NVarChar, currentActorId)
+        .input('Limit', sql.Int, safeLimit)
+        .input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0);
+      if (hasLegacyAssignedCol) {
+        request.input('LegacyUserID', sql.NVarChar, currentLegacyUserId);
+      }
       if (useRange) {
         request.input('StartDate', sql.Date, startDateParam)
                .input('EndDate', sql.Date, endDateParam);
@@ -170,36 +407,38 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           s.DueDate,
           t.Title as TaskTitle,
           t.DepartmentID,
-          s.AssignedTo,
-          u.FullName as AssignedToName
+          s.${assignedCol} as AssignedToID,
+          ${assignedNameSelect}
         FROM Subtasks s
         INNER JOIN Tasks t ON s.TaskID = t.TaskID
-        LEFT JOIN Users u ON s.AssignedTo = u.UserID
-        WHERE s.ShowInCalendar = 1
+        LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey}
+        ${assignedNameJoins}
+        WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
           AND s.IsCompleted = 0
           AND s.DueDate IS NOT NULL
           AND CAST(s.DueDate AS DATE) >= @StartDate
           AND CAST(s.DueDate AS DATE) < @EndDate
-          AND s.AssignedTo = @UserID
+          AND ${actorMatchCondition}
         ORDER BY s.DueDate ASC
       ` : `
-        SELECT TOP(${safeLimit})
+        SELECT TOP(@Limit)
           s.SubtaskID,
           s.TaskID,
           s.Title as SubtaskTitle,
           s.DueDate,
           t.Title as TaskTitle,
           t.DepartmentID,
-          s.AssignedTo,
-          u.FullName as AssignedToName
+          s.${assignedCol} as AssignedToID,
+          ${assignedNameSelect}
         FROM Subtasks s
         INNER JOIN Tasks t ON s.TaskID = t.TaskID
-        LEFT JOIN Users u ON s.AssignedTo = u.UserID
-        WHERE s.ShowInCalendar = 1
+        LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey}
+        ${assignedNameJoins}
+        WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
           AND s.IsCompleted = 0
           AND s.DueDate IS NOT NULL
           AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
-          AND s.AssignedTo = @UserID
+          AND ${actorMatchCondition}
         ORDER BY s.DueDate ASC
       `;
       const result = await request.query(query);
@@ -425,6 +664,64 @@ exports.getCalendarComments = async (req, res) => {
   }
 
   try {
+    const schemaProbe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+        CASE WHEN COL_LENGTH('dbo.Comments', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser
+    `);
+    const probe = schemaProbe.recordset[0] || {};
+    const usesVacancySchema = !!probe.HasCommentedByVacancy;
+    const commentActorCol = usesVacancySchema ? 'CommentedByVacancyID' : 'UserID';
+    const hasLegacyCommentedByUser = usesVacancySchema && !!probe.HasCommentedByUser;
+
+    let actorId = userId;
+    let legacyUserId = String(userId).trim();
+    if (usesVacancySchema) {
+      const profileProbe = await pool.request().query(`
+        SELECT
+          CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+          CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+          CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
+      `);
+      const pp = profileProbe.recordset[0] || {};
+
+      if (pp.HasProfileView) {
+        const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+        if (pp.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+        if (pp.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+
+        const profileRes = await pool.request()
+          .input('LoginID', sql.NVarChar, String(userId).trim())
+          .query(`
+            SELECT TOP 1 p.VacancyID, u.UserID
+            FROM dbo.Users u
+            LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
+            WHERE ${whereParts.join(' OR ')}
+          `);
+
+        if (profileRes.recordset[0]) {
+          actorId = profileRes.recordset[0].VacancyID;
+          if (profileRes.recordset[0].UserID != null) {
+            legacyUserId = String(profileRes.recordset[0].UserID).trim();
+          }
+        } else {
+          actorId = null;
+        }
+      } else {
+        actorId = null;
+      }
+
+      if (actorId == null) {
+        return res.status(200).json([]);
+      }
+    }
+
+    const normalizedActorId = actorId == null ? '' : String(actorId).trim();
+    const normalizedLegacyUserId = legacyUserId;
+    if (!normalizedActorId) {
+      return res.status(200).json([]);
+    }
+
     let useRange = false;
     let startDateParam = null;
     let endDateParam = null;
@@ -455,8 +752,14 @@ exports.getCalendarComments = async (req, res) => {
 
     const includeAllFlag = typeof includeAllComments === 'string' && includeAllComments.toLowerCase() === 'true';
     const request = pool.request()
-      .input('UserID', sql.NVarChar, userId)
+      .input('ActorID', sql.NVarChar, normalizedActorId)
       .input('IncludeAllComments', sql.Bit, includeAllFlag ? 1 : 0);
+    if (hasLegacyCommentedByUser) {
+      request.input('LegacyUserID', sql.NVarChar, normalizedLegacyUserId);
+    }
+    const commentActorMatch = hasLegacyCommentedByUser
+      ? `(c.${commentActorCol} = @ActorID OR (c.${commentActorCol} IS NULL AND LTRIM(RTRIM(CAST(c.UserID AS NVARCHAR(255)))) = @LegacyUserID))`
+      : `c.${commentActorCol} = @ActorID`;
     let query;
     if (useRange) {
       request.input('StartDate', sql.Date, startDateParam).input('EndDate', sql.Date, endDateParam);
@@ -464,14 +767,14 @@ exports.getCalendarComments = async (req, res) => {
         SELECT
           c.CommentID,
           c.TaskID,
-          c.UserID,
+          c.${commentActorCol} as UserID,
           c.Content,
           c.CreatedAt,
           t.Title as TaskTitle
         FROM Comments c
         INNER JOIN Tasks t ON c.TaskID = t.TaskID
         WHERE (@IncludeAllComments = 1 OR c.ShowInCalendar = 1)
-          AND c.UserID = @UserID
+          AND ${commentActorMatch}
           AND CAST(c.CreatedAt AS DATE) >= @StartDate
           AND CAST(c.CreatedAt AS DATE) < @EndDate
         ORDER BY c.CreatedAt ASC, c.CommentID ASC
@@ -481,14 +784,14 @@ exports.getCalendarComments = async (req, res) => {
         SELECT
           c.CommentID,
           c.TaskID,
-          c.UserID,
+          c.${commentActorCol} as UserID,
           c.Content,
           c.CreatedAt,
           t.Title as TaskTitle
         FROM Comments c
         INNER JOIN Tasks t ON c.TaskID = t.TaskID
         WHERE (@IncludeAllComments = 1 OR c.ShowInCalendar = 1)
-          AND c.UserID = @UserID
+          AND ${commentActorMatch}
           AND CAST(c.CreatedAt AS DATE) >= CAST(GETDATE() AS DATE)
         ORDER BY c.CreatedAt ASC, c.CommentID ASC
       `;

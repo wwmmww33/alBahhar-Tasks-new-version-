@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, type ReactNode } from 'react';
+import React, { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 
 interface NotificationContextType {
   viewedTasks: Set<number>;
@@ -30,39 +30,39 @@ export const NotificationProvider: React.FC<NotificationProviderProps> = ({ chil
   const [refreshTasksFn, setRefreshTasksFn] = useState<(() => void) | null>(null);
   const [refreshNotificationsFn, setRefreshNotificationsFn] = useState<(() => void) | null>(null);
 
-  const markTaskAsViewed = (taskId: number) => {
+  const markTaskAsViewed = useCallback((taskId: number) => {
     setViewedTasks(prev => new Set([...prev, taskId]));
-  };
+  }, []);
 
-  const isTaskViewed = (taskId: number) => {
+  const isTaskViewed = useCallback((taskId: number) => {
     return viewedTasks.has(taskId);
-  };
+  }, [viewedTasks]);
 
-  const clearViewedTasks = () => {
+  const clearViewedTasks = useCallback(() => {
     setViewedTasks(new Set());
-  };
+  }, []);
 
-  const refreshTasks = () => {
+  const refreshTasks = useCallback(() => {
     if (refreshTasksFn) {
       refreshTasksFn();
     }
-  };
+  }, [refreshTasksFn]);
 
-  const setRefreshTasks = (refreshFn: () => void) => {
+  const setRefreshTasks = useCallback((refreshFn: () => void) => {
     setRefreshTasksFn(() => refreshFn);
-  };
+  }, []);
 
-  const refreshNotifications = () => {
+  const refreshNotifications = useCallback(() => {
     if (refreshNotificationsFn) {
       refreshNotificationsFn();
     }
-  };
+  }, [refreshNotificationsFn]);
 
-  const setRefreshNotifications = (refreshFn: () => void) => {
+  const setRefreshNotifications = useCallback((refreshFn: () => void) => {
     setRefreshNotificationsFn(() => refreshFn);
-  };
+  }, []);
 
-  const value: NotificationContextType = {
+  const value: NotificationContextType = useMemo(() => ({
     viewedTasks,
     markTaskAsViewed,
     isTaskViewed,
@@ -71,7 +71,16 @@ export const NotificationProvider: React.FC<NotificationProviderProps> = ({ chil
     setRefreshTasks,
     refreshNotifications,
     setRefreshNotifications
-  };
+  }), [
+    viewedTasks,
+    markTaskAsViewed,
+    isTaskViewed,
+    clearViewedTasks,
+    refreshTasks,
+    setRefreshTasks,
+    refreshNotifications,
+    setRefreshNotifications
+  ]);
 
   return (
     <NotificationContext.Provider value={value}>

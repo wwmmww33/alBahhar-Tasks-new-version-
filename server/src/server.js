@@ -60,7 +60,8 @@ const {
   ensureTaskDelegationsTable,
   ensureTaskDelegationPermissionsTable,
   ensureCheckTaskDelegationPermissionFunction,
-  ensureTaskUrlColumn
+  ensureTaskUrlColumn,
+  ensureTaskQueryPerformanceIndexes
 } = require('./utils/dbMigrations');
 
 
@@ -131,6 +132,13 @@ const startServer = async () => {
       await ensureTaskUrlColumn(pool);
     } catch (urlMigrationErr) {
       console.error('⚠️ Database migration (Tasks.URL) failed. Server continues running.', urlMigrationErr);
+    }
+
+    // --- فهارس أداء للاستعلامات الثقيلة ---
+    try {
+      await ensureTaskQueryPerformanceIndexes(pool);
+    } catch (perfIndexErr) {
+      console.error('⚠️ Database migration (Performance Indexes) failed. Server continues running.', perfIndexErr);
     }
     
     app.listen(port, '0.0.0.0', () => {

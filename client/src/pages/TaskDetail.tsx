@@ -4,9 +4,10 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import UnifiedTimeline from '../components/UnifiedTimeline';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, User, Category, Task, Comment } from '../types';
-import { Trash2, ExternalLink } from 'lucide-react';
+import { Trash2, ExternalLink, Copy, Check } from 'lucide-react';
 import { getApiUrl } from '../config/api';
 import { getActiveUserId } from '../utils/activeAccount';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 
 type TaskDetailProps = { currentUser: CurrentUser; };
 
@@ -36,11 +37,27 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState<string>('');
   const [isUpdatingTitle, setIsUpdatingTitle] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+  const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
+
+  const taskCreatorId = (t: Task | null) => String((t as any)?.CreatedByVacancyID ?? t?.CreatedBy ?? '');
+  const taskAssigneeId = (t: Task | null) => String((t as any)?.AssignedToVacancyID ?? (t as any)?.AssignedTo ?? '');
+  const subtaskAssigneeId = (st: Subtask) => String((st as any)?.AssignedToVacancyID ?? (st as any)?.AssignedTo ?? '');
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy text: ', err);
+    }
+  };
 
   const fetchAllDetails = useCallback(async () => {
     if (!taskId) return;
     try {
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const taskRes = await fetch(getApiUrl(`tasks/${taskId}?userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}`));
       if (!taskRes.ok) {
         if (taskRes.status === 403) {
@@ -67,10 +84,11 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
       }
 
       if (taskData) {
-        const [subtasksRes, commentsRes, usersRes] = await Promise.all([
+        const [subtasksRes, commentsRes, usersRes, categoriesRes] = await Promise.all([
           fetch(getApiUrl(`tasks/${taskId}/subtasks?userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}`)),
           fetch(getApiUrl(`tasks/${taskId}/comments?userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}`)),
-          fetch(getApiUrl(`tasks/department/${taskData.DepartmentID}/users`))
+          fetch(getApiUrl(`tasks/department/${taskData.DepartmentID}/users`)),
+          fetch(getApiUrl(`categories/department/${taskData.DepartmentID}`))
         ]);
         
         // التحقق من صلاحية الوصول للمهام الفرعية
@@ -84,35 +102,29 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
           setError('ليس لديك صلاحية لعرض التعليقات لهذه المهمة.');
           return;
         }
-        
-        const subtasksData = await subtasksRes.json();
-        const commentsData = await commentsRes.json();
-        const usersData = await usersRes.json();
-        setSubtasks(subtasksData);
-        setComments(commentsData);
-        setUsersInDepartment(usersData);
+
+        const subtasksData = await subtasksRes.json().catch(() => []);
+        const commentsData = await commentsRes.json().catch(() => []);
+        const usersData = usersRes.ok
+          ? await usersRes.json().catch(() => [])
+          : [];
+        const categoriesData = categoriesRes.ok
+          ? await categoriesRes.json().catch(() => [])
+          : [];
+        setSubtasks(Array.isArray(subtasksData) ? subtasksData : []);
+        setComments(Array.isArray(commentsData) ? commentsData : []);
+        setUsersInDepartment(Array.isArray(usersData) ? usersData : []);
+        setCategories(Array.isArray(categoriesData) ? categoriesData : []);
       }
     } catch (err: any) { setError(err.message); } 
     finally { setIsLoading(false); }
-  }, [taskId, currentUser.UserID, currentUser.IsAdmin]);
-
-  const fetchCategories = useCallback(async () => {
-    try {
-      const response = await fetch(getApiUrl(`categories/department/${currentUser.DepartmentID}`));
-      if (response.ok) {
-        const data = await response.json();
-        setCategories(data.Categories || data);
-      }
-    } catch (error) {
-      console.error('Error fetching categories:', error);
-    }
-  }, [currentUser.DepartmentID]);
+  }, [taskId, actorId, currentUser.IsAdmin]);
 
   const handleUpdateTaskCategory = async (categoryId: number | null) => {
     if (!task || isUpdatingCategory) return;
     setIsUpdatingCategory(true);
     try {
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const response = await fetch(getApiUrl(`tasks/${task.TaskID}/category`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -143,7 +155,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     if (!task || isUpdatingURL) return;
     setIsUpdatingURL(true);
     try {
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const response = await fetch(getApiUrl(`tasks/${task.TaskID}/url`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -173,7 +185,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     if (!task || isUpdatingDescription) return;
     setIsUpdatingDescription(true);
     try {
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const response = await fetch(getApiUrl(`tasks/${task.TaskID}/url`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -208,7 +220,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     }
     setIsUpdatingTitle(true);
     try {
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const response = await fetch(getApiUrl(`tasks/${task.TaskID}/title`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -235,14 +247,13 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
 
   useEffect(() => { 
     fetchAllDetails();
-    fetchCategories();
     updateTaskView();
-  }, [fetchAllDetails, fetchCategories]);
+  }, [fetchAllDetails]);
 
   const updateTaskView = async () => {
     if (!taskId) return;
     try {
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       await fetch(getApiUrl(`tasks/${taskId}/view`), {
         method: 'PUT',
         headers: {
@@ -275,8 +286,8 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         
         const requestBody: any = {
             TaskID: taskId,
-            UserID: getActiveUserId(currentUser.UserID),
-            ActedBy: currentUser.UserID,
+            UserID: actorId,
+          ActedBy: actorId,
             Content: content,
             ShowInCalendar: showInCalendar
         };
@@ -326,7 +337,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          userId: getActiveUserId(currentUser.UserID),
+          userId: actorId,
           isAdmin: currentUser.IsAdmin
         })
       });
@@ -350,13 +361,12 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   if (error) return <p className="text-center p-8 text-red-500">حدث خطأ: {error}</p>;
   if (!task) return <p className="text-center p-8">لم يتم العثور على المهمة.</p>;
 
-  const actingUserId = getActiveUserId(currentUser.UserID);
+  const actingUserId = actorId;
   
   // التحقق من صلاحية التعديل (المنشئ، المدير، أو المسند إليهم)
-  const isAssignee = task.AssignedTo === actingUserId || subtasks.some(st => st.AssignedTo === actingUserId);
-  const canCloseTask = actingUserId === task.CreatedBy || currentUser.IsAdmin;
-  const canEditTaskDetails = canCloseTask || isAssignee;
-  const canDeleteTask = actingUserId === task.CreatedBy;
+  const canCloseTask = actingUserId === taskCreatorId(task) || currentUser.IsAdmin;
+  const canEditTaskDetails = true;
+  const canDeleteTask = actingUserId === taskCreatorId(task);
 
   return (
     <div className="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-md max-w-4xl mx-auto">
@@ -523,15 +533,25 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             ) : (
               <div className="flex items-center gap-2">
                 {(task as any)?.URL ? (
-                  <a
-                    href={(task as any).URL}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary hover:underline flex items-center gap-1 text-sm"
-                  >
-                    <ExternalLink size={14} />
-                    فتح الرابط
-                  </a>
+                  <div className="flex items-center gap-2">
+                    <a
+                      href={(task as any).URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary hover:underline flex items-center gap-1 text-sm"
+                    >
+                      <ExternalLink size={14} />
+                      فتح الرابط
+                    </a>
+                    <button
+                      onClick={() => copyToClipboard((task as any).URL)}
+                      className="text-primary hover:underline flex items-center gap-1 text-sm"
+                      title={isCopied ? "تم النسخ" : "نسخ الرابط"}
+                    >
+                      {isCopied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
+                      <span>{isCopied ? "تم النسخ" : "نسخ الرابط"}</span>
+                    </button>
+                  </div>
                 ) : (
                   <span className="text-content-secondary italic">لا يوجد رابط</span>
                 )}
@@ -711,3 +731,4 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   );
 };
 export default TaskDetail;
+

@@ -6,6 +6,7 @@ import { useTheme } from '../contexts/ThemeProvider';
 import UnifiedNotifications from './UnifiedNotifications';
 import type { CurrentUser } from '../types';
 import { getActiveAccount, getActiveUserId, clearActiveAccount } from '../utils/activeAccount';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 
 type NavbarProps = {
   currentUser: CurrentUser;
@@ -80,7 +81,7 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
         </select>
         
         <UnifiedNotifications 
-          userId={getActiveUserId(currentUser.UserID)} 
+          userId={getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID)} 
           onNotificationClick={handleNotificationClick}
         />
         
@@ -102,7 +103,7 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
                   return (
                     <div className="px-3 py-1 rounded-md bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 text-xs flex items-center gap-2">
                       <span>تعمل الآن نيابةً عن:</span>
-                      <span className="font-semibold">{acc.userName || acc.userId}</span>
+                      <span className="font-semibold">{acc.actorName || acc.userName || acc.actorId || acc.userId}</span>
                       <button
                         onClick={() => { clearActiveAccount(); window.location.reload(); }}
                         className="ml-2 underline hover:no-underline"

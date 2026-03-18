@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import type { Category, CategoryInformation, CurrentUser } from '../types';
 import { getApiUrl } from '../config/api';
+import { getActiveUserId } from '../utils/activeAccount';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 import './CategoryInfo.css';
 
 // CSS styles for the component
@@ -120,6 +122,8 @@ type CategoryInfoProps = {
 const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
   const { categoryId } = useParams<{ categoryId: string }>();
   const [category, setCategory] = useState<Category | null>(null);
+  const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
+  const infoCreatorId = (info: CategoryInformation) => String((info as any).CreatedByVacancyID ?? info.CreatedBy ?? '');
   
   // السماح لأي مستخدم مسجل دخول بإضافة المعلومات
   const canAddInfo = !!currentUser;
@@ -184,7 +188,7 @@ const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
           title: '', // عنوان فارغ
           content: newInfo.content,
           orderIndex: newInfo.orderIndex,
-          createdBy: currentUser.UserID
+          createdBy: actorId
         }),
       });
 
@@ -194,7 +198,7 @@ const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
 
       const addedInfo = await response.json();
       const normalizedAdded = normalizeInfo(addedInfo);
-      const finalAdded = { ...normalizedAdded, CreatedBy: normalizedAdded.CreatedBy ?? currentUser.UserID };
+      const finalAdded = { ...normalizedAdded, CreatedBy: normalizedAdded.CreatedBy ?? actorId };
       setCategoryInfo(prev => [...prev, finalAdded].sort((a, b) => new Date(b.CreatedAt).getTime() - new Date(a.CreatedAt).getTime()));
       setNewInfo({ content: '', orderIndex: 0 });
       setShowAddForm(false);
@@ -446,7 +450,7 @@ const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
                 {categoryInfo.map((info, index) => (
                   <div key={info.InformationID} className="info-item">
                     <div className="info-item-header">
-                      {currentUser && info.CreatedBy === currentUser.UserID && (
+                      {currentUser && infoCreatorId(info) === actorId && (
                         <div className="info-actions">
                           <button 
                             onClick={() => startEditInfo(info)}

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Calendar as CalendarIcon } from 'lucide-react';
 import type { CurrentUser } from '../types';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 
 type CalendarItem = {
   SubtaskID: number;
@@ -27,6 +28,8 @@ type SidebarCalendarProps = {
 };
 
 const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
+  const actorId = resolveCurrentActorId(currentUser) || currentUser.UserID;
+  const personalUserId = currentUser.UserID;
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [extraItems, setExtraItems] = useState<CalendarItem[]>([]);
   type PersonalEventItem = { EventID: number; Title: string; EventDate: string };
@@ -88,7 +91,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
         return `${y}-${m}-${dd}`;
       };
       const startStr = toLocalYMD(start);
-      const res = await fetch(`/api/calendar/subtasks?userId=${currentUser.UserID}&startDate=${startStr}&days=30`);
+      const res = await fetch(`/api/calendar/subtasks?userId=${actorId}&startDate=${startStr}&days=30`);
       if (!res.ok) {
         throw new Error(`Calendar fetch failed: ${res.status}`);
       }
@@ -102,7 +105,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       setItems(Array.isArray(data) ? data : []);
 
       try {
-        const perRes = await fetch(`/api/calendar/personal-events?userId=${currentUser.UserID}&startDate=${startStr}&days=30`);
+        const perRes = await fetch(`/api/calendar/personal-events?userId=${personalUserId}&startDate=${startStr}&days=30`);
         if (perRes.ok) {
           const pct = perRes.headers.get('content-type') || '';
           const perData = pct.includes('application/json') ? await perRes.json() : [];
@@ -115,7 +118,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       }
 
       try {
-        const commentsRes = await fetch(`/api/calendar/comments?userId=${currentUser.UserID}&startDate=${startStr}&days=30`);
+        const commentsRes = await fetch(`/api/calendar/comments?userId=${actorId}&startDate=${startStr}&days=30`);
         if (commentsRes.ok) {
           const cct = commentsRes.headers.get('content-type') || '';
           const commentsData = cct.includes('application/json') ? await commentsRes.json() : [];
@@ -129,7 +132,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
 
       const gridEnd = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 30);
       const gridEndStr = toLocalYMD(gridEnd);
-      const extraRes = await fetch(`/api/calendar/subtasks?userId=${currentUser.UserID}&startDate=${gridEndStr}&days=365`);
+      const extraRes = await fetch(`/api/calendar/subtasks?userId=${actorId}&startDate=${gridEndStr}&days=365`);
       if (!extraRes.ok) {
         // عدم رمي الاستثناء هنا، فقط تجاهل العناصر الإضافية
         setExtraItems([]);
@@ -145,7 +148,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       }
 
       try {
-        const extraPerRes = await fetch(`/api/calendar/personal-events?userId=${currentUser.UserID}&startDate=${gridEndStr}&days=365`);
+        const extraPerRes = await fetch(`/api/calendar/personal-events?userId=${personalUserId}&startDate=${gridEndStr}&days=365`);
         if (extraPerRes.ok) {
           const epct = extraPerRes.headers.get('content-type') || '';
           const extraPerData = epct.includes('application/json') ? await extraPerRes.json() : [];
@@ -158,7 +161,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       }
 
       try {
-        const extraCommentsRes = await fetch(`/api/calendar/comments?userId=${currentUser.UserID}&startDate=${gridEndStr}&days=365`);
+        const extraCommentsRes = await fetch(`/api/calendar/comments?userId=${actorId}&startDate=${gridEndStr}&days=365`);
         if (extraCommentsRes.ok) {
           const ecct = extraCommentsRes.headers.get('content-type') || '';
           const extraCommentsData = ecct.includes('application/json') ? await extraCommentsRes.json() : [];
@@ -169,6 +172,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       } catch (_) {
         setExtraCommentEvents([]);
       }
+
     } catch (err) {
       setItems([]);
       setExtraItems([]);
@@ -183,18 +187,39 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
 
   useEffect(() => {
     fetchCalendarRange();
-  }, [currentUser.UserID]);
+  }, [actorId]);
 
   // تحديث فوري عند إنشاء مهمة فرعية جديدة أو طلب تحديث يدوي
   useEffect(() => {
     const handler = () => fetchCalendarRange();
+    const commentHandler = (event: Event) => {
+      const detail = (event as CustomEvent<{ CommentID?: number | string; ShowInCalendar?: boolean }>).detail;
+      const commentId = Number(detail?.CommentID);
+      const shouldShow = detail?.ShowInCalendar === true;
+
+      if (!Number.isFinite(commentId)) {
+        fetchCalendarRange();
+        return;
+      }
+
+      if (shouldShow) {
+        fetchCalendarRange();
+        return;
+      }
+
+      setCommentEvents((prev) => prev.filter((comment) => Number(comment.CommentID) !== commentId));
+      setExtraCommentEvents((prev) => prev.filter((comment) => Number(comment.CommentID) !== commentId));
+    };
+
     window.addEventListener('calendar:subtask:created', handler);
     window.addEventListener('calendar:refresh', handler);
+    window.addEventListener('calendar:comment:updated', commentHandler as EventListener);
     return () => {
       window.removeEventListener('calendar:subtask:created', handler);
       window.removeEventListener('calendar:refresh', handler);
+      window.removeEventListener('calendar:comment:updated', commentHandler as EventListener);
     };
-  }, [currentUser.UserID]);
+  }, [actorId]);
 
   const itemsByDay = useMemo(() => {
     const map: Record<string, CalendarItem[]> = {};
@@ -454,6 +479,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
               </ul>
             </div>
           )}
+
         </div>
       )}
     </aside>

@@ -76,7 +76,7 @@ function App() {
                         <Route path="/categories" element={<CategoryManagementPage currentUser={currentUser} />} />
                         <Route path="/categories/:categoryId" element={<CategoryInfo currentUser={currentUser} />} />
                         <Route path="/profile" element={<UserProfile currentUser={currentUser} onUserUpdate={handleUserUpdate} />} />
-                        <Route path="/delegations" element={<DelegationsPage currentUser={currentUser} />} />
+                        <Route path="/delegations" element={<DelegationsPage />} />
                         <Route path="/calendar" element={<CalendarPage currentUser={currentUser} />} />
                         {currentUser.IsAdmin && <Route path="/system-management" element={<SystemManagement />} />}
                         

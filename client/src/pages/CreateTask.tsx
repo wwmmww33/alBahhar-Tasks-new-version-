@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { CurrentUser } from '../types';
 import { getActiveUserId } from '../utils/activeAccount';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 import { getApiUrl } from '../config/api';
 
 // تعريف أنواع البيانات التي سنستخدمها
@@ -28,6 +29,7 @@ type CreateTaskProps = {
 
 const CreateTask = ({ currentUser }: CreateTaskProps) => {
   const navigate = useNavigate();
+  const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const getTodayString = () => new Date().toISOString().split('T')[0];
@@ -47,7 +49,7 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
       if (!currentUser) return;
       try {
         // جلب المهام الافتراضية
-        const proceduresResponse = await fetch(`/api/procedures?userId=${currentUser.UserID}&departmentId=${currentUser.DepartmentID}`);
+        const proceduresResponse = await fetch(`/api/procedures?userId=${actorId}&departmentId=${currentUser.DepartmentID}`);
         if (proceduresResponse.ok) {
           const proceduresData = await proceduresResponse.json();
           setProcedures(proceduresData);
@@ -66,7 +68,7 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
       }
     };
     fetchData();
-  }, [currentUser]);
+  }, [actorId, currentUser, currentUser.DepartmentID]);
 
   // دالة يتم استدعاؤها عند تغيير المهمة الافتراضية المختارة
   const handleProcedureChange = async (procedureId: string) => {
@@ -99,7 +101,7 @@ const handleSubmit = async (e: React.FormEvent) => {
   setIsSubmitting(true);
   setMessage(null);
 
-  const actingUserId = getActiveUserId(currentUser.UserID);
+  const actingUserId = actorId;
   const newTaskPayload = {
     Title: title,
     Description: description,
@@ -110,7 +112,7 @@ const handleSubmit = async (e: React.FormEvent) => {
     AssignedTo: actingUserId,
     subtasks: subtasks,
     CreatedBy: actingUserId,
-    ActedBy: currentUser.UserID,
+    ActedBy: actingUserId,
     CategoryID: selectedCategory ? parseInt(selectedCategory) : null,
   };
 

@@ -7,7 +7,9 @@ interface CommentNotification {
   CommentID: number;
   TaskID: number;
   CommentedByUserID: string;
+  CommentedByVacancyID?: number | string | null;
   NotifyUserID: string;
+  NotifyVacancyID?: number | string | null;
   NotificationType: string;
   IsRead: boolean;
   CreatedAt: string;
@@ -21,7 +23,9 @@ interface AssignmentNotification {
   NotificationID: number;
   TaskID: number;
   AssignedToUserID: string;
+  AssignedToVacancyID?: number | string | null;
   AssignedByUserID: string;
+  AssignedByVacancyID?: number | string | null;
   IsRead: boolean;
   CreatedAt: string;
   ReadAt?: string;
@@ -38,7 +42,7 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
   userId, 
   onNotificationClick 
 }) => {
-  const { refreshTasks } = useNotification();
+  const { refreshTasks, setRefreshNotifications } = useNotification();
   const [commentNotifications, setCommentNotifications] = useState<CommentNotification[]>([]);
   const [assignmentNotifications, setAssignmentNotifications] = useState<AssignmentNotification[]>([]);
   const [commentUnreadCount, setCommentUnreadCount] = useState(0);
@@ -245,16 +249,10 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
 
   // تسجيل دالة تحديث الإشعارات في السياق لتمكين التحديث الفوري من أماكن أخرى
   useEffect(() => {
-    try {
-      const { setRefreshNotifications } = useNotification();
-      setRefreshNotifications(async () => {
-        await updateNotificationCounts();
-      });
-    } catch (e) {
-      // التأكد من وجود السياق
-      console.warn('Notification context not available for setting refreshNotifications');
-    }
-  }, [updateNotificationCounts]);
+    setRefreshNotifications(async () => {
+      await updateNotificationCounts();
+    });
+  }, [setRefreshNotifications, updateNotificationCounts]);
 
   // تحديث عدادات الإشعارات فورًا وعند الفاصل الزمني المحدد
   useEffect(() => {

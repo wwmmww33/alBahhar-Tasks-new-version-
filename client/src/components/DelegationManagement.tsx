@@ -1,6 +1,7 @@
 // src/components/DelegationManagement.tsx
 import React, { useState, useEffect, useCallback } from 'react';
 import { Edit, Trash2, Plus, CheckCircle, XCircle } from 'lucide-react';
+import { resolveCurrentActorId, resolveUserActorId } from '../utils/actorIdentity';
 
 type User = {
   UserID: string;
@@ -45,7 +46,7 @@ const DelegationManagement = () => {
     setLoading(true);
     const storedUser = localStorage.getItem('albahar-user');
     const parsedUser = storedUser ? JSON.parse(storedUser) : null;
-    const userId = parsedUser?.UserID || '';
+    const userId = resolveCurrentActorId(parsedUser) || parsedUser?.UserID || '';
     const currentDept = parsedUser?.DepartmentName || null;
 
     try {
@@ -53,7 +54,7 @@ const DelegationManagement = () => {
       if (usersRes.ok) {
         const usersData = await usersRes.json();
         const filtered = usersData
-          .filter((user: User) => user.UserID !== userId)
+          .filter((user: User) => resolveUserActorId(user) !== userId)
           .filter((user: User) => !currentDept || user.DepartmentName === currentDept);
         setUsers(filtered);
       } else {
@@ -99,7 +100,7 @@ const DelegationManagement = () => {
       setLoading(true);
       const storedUser = localStorage.getItem('albahar-user');
       const parsedUser = storedUser ? JSON.parse(storedUser) : null;
-      const userId = parsedUser?.UserID || '';
+      const userId = resolveCurrentActorId(parsedUser) || parsedUser?.UserID || '';
       const response = await fetch('/api/delegations', {
         method: 'POST',
         headers: { 
@@ -120,7 +121,7 @@ const DelegationManagement = () => {
       if (createdDelegationId && newDelegation.DelegationPassword) {
         const storedUser2 = localStorage.getItem('albahar-user');
         const parsedUser2 = storedUser2 ? JSON.parse(storedUser2) : null;
-        const userId2 = parsedUser2?.UserID || '';
+        const userId2 = resolveCurrentActorId(parsedUser2) || parsedUser2?.UserID || '';
         try {
           await fetch(`/api/delegations/${createdDelegationId}/secret`, {
             method: 'PUT',
@@ -154,7 +155,7 @@ const DelegationManagement = () => {
       setLoading(true);
       const storedUser = localStorage.getItem('albahar-user');
       const parsedUser = storedUser ? JSON.parse(storedUser) : null;
-      const userId = parsedUser?.UserID || '';
+      const userId = resolveCurrentActorId(parsedUser) || parsedUser?.UserID || '';
       const response = await fetch(`/api/delegations/${editingDelegation.DelegationID}`, {
         method: 'PUT',
         headers: { 
@@ -190,7 +191,7 @@ const DelegationManagement = () => {
       setLoading(true);
       const storedUser = localStorage.getItem('albahar-user');
       const parsedUser = storedUser ? JSON.parse(storedUser) : null;
-      const userId = parsedUser?.UserID || '';
+      const userId = resolveCurrentActorId(parsedUser) || parsedUser?.UserID || '';
       const response = await fetch(`/api/delegations/${delegationId}`, {
         method: 'DELETE',
         headers: {
@@ -265,7 +266,7 @@ const DelegationManagement = () => {
               >
                 <option value="">-- اختر المستخدم --</option>
                 {users.map(user => (
-                  <option key={user.UserID} value={user.UserID}>
+                  <option key={resolveUserActorId(user) || user.UserID} value={resolveUserActorId(user) || user.UserID}>
                     {user.FullName} ({user.DepartmentName || 'بدون قسم'})
                   </option>
                 ))}

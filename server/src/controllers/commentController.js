@@ -1,17 +1,200 @@
 // src/controllers/commentController.js
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
-const { hasActiveDelegation } = require('../utils/delegationUtils');
+const { hasActiveDelegation, checkTaskAccess } = require('../utils/delegationUtils');
+
+async function resolveActorId(pool, rawUserId, prefersVacancy) {
+    const loginId = String(rawUserId || '').trim();
+    if (!loginId) return '';
+
+    const probe = await pool.request().query(`
+        SELECT
+          CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+          CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID,
+          CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+          CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable
+    `);
+
+    const p = probe.recordset[0] || {};
+    const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+    if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+    if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+    const whereClause = whereParts.join(' OR ');
+
+    if (prefersVacancy && p.HasProfileView) {
+        const mapped = await pool.request()
+            .input('LoginID', sql.NVarChar, loginId)
+            .query(`
+                SELECT TOP 1 u.UserID, p.VacancyID
+                FROM dbo.Users u
+                LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
+                WHERE ${whereClause}
+            `);
+
+        const row = mapped.recordset[0];
+        if (!row) return loginId;
+        if (row.VacancyID != null && String(row.VacancyID).trim() !== '') {
+            return String(row.VacancyID).trim();
+        }
+
+        if (p.HasAssignmentsTable) {
+            const latestAssignment = await pool.request()
+                .input('UserID', sql.NVarChar, String(row.UserID || loginId).trim())
+                .query(`
+                    SELECT TOP 1 VacancyID
+                    FROM dbo.Assignments
+                    WHERE UserID = @UserID
+                      AND VacancyID IS NOT NULL
+                    ORDER BY
+                      CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
+                      ISNULL(StartDate, '1900-01-01') DESC,
+                      AssignmentID DESC
+                `);
+            const fallbackVacancyId = latestAssignment.recordset[0]?.VacancyID;
+            if (fallbackVacancyId != null && String(fallbackVacancyId).trim() !== '') {
+                return String(fallbackVacancyId).trim();
+            }
+        }
+
+        return String(row.UserID || loginId).trim();
+    }
+
+    const mapped = await pool.request()
+        .input('LoginID', sql.NVarChar, loginId)
+        .query(`
+            SELECT TOP 1 u.UserID
+            FROM dbo.Users u
+            WHERE ${whereClause}
+        `);
+
+    return String(mapped.recordset[0]?.UserID || loginId).trim();
+}
+
+async function resolveActorCandidates(pool, rawUserId) {
+    const loginId = String(rawUserId || '').trim();
+    const candidates = new Set();
+    if (!loginId) return candidates;
+    candidates.add(loginId);
+
+    const probe = await pool.request().query(`
+        SELECT
+          CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+          CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID,
+            CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+            CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable
+    `);
+
+    const p = probe.recordset[0] || {};
+    const selectCols = ['u.UserID'];
+    if (p.HasLegacyUserID) selectCols.push('u.LegacyUserID');
+    if (p.HasServiceID) selectCols.push('u.ServiceID');
+    if (p.HasProfileView) selectCols.push('p.VacancyID');
+
+    const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+    if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+    if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+
+    const mapped = await pool.request()
+        .input('LoginID', sql.NVarChar, loginId)
+        .query(`
+            SELECT TOP 1 ${selectCols.join(', ')}
+            FROM dbo.Users u
+            ${p.HasProfileView ? 'LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID' : ''}
+            WHERE (${whereParts.join(' OR ')})
+              ${p.HasProfileView ? 'OR (TRY_CAST(@LoginID AS INT) IS NOT NULL AND p.VacancyID = TRY_CAST(@LoginID AS INT))' : ''}
+                            ${p.HasAssignmentsTable ? 'OR (TRY_CAST(@LoginID AS INT) IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.Assignments a WHERE a.UserID = u.UserID AND a.VacancyID = TRY_CAST(@LoginID AS INT)))' : ''}
+        `);
+
+    const row = mapped.recordset[0] || {};
+    for (const value of Object.values(row)) {
+        if (value != null && String(value).trim() !== '') {
+            candidates.add(String(value).trim());
+        }
+    }
+
+    const mappedUserId = row.UserID != null ? String(row.UserID).trim() : '';
+    if (p.HasAssignmentsTable && mappedUserId) {
+        const assignmentRows = await pool.request()
+            .input('UserID', sql.NVarChar, mappedUserId)
+            .query(`
+                SELECT TOP 5 VacancyID
+                FROM dbo.Assignments
+                WHERE UserID = @UserID
+                  AND VacancyID IS NOT NULL
+                ORDER BY
+                  CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
+                  ISNULL(StartDate, '1900-01-01') DESC,
+                  AssignmentID DESC
+            `);
+
+        for (const assignment of assignmentRows.recordset || []) {
+            if (assignment.VacancyID != null && String(assignment.VacancyID).trim() !== '') {
+                candidates.add(String(assignment.VacancyID).trim());
+            }
+        }
+    }
+
+    return candidates;
+}
+
+function hasCommentOwnership(existingComment, actorCandidates) {
+    if (!existingComment || !actorCandidates || actorCandidates.size === 0) return false;
+
+    const ownerFields = [
+        existingComment.UserID,
+        existingComment.CommentedByVacancyID,
+        existingComment.CommentedByUserID,
+        existingComment.ActedBy,
+        existingComment.LastActedByVacancyID,
+    ];
+
+    return ownerFields.some((value) => value != null && actorCandidates.has(String(value).trim()));
+}
 
 exports.createComment = async (req, res) => {
     const pool = req.app.locals.db;
-    const { TaskID, UserID, ActedBy, Content, CreatedAt, ShowInCalendar } = req.body;
+    const { TaskID, UserID, ActedBy, Content, CreatedAt, ShowInCalendar, isAdmin } = req.body;
 
     if (!TaskID || !UserID || !Content) {
         return res.status(400).json({ message: 'TaskID, UserID, and Content are required.' });
     }
 
     try {
+        const schemaProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentActedBy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentLastActedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentShowInCalendar,
+                CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy,
+                CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyUser,
+                CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifCommentedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'CommentedByUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifCommentedByUser,
+                CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskCreatedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskCreatedByUser
+        `);
+        const schema = schemaProbe.recordset[0] || {};
+        const commentActorCol = schema.HasCommentedByVacancy ? 'CommentedByVacancyID' : (schema.HasCommentedByUser ? 'UserID' : null);
+        if (!commentActorCol) {
+            return res.status(500).json({ message: 'No supported actor column found in Comments table.' });
+        }
+
+        const actorIdForRequest = String(UserID || '').trim();
+        if (!actorIdForRequest) {
+            return res.status(400).json({ message: 'Unable to resolve user identity for comment creation.' });
+        }
+
+        const actorIdForStorage = await resolveActorId(pool, actorIdForRequest, !!schema.HasCommentedByVacancy);
+        if (!actorIdForStorage) {
+            return res.status(400).json({ message: 'Unable to resolve actor for comment storage.' });
+        }
+
+        const accessCheck = await checkTaskAccess(pool, TaskID, actorIdForRequest, isAdmin === true || isAdmin === 'true', 'view');
+        if (!accessCheck.hasAccess) {
+            return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية إضافة تعليق على هذه المهمة.' });
+        }
+
         // استخدام التاريخ المخصص إذا تم تمريره، وإلا استخدام التوقيت الحالي
         const commentCreatedAt = CreatedAt ? new Date(CreatedAt) : new Date();
         
@@ -39,101 +222,89 @@ exports.createComment = async (req, res) => {
         }
 
         // إدراج التعليق بدون OUTPUT clause لتجنب تعارض مع trigger
-        await pool.request()
+        const insertRequest = pool.request()
             .input('TaskID', sql.Int, TaskID)
-            .input('UserID', sql.NVarChar, UserID)
-            .input('ActedBy', sql.NVarChar, actorUserId)
+            .input('ActorID', sql.NVarChar, actorIdForStorage)
             .input('Content', sql.NVarChar, encryptionConfig.encrypt(Content))
-            .input('CreatedAt', sql.DateTime, commentCreatedAt)
-            .input('ShowInCalendar', sql.Bit, ShowInCalendar ? 1 : 0)
-            .query(`
-                INSERT INTO Comments (TaskID, UserID, ActedBy, Content, CreatedAt, ShowInCalendar)
-                VALUES (@TaskID, @UserID, @ActedBy, @Content, @CreatedAt, @ShowInCalendar);
-            `);
+            .input('CreatedAt', sql.DateTime, commentCreatedAt);
+
+        const insertColumns = ['TaskID', commentActorCol, 'Content', 'CreatedAt'];
+        const insertValues = ['@TaskID', '@ActorID', '@Content', '@CreatedAt'];
+
+        if (schema.HasCommentActedBy) {
+            insertRequest.input('ActedBy', sql.NVarChar, actorUserId);
+            insertColumns.push('ActedBy');
+            insertValues.push('@ActedBy');
+        }
+
+        if (schema.HasCommentLastActedByVacancy) {
+            insertRequest.input('LastActedByVacancyID', sql.NVarChar, actorUserId || actorIdForStorage);
+            insertColumns.push('LastActedByVacancyID');
+            insertValues.push('@LastActedByVacancyID');
+        }
+
+        if (schema.HasCommentShowInCalendar) {
+            insertRequest.input('ShowInCalendar', sql.Bit, ShowInCalendar ? 1 : 0);
+            insertColumns.push('ShowInCalendar');
+            insertValues.push('@ShowInCalendar');
+        }
+
+        await insertRequest.query(`
+            INSERT INTO Comments (${insertColumns.join(', ')})
+            VALUES (${insertValues.join(', ')});
+        `);
         
         // جلب التعليق المضاف حديثاً
         const result = await pool.request()
             .input('TaskID2', sql.Int, TaskID)
-            .input('UserID2', sql.NVarChar, UserID)
+            .input('ActorID2', sql.NVarChar, actorIdForStorage)
             .input('CreatedAt2', sql.DateTime, commentCreatedAt)
             .query(`
                 SELECT TOP 1 * FROM Comments 
-                WHERE TaskID = @TaskID2 AND UserID = @UserID2 AND CreatedAt = @CreatedAt2
+                WHERE TaskID = @TaskID2 AND ${commentActorCol} = @ActorID2 AND CreatedAt = @CreatedAt2
                 ORDER BY CommentID DESC;
             `);
         
         const newComment = result.recordset[0];
+        if (!newComment) {
+            return res.status(500).json({ message: 'Comment created but retrieval failed. Please refresh and retry.' });
+        }
         if (newComment && newComment.Content) {
             try { newComment.Content = encryptionConfig.decrypt(newComment.Content); } catch (e) {}
         }
-        // إنشاء إشعارات التعليقات كحل احتياطي في حال لم يُنفّذ المشغل على القاعدة
-        const notifRequest = pool.request()
-            .input('CommentID', sql.Int, newComment.CommentID)
-            .input('TaskID', sql.Int, newComment.TaskID)
-            .input('CommentedByUserID', sql.NVarChar, newComment.UserID)
-            .input('CreatedAt', sql.DateTime, newComment.CreatedAt);
+        // إنشاء إشعار احتياطي بسيط (لمنشئ المهمة) دون كسر حفظ التعليق عند اختلاف schema
+        try {
+            const notifCommentedByCol = schema.HasNotifCommentedByVacancy ? 'CommentedByVacancyID' : (schema.HasNotifCommentedByUser ? 'CommentedByUserID' : null);
+            const notifNotifyCol = schema.HasNotifyVacancy ? 'NotifyVacancyID' : (schema.HasNotifyUser ? 'NotifyUserID' : null);
+            const taskCreatorCol = schema.HasTaskCreatedByVacancy ? 'CreatedByVacancyID' : (schema.HasTaskCreatedByUser ? 'CreatedBy' : null);
 
-        await notifRequest.query(`
-            -- إشعار لمنشئ المهمة
-            INSERT INTO CommentNotifications (CommentID, TaskID, CommentedByUserID, NotifyUserID, NotificationType, IsRead, CreatedAt)
-            SELECT @CommentID, @TaskID, @CommentedByUserID, t.CreatedBy, 'task_creator', 0, @CreatedAt
-            FROM Tasks t
-            WHERE t.TaskID = @TaskID
-              AND t.CreatedBy <> @CommentedByUserID
-              AND NOT EXISTS (
-                  SELECT 1 FROM CommentNotifications cn
-                  WHERE cn.CommentID = @CommentID AND cn.NotifyUserID = t.CreatedBy
-              );
+            if (notifCommentedByCol && notifNotifyCol && taskCreatorCol) {
+                const commentedByActorId = newComment[commentActorCol] != null
+                    ? String(newComment[commentActorCol]).trim()
+                    : actorIdForStorage;
 
-            -- إشعارات للمشاركين السابقين في التعليقات (تعليقات أقدم على نفس المهمة)
-            INSERT INTO CommentNotifications (CommentID, TaskID, CommentedByUserID, NotifyUserID, NotificationType, IsRead, CreatedAt)
-            SELECT DISTINCT @CommentID, @TaskID, @CommentedByUserID, c.UserID, 'task_participant', 0, @CreatedAt
-            FROM Comments c
-            WHERE c.TaskID = @TaskID
-              AND c.UserID <> @CommentedByUserID
-              AND c.CommentID < @CommentID
-              AND c.UserID NOT IN (SELECT CreatedBy FROM Tasks WHERE TaskID = @TaskID)
-              AND NOT EXISTS (
-                  SELECT 1 FROM CommentNotifications cn
-                  WHERE cn.CommentID = @CommentID AND cn.NotifyUserID = c.UserID
-              );
-
-            -- إشعار لمكلّف المهمة الرئيسية
-            INSERT INTO CommentNotifications (CommentID, TaskID, CommentedByUserID, NotifyUserID, NotificationType, IsRead, CreatedAt)
-            SELECT DISTINCT @CommentID, @TaskID, @CommentedByUserID, t.AssignedTo, 'task_assignee', 0, @CreatedAt
-            FROM Tasks t
-            WHERE t.TaskID = @TaskID
-              AND t.AssignedTo IS NOT NULL
-              AND t.AssignedTo <> @CommentedByUserID
-              AND NOT EXISTS (
-                  SELECT 1 FROM CommentNotifications cn
-                  WHERE cn.CommentID = @CommentID AND cn.NotifyUserID = t.AssignedTo
-              );
-
-            -- إشعارات لمكلّفي المهام الفرعية لنفس المهمة
-            INSERT INTO CommentNotifications (CommentID, TaskID, CommentedByUserID, NotifyUserID, NotificationType, IsRead, CreatedAt)
-            SELECT DISTINCT @CommentID, @TaskID, @CommentedByUserID, s.AssignedTo, 'subtask_assignee', 0, @CreatedAt
-            FROM Subtasks s
-            WHERE s.TaskID = @TaskID
-              AND s.AssignedTo IS NOT NULL
-              AND s.AssignedTo <> @CommentedByUserID
-              AND NOT EXISTS (
-                  SELECT 1 FROM CommentNotifications cn
-                  WHERE cn.CommentID = @CommentID AND cn.NotifyUserID = s.AssignedTo
-              );
-
-            -- إشعارات لمنشئي المهام الفرعية لنفس المهمة
-            INSERT INTO CommentNotifications (CommentID, TaskID, CommentedByUserID, NotifyUserID, NotificationType, IsRead, CreatedAt)
-            SELECT DISTINCT @CommentID, @TaskID, @CommentedByUserID, s.CreatedBy, 'subtask_creator', 0, @CreatedAt
-            FROM Subtasks s
-            WHERE s.TaskID = @TaskID
-              AND s.CreatedBy IS NOT NULL
-              AND s.CreatedBy <> @CommentedByUserID
-              AND NOT EXISTS (
-                  SELECT 1 FROM CommentNotifications cn
-                  WHERE cn.CommentID = @CommentID AND cn.NotifyUserID = s.CreatedBy
-              );
-        `);
+                await pool.request()
+                    .input('CommentID', sql.Int, newComment.CommentID)
+                    .input('TaskID', sql.Int, newComment.TaskID)
+                    .input('CommentedByActorID', sql.NVarChar, commentedByActorId)
+                    .input('CreatedAt', sql.DateTime, newComment.CreatedAt)
+                    .query(`
+                        INSERT INTO CommentNotifications (CommentID, TaskID, ${notifCommentedByCol}, ${notifNotifyCol}, NotificationType, IsRead, CreatedAt)
+                        SELECT @CommentID, @TaskID, @CommentedByActorID, t.${taskCreatorCol}, 'task_creator', 0, @CreatedAt
+                        FROM Tasks t
+                        WHERE t.TaskID = @TaskID
+                          AND t.${taskCreatorCol} IS NOT NULL
+                          AND LTRIM(RTRIM(CAST(t.${taskCreatorCol} AS NVARCHAR(255)))) <> @CommentedByActorID
+                          AND NOT EXISTS (
+                              SELECT 1 FROM CommentNotifications cn
+                              WHERE cn.CommentID = @CommentID
+                                AND LTRIM(RTRIM(CAST(cn.${notifNotifyCol} AS NVARCHAR(255)))) = LTRIM(RTRIM(CAST(t.${taskCreatorCol} AS NVARCHAR(255))))
+                          );
+                    `);
+            }
+        } catch (notifError) {
+            console.warn('Comment notification fallback skipped due to schema/runtime mismatch:', notifError.message || notifError);
+        }
         res.status(201).json(newComment);
     } catch (error) {
         console.error("CREATE COMMENT ERROR:", error);
@@ -144,7 +315,7 @@ exports.createComment = async (req, res) => {
 exports.updateComment = async (req, res) => {
     const pool = req.app.locals.db;
     const { commentId } = req.params;
-    const { Content, UserID, ShowInCalendar } = req.body || {};
+    const { Content, UserID, ShowInCalendar, isAdmin } = req.body || {};
 
     if (!commentId || !UserID) {
         return res.status(400).json({ message: 'commentId and UserID are required.' });
@@ -155,9 +326,30 @@ exports.updateComment = async (req, res) => {
     }
 
     try {
+        const schemaProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Comments', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasUserID,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar
+        `);
+        const schema = schemaProbe.recordset[0] || {};
+
         const existingResult = await pool.request()
             .input('CommentID', sql.Int, commentId)
-            .query('SELECT TOP 1 CommentID, UserID, ActedBy FROM Comments WHERE CommentID = @CommentID');
+            .query(`
+                SELECT TOP 1
+                    CommentID,
+                    TaskID,
+                    ${schema.HasUserID ? 'UserID' : 'CAST(NULL AS NVARCHAR(255)) AS UserID'},
+                    ActedBy,
+                    ${schema.HasCommentedByVacancy ? 'CommentedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS CommentedByVacancyID'},
+                    ${schema.HasCommentedByUser ? 'CommentedByUserID' : 'CAST(NULL AS NVARCHAR(255)) AS CommentedByUserID'},
+                    ${schema.HasLastActedByVacancy ? 'LastActedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS LastActedByVacancyID'}
+                FROM Comments
+                WHERE CommentID = @CommentID
+            `);
 
         if (!existingResult.recordset.length) {
             return res.status(404).json({ message: 'Comment not found.' });
@@ -165,9 +357,20 @@ exports.updateComment = async (req, res) => {
 
         const existing = existingResult.recordset[0];
         const actingUserId = UserID.toString();
+        const actorCandidates = await resolveActorCandidates(pool, actingUserId);
+        const ownsComment = hasCommentOwnership(existing, actorCandidates);
 
-        if (existing.UserID !== actingUserId && existing.ActedBy !== actingUserId) {
+        const accessCheck = await checkTaskAccess(pool, existing.TaskID, actingUserId, isAdmin === true || isAdmin === 'true', 'edit');
+        if (!accessCheck.hasAccess && !ownsComment) {
+            return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية تعديل هذا التعليق.' });
+        }
+
+        if (!ownsComment) {
             return res.status(403).json({ message: 'لا تملك صلاحية تعديل هذا التعليق.' });
+        }
+
+        if (typeof ShowInCalendar !== 'undefined' && !schema.HasShowInCalendar) {
+            return res.status(400).json({ message: 'ShowInCalendar column is not available in Comments table.' });
         }
 
         const request = pool.request().input('CommentID', sql.Int, commentId);
@@ -211,7 +414,7 @@ exports.updateComment = async (req, res) => {
 exports.deleteComment = async (req, res) => {
     const pool = req.app.locals.db;
     const { commentId } = req.params;
-    const { UserID } = req.body || {};
+    const { UserID, isAdmin } = req.body || {};
 
     if (!commentId || !UserID) {
         return res.status(400).json({ message: 'commentId and UserID are required.' });
@@ -222,9 +425,29 @@ exports.deleteComment = async (req, res) => {
     try {
         await transaction.begin();
 
+        const schemaProbe = await new sql.Request(transaction).query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Comments', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasUserID,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy
+        `);
+        const schema = schemaProbe.recordset[0] || {};
+
         const existingResult = await new sql.Request(transaction)
             .input('CommentID', sql.Int, commentId)
-            .query('SELECT TOP 1 CommentID, UserID, ActedBy FROM Comments WHERE CommentID = @CommentID');
+            .query(`
+                SELECT TOP 1
+                    CommentID,
+                    TaskID,
+                    ${schema.HasUserID ? 'UserID' : 'CAST(NULL AS NVARCHAR(255)) AS UserID'},
+                    ActedBy,
+                    ${schema.HasCommentedByVacancy ? 'CommentedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS CommentedByVacancyID'},
+                    ${schema.HasCommentedByUser ? 'CommentedByUserID' : 'CAST(NULL AS NVARCHAR(255)) AS CommentedByUserID'},
+                    ${schema.HasLastActedByVacancy ? 'LastActedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS LastActedByVacancyID'}
+                FROM Comments
+                WHERE CommentID = @CommentID
+            `);
 
         if (!existingResult.recordset.length) {
             await transaction.rollback();
@@ -233,8 +456,16 @@ exports.deleteComment = async (req, res) => {
 
         const existing = existingResult.recordset[0];
         const actingUserId = UserID.toString();
+        const actorCandidates = await resolveActorCandidates(pool, actingUserId);
+        const ownsComment = hasCommentOwnership(existing, actorCandidates);
 
-        if (existing.UserID !== actingUserId && existing.ActedBy !== actingUserId) {
+        const accessCheck = await checkTaskAccess(pool, existing.TaskID, actingUserId, isAdmin === true || isAdmin === 'true', 'edit');
+        if (!accessCheck.hasAccess && !ownsComment) {
+            await transaction.rollback();
+            return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية حذف هذا التعليق.' });
+        }
+
+        if (!ownsComment) {
             await transaction.rollback();
             return res.status(403).json({ message: 'لا تملك صلاحية حذف هذا التعليق.' });
         }

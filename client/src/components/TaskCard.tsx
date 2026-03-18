@@ -10,9 +10,13 @@ type TaskCardTask = {
   Title: string;
   Description?: string;
   CreatedBy: string;
+  CreatedByVacancyID?: number | string | null;
   CreatedByName?: string | null;
   ActedBy?: string | null;
+  LastActedByVacancyID?: number | string | null;
   ActedByName?: string | null;
+  AssignedTo?: string | null;
+  AssignedToVacancyID?: number | string | null;
   AssignedToName: string | null;
   DueDate: string | null;
   Status: string;

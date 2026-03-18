@@ -1,18 +1,23 @@
 // src/pages/TaskList.tsx
 import { useEffect, useState, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import TaskCard from '../components/TaskCard';
 import SearchBar from '../components/SearchBar';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, Comment } from '../types';
 import { getActiveUserId } from '../utils/activeAccount';
-import { Loader2, ClipboardCopy, Filter, User, Users, ChevronDown } from 'lucide-react';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
+import { Loader2, ClipboardCopy, Filter, User, Users, ChevronDown, MessageCircle, CheckSquare, ClipboardList, CheckCircle, Clock } from 'lucide-react';
 
 type Task = {
   TaskID: number;
   Title: string;
   Description?: string;
   CreatedBy: string;
+  CreatedByVacancyID?: number | string | null;
   CreatedByName?: string | null;
+  AssignedTo?: string | null;
+  AssignedToVacancyID?: number | string | null;
   AssignedToName: string | null;
   DueDate: string;
   Status: 'open' | 'in-progress' | 'completed' | 'cancelled' | 'external' | 'approved-in-progress';
@@ -24,6 +29,22 @@ type Task = {
 };
 
 type ExportMode = 'title_creator' | 'tasks_incomplete_subtasks' | 'full';
+
+type ActivityItem = {
+  ItemType: 'task' | 'subtask' | 'comment';
+  TaskID: number;
+  TaskTitle: string;
+  TaskStatus: Task['Status'];
+  CreatedAt: string;
+  ActorID: string | null;
+  ActorName: string | null;
+  SubtaskID: number | null;
+  SubtaskTitle: string | null;
+  CommentID: number | null;
+  CommentContent: string | null;
+  AssignedToID: string | null;
+  AssignedToName: string | null;
+};
 
 type TaskListProps = { currentUser: CurrentUser; };
 
@@ -64,15 +85,163 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   const [assigneeFilterUserId, setAssigneeFilterUserId] = useState<string | null>(null);
   
   // 4. حالة جديدة للتبويبات
-  const [activeTab, setActiveTab] = useState<'active' | 'external' | 'completed' | 'actioned'>('active');
+  const [activeTab, setActiveTab] = useState<'active' | 'external' | 'completed' | 'actioned' | 'updates'>('active');
+
+  const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
+  const [isLoadingActivity, setIsLoadingActivity] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [activityHasMore, setActivityHasMore] = useState(true);
+  const [activityPage, setActivityPage] = useState(0);
+  const [effectiveActorIdFromApi, setEffectiveActorIdFromApi] = useState<string>('');
+
+  const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
+  const subtaskAssigneeId = (subtask: Subtask) => String((subtask as any).AssignedToVacancyID ?? (subtask as any).AssignedTo ?? '');
+
+  const actorIdCandidates = useMemo(() => {
+    const ids = new Set<string>();
+    const add = (value: unknown) => {
+      const normalized = String(value ?? '').trim();
+      if (normalized) ids.add(normalized);
+    };
+
+    add(actorId);
+    add(effectiveActorIdFromApi);
+    add(currentUser.UserID);
+    add(resolveCurrentActorId(currentUser));
+    add((currentUser as any).CurrentVacancyID);
+    add((currentUser as any).ActiveVacancyID);
+    add((currentUser as any).VacancyID);
+
+    return ids;
+  }, [actorId, effectiveActorIdFromApi, currentUser]);
+
+  const isActorMatch = (value: unknown) => {
+    const normalized = String(value ?? '').trim();
+    return !!normalized && actorIdCandidates.has(normalized);
+  };
+
+  const isTaskCreatedByActor = (task: Task) => {
+    return isActorMatch(task.CreatedByVacancyID) || isActorMatch(task.CreatedBy);
+  };
+
+  const isSubtaskAssignedToActor = (subtask: Subtask) => {
+    return isActorMatch((subtask as any).AssignedToVacancyID) || isActorMatch((subtask as any).AssignedTo);
+  };
+
+  const isTaskRelatedToActor = (task: Task) => {
+    if (isTaskCreatedByActor(task)) return true;
+    return (task.subtasks || []).some(st => isSubtaskAssignedToActor(st));
+  };
+
+  const fetchActivity = useCallback(async (pageIndex = 0) => {
+    setIsLoadingActivity(true);
+    setActivityError(null);
+    try {
+      const actingUserId = actorId;
+      const isAdmin = currentUser.IsAdmin;
+      // Fetch 7 days of activity based on pageIndex
+      const res = await fetch(`/api/tasks/activity?userId=${actingUserId}&isAdmin=${isAdmin}&page=${pageIndex}&days=7`);
+      const ct = res.headers.get('content-type') || '';
+      if (!res.ok || !ct.includes('application/json')) {
+        if (pageIndex === 0) setActivityItems([]);
+        setActivityError('تعذر جلب آخر التحديثات.');
+        return;
+      }
+      const data = await res.json().catch(() => []);
+      const newItems = Array.isArray(data) ? (data as ActivityItem[]) : [];
+      
+      // Always allow loading more for time-based pagination (up to a reasonable limit)
+      // If we receive 0 items, it just means no activity in that specific week.
+      setActivityHasMore(true);
+
+      setActivityItems(prev => pageIndex === 0 ? newItems : [...prev, ...newItems]);
+      setActivityPage(pageIndex);
+    } catch {
+      if (pageIndex === 0) setActivityItems([]);
+      setActivityError('تعذر الاتصال بالخادم لجلب آخر التحديثات.');
+    } finally {
+      setIsLoadingActivity(false);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (activeTab === 'updates') {
+      // Reset and fetch first page
+      setActivityPage(0);
+      setActivityHasMore(true);
+      fetchActivity(0);
+    }
+  }, [activeTab, fetchActivity]);
+
+  const loadMoreActivity = () => {
+    if (!isLoadingActivity && activityHasMore) {
+      fetchActivity(activityPage + 1);
+    }
+  };
+
+  const exportActivityLog = () => {
+    if (activityItems.length === 0) {
+      return;
+    }
+
+    const formatDate = (dateString: string) => {
+      return new Date(dateString).toLocaleString('ar-EG');
+    };
+
+    let content = `=== تقرير آخر التحديثات ===\n`;
+    content += `تاريخ التصدير: ${new Date().toLocaleString('ar-EG')}\n`;
+    content += `عدد التحديثات المعروضة: ${activityItems.length}\n\n`;
+
+    activityItems.forEach((item) => {
+      const date = formatDate(item.CreatedAt);
+      const actor = item.ActorName || item.ActorID || 'مستخدم غير معروف';
+      
+      let actionType = 'مهمة جديدة';
+      let details = '';
+      
+      if (item.ItemType === 'subtask') {
+        actionType = 'مهمة فرعية جديدة';
+        details = item.SubtaskTitle || '';
+      } else if (item.ItemType === 'comment') {
+        actionType = 'تعليق جديد';
+        details = item.CommentContent || '';
+      } else {
+        // item.ItemType === 'task'
+        actionType = 'مهمة جديدة';
+        details = item.TaskTitle;
+      }
+
+      content += `[${date}] - بواسطة: ${actor}\n`;
+      content += `النوع: ${actionType}\n`;
+      
+      if (item.ItemType === 'task') {
+          content += `المهمة: ${item.TaskTitle}\n`;
+      } else {
+          content += `التفاصيل: ${details}\n`;
+          content += `في المهمة: ${item.TaskTitle}\n`;
+      }
+      
+      if (item.AssignedToName) {
+        content += `مسند إلى: ${item.AssignedToName}\n`;
+      }
+      
+      content += `----------------------------------------\n`;
+    });
+
+    setExportText(content);
+  };
 
   const fetchTasksAndSubtasks = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
       const isAdmin = currentUser.IsAdmin;
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const tasksRes = await fetch(`/api/tasks/with-notifications?userId=${actingUserId}&isAdmin=${isAdmin}`);
+      const effectiveActorHeader = tasksRes.headers.get('x-effective-actor-id') || tasksRes.headers.get('X-Effective-Actor-ID') || '';
+      if (effectiveActorHeader) {
+        setEffectiveActorIdFromApi(String(effectiveActorHeader).trim());
+      }
       let tasksData: Task[] = [];
 
       // حرس قوي لتحليل JSON وتوفير سقوط احتياطي مع فحص نوع المحتوى
@@ -87,6 +256,10 @@ const TaskList = ({ currentUser }: TaskListProps) => {
         // في حالة فشل المسار مع الإشعارات، جرب المسار الأساسي كحل مؤقت
         console.warn('Tasks API responded non-OK:', tasksRes.status);
         const fallbackRes = await fetch(`/api/tasks?userId=${actingUserId}&isAdmin=${isAdmin}`);
+        const fallbackEffectiveActor = fallbackRes.headers.get('x-effective-actor-id') || fallbackRes.headers.get('X-Effective-Actor-ID') || '';
+        if (fallbackEffectiveActor) {
+          setEffectiveActorIdFromApi(String(fallbackEffectiveActor).trim());
+        }
         const fallbackData = await parseJsonSafely(fallbackRes);
         tasksData = Array.isArray(fallbackData) ? fallbackData as Task[] : [];
       } else {
@@ -97,6 +270,10 @@ const TaskList = ({ currentUser }: TaskListProps) => {
         } else {
           console.warn('with-notifications returned non-JSON or invalid; falling back to /api/tasks');
           const fallbackRes = await fetch(`/api/tasks?userId=${actingUserId}&isAdmin=${isAdmin}`);
+          const fallbackEffectiveActor = fallbackRes.headers.get('x-effective-actor-id') || fallbackRes.headers.get('X-Effective-Actor-ID') || '';
+          if (fallbackEffectiveActor) {
+            setEffectiveActorIdFromApi(String(fallbackEffectiveActor).trim());
+          }
           const fallbackData = await parseJsonSafely(fallbackRes);
           tasksData = Array.isArray(fallbackData) ? fallbackData as Task[] : [];
         }
@@ -170,7 +347,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     } finally {
       setIsLoading(false);
     }
-  }, [currentUser.UserID, currentUser.IsAdmin]);
+  }, [actorId, currentUser.IsAdmin]);
 
   useEffect(() => {
     fetchTasksAndSubtasks();
@@ -179,7 +356,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     setRefreshTasks(fetchTasksAndSubtasks);
     
     // تم تعطيل تحديث قائمة المهام عند عودة التركيز إلى النافذة
-  }, [fetchTasksAndSubtasks, setRefreshTasks]);
+  }, [fetchTasksAndSubtasks]);
 
   // حالة وتتبع تحميل المهام المكتملة على دفعات
   const [completedPage, setCompletedPage] = useState(1);
@@ -193,7 +370,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       if (isLoadingCompleted || !completedHasMore) return;
 
       setIsLoadingCompleted(true);
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const isAdmin = currentUser.IsAdmin;
       const pageSize = 10;
 
@@ -293,7 +470,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
     try {
       setIsSearchingCompleted(true);
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const isAdmin = currentUser.IsAdmin;
 
       const res = await fetch(`/api/tasks/completed/search?userId=${actingUserId}&isAdmin=${isAdmin}&q=${encodeURIComponent(term)}`);
@@ -325,7 +502,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   // دالة لتحديث أولوية المهمة
   const updateTaskPriority = async (taskId: number, newPriority: 'normal' | 'urgent' | 'starred') => {
     try {
-      const actingUserId = getActiveUserId(currentUser.UserID);
+      const actingUserId = actorId;
       const response = await fetch(`/api/tasks/${taskId}/user-priority?userId=${actingUserId}`, {
         method: 'PUT',
         headers: {
@@ -466,6 +643,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       case 'external': return externalTasks;
       case 'completed': return completedTasks;
       case 'actioned': return actionedTasks;
+      case 'updates': return [];
       default: return activeTasks;
     }
   };
@@ -488,9 +666,10 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     const map = new Map<string, string | undefined>();
     tasks.forEach(task => {
       (task.subtasks || []).forEach(st => {
-        if (st.AssignedTo) {
+        const stAssignedTo = subtaskAssigneeId(st as any);
+        if (stAssignedTo) {
           // استخدام الاسم إن وجد، وإلا نبقي المعرف فقط
-          map.set(st.AssignedTo, (st as any).AssignedToName);
+          map.set(stAssignedTo, (st as any).AssignedToName);
         }
       });
     });
@@ -501,9 +680,13 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   }, [tasks]);
 
   const filteredTasks = tasks.filter(task => {
+    const isRelated = isTaskRelatedToActor(task);
+    if (!isRelated) {
+      return false;
+    }
+
     // فلتر حسب المنشئ
-    const actingUserId = getActiveUserId(currentUser.UserID);
-    const matchesFilter = filterMode === 'all' || task.CreatedBy === actingUserId;
+    const matchesFilter = filterMode === 'all' || isTaskCreatedByActor(task);
     
     // فلتر حسب البحث
     const matchesSearch = !searchTerm.trim() || 
@@ -525,7 +708,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     const matchesAssignee = !assigneeFilterUserId
       ? true
       : !!(task.subtasks && task.subtasks.length > 0 &&
-           task.subtasks.some(st => !st.IsCompleted && st.AssignedTo === assigneeFilterUserId));
+           task.subtasks.some(st => !st.IsCompleted && subtaskAssigneeId(st as any) === assigneeFilterUserId));
     
     return matchesFilter && matchesSearch && matchesAssignee;
   });
@@ -533,7 +716,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
 
   const activeTasks = filteredTasks.filter(task => {
-    // استبعاد المهام المكتملة والملغاة والخارجية والمعتمدة
+    // استبعاد المهام غير المفتوحة
     if (
       task.Status === 'completed' ||
       task.Status === 'cancelled' ||
@@ -543,26 +726,15 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       return false;
     }
 
-    // إذا لم تكن هناك مهام فرعية إطلاقاً، اعرض المهمة إذا كان الحساب النشط هو المنشئ
-    const actingUserId = getActiveUserId(currentUser.UserID);
-    if (!task.subtasks || task.subtasks.length === 0) {
-      return task.CreatedBy === actingUserId;
-    }
-
-    // إظهار فقط المهام التي لدي فيها إجراء (مهام فرعية مسندة لي)
-    const mySubtasks = (task.subtasks || []).filter(
-      subtask => subtask.AssignedTo === actingUserId
+    const subtasks = task.subtasks || [];
+    const hasMyIncompleteSubtasks = subtasks.some(
+      subtask => isSubtaskAssignedToActor(subtask) && !subtask.IsCompleted
     );
-    if (mySubtasks.length === 0) {
-      return false; // لا توجد مهام فرعية مسندة لي، ليست ضمن المهام النشطة الخاصة بي
-    }
 
-    // استبعاد المهام التي أنجزت جميع إجراءاتي فيها
-    if (mySubtasks.every(subtask => subtask.IsCompleted)) {
-      return false;
-    }
+    const allSubtasksCompleted = subtasks.length === 0 || subtasks.every(subtask => subtask.IsCompleted);
+    const createdByMeAndAllCompleted = isTaskCreatedByActor(task) && allSubtasksCompleted;
 
-    return true;
+    return hasMyIncompleteSubtasks || createdByMeAndAllCompleted;
   });
   const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
   const externalTasks = filteredTasks.filter(task => task.Status === 'external');
@@ -571,7 +743,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   // - إما أكملت كل المهام الفرعية المسندة إليّ
   // - أو أنني منشئ المهمة وليس لدي مهام فرعية مسندة لي، لكن توجد مهام فرعية مسندة لآخرين
   const actionedTasks = filteredTasks.filter(task => {
-    // استبعاد المهام المكتملة أو الملغاة أو المسندة للجهات الخارجية أو المعتمدة قيد التنفيذ
+    // استبعاد المهام غير المفتوحة
     if (
       task.Status === 'completed' ||
       task.Status === 'cancelled' ||
@@ -581,26 +753,17 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       return false;
     }
 
-    if (!task.subtasks || task.subtasks.length === 0) {
-      return false; // لا توجد مهام فرعية
-    }
+    const subtasks = task.subtasks || [];
+    if (subtasks.length === 0) return false;
 
-    const actingUserId = getActiveUserId(currentUser.UserID);
-    const mySubtasks = task.subtasks.filter(
-      subtask => subtask.AssignedTo === actingUserId
-    );
-    const otherAssignedSubtasks = task.subtasks.filter(
-      subtask => subtask.AssignedTo && subtask.AssignedTo !== actingUserId
+    const otherAssignedSubtasks = subtasks.filter(
+      subtask => {
+        const assignedTo = subtaskAssigneeId(subtask as any);
+        return !!assignedTo && !isSubtaskAssignedToActor(subtask);
+      }
     );
 
-    const hasActionedByCompletion =
-      mySubtasks.length > 0 && mySubtasks.every(subtask => subtask.IsCompleted);
-    const hasActionedByDelegation =
-      mySubtasks.length === 0 &&
-      otherAssignedSubtasks.length > 0 &&
-      task.CreatedBy === actingUserId;
-
-    return hasActionedByCompletion || hasActionedByDelegation;
+    return otherAssignedSubtasks.length > 0;
   });
 
   // دالة للحصول على أكبر معرف للمهام الفرعية الغير مكتملة
@@ -610,9 +773,8 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     }
     
     // فلترة المهام الفرعية الغير مكتملة
-    const actingUserId = getActiveUserId(currentUser.UserID);
     const myIncompleteSubtasks = task.subtasks.filter(
-      st => !st.IsCompleted && st.AssignedTo === actingUserId
+      st => !st.IsCompleted && isSubtaskAssignedToActor(st)
     ) || [];
     
     if (myIncompleteSubtasks.length === 0) {
@@ -883,6 +1045,26 @@ const TaskList = ({ currentUser }: TaskListProps) => {
               onFocus={(e) => e.target.select()}
             />
             <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => {
+                const printWindow = window.open('', '_blank');
+                if (printWindow) {
+                  printWindow.document.write(`
+                    <html dir="rtl">
+                      <head>
+                        <title>طباعة التقرير</title>
+                        <style>
+                          body { font-family: sans-serif; padding: 20px; white-space: pre-wrap; line-height: 1.5; }
+                        </style>
+                      </head>
+                      <body>${exportText}</body>
+                    </html>
+                  `);
+                  printWindow.document.close();
+                  printWindow.print();
+                }
+              }} className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">
+                طباعة
+              </button>
               <button onClick={copyToClipboard} className="bg-primary text-white px-4 py-2 rounded-md hover:bg-primary-dark">
                 نسخ وإغلاق
               </button>
@@ -987,10 +1169,177 @@ const TaskList = ({ currentUser }: TaskListProps) => {
               )}
             </div>
           </button>
+          <button
+            onClick={() => setActiveTab('updates')}
+            className={`px-6 py-3 font-medium transition-colors ${
+              activeTab === 'updates'
+                ? 'text-primary border-b-2 border-primary bg-blue-50 dark:bg-blue-900/20'
+                : 'text-gray-600 dark:text-gray-400 hover:text-primary'
+            }`}
+          >
+            🕒 آخر التحديثات
+          </button>
         </div>
       </div>
 
       {/* --- عرض المهام حسب التبويب النشط --- */}
+      {activeTab === 'updates' && (
+        <div>
+          <div className="flex justify-between items-center mb-6">
+            <div>
+              <h1 className="text-3xl font-bold text-content border-b-2 border-purple-500 pb-2">آخر التحديثات</h1>
+            </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={exportActivityLog}
+              className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 flex items-center gap-2"
+            >
+              <ClipboardCopy size={16} />
+              تصدير للطباعة
+            </button>
+            <button
+              type="button"
+              onClick={() => fetchActivity(0)}
+              className="bg-primary text-white px-4 py-2 rounded-md hover:bg-primary-dark"
+            >
+              تحديث
+            </button>
+          </div>
+          </div>
+
+          {isLoadingActivity && activityItems.length === 0 ? (
+            <div className="flex justify-center items-center py-8">
+              <Loader2 className="animate-spin mr-2" />
+              <span>جاري تحميل آخر التحديثات...</span>
+            </div>
+          ) : activityError ? (
+            <p className="text-red-500 text-center py-4">{activityError}</p>
+          ) : activityItems.length > 0 ? (
+            <div className="space-y-4">
+              {activityItems.map((item) => {
+                const key = `${item.ItemType}-${item.SubtaskID ?? item.CommentID ?? item.TaskID}-${item.CreatedAt}`;
+                
+                let icon = <ClipboardList className="text-blue-500" size={20} />;
+                let label = 'مهمة جديدة';
+                let bgColor = 'bg-blue-50 dark:bg-blue-900/10';
+
+                if (item.ItemType === 'subtask') {
+                  icon = <CheckSquare className="text-purple-500" size={20} />;
+                  label = 'مهمة فرعية جديدة';
+                  bgColor = 'bg-purple-50 dark:bg-purple-900/10';
+                } else if (item.ItemType === 'comment') {
+                  icon = <MessageCircle className="text-green-500" size={20} />;
+                  label = 'تعليق جديد';
+                  bgColor = 'bg-green-50 dark:bg-green-900/10';
+                }
+
+                const actor = item.ActorName || item.ActorID || 'مستخدم غير معروف';
+                const isCompleted = item.TaskStatus === 'completed';
+
+                return (
+                  <div
+                    key={key}
+                    className={`p-4 border rounded-lg shadow-sm transition-all hover:shadow-md ${bgColor} border-content/10`}
+                  >
+                    <div className="flex items-start gap-4">
+                      <div className="mt-1 flex-shrink-0 bg-white dark:bg-gray-800 p-2 rounded-full shadow-sm">
+                        {icon}
+                      </div>
+                      
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className="font-bold text-content text-lg">{label}</span>
+                          <span className="text-xs text-content-secondary flex items-center gap-1 bg-white dark:bg-gray-800 px-2 py-1 rounded-full shadow-sm">
+                            <Clock size={12} />
+                            {new Date(item.CreatedAt).toLocaleString('ar-EG')}
+                          </span>
+                        </div>
+
+                        <div className="text-sm text-content mb-2">
+                          <span className="text-content-secondary">في المهمة: </span>
+                          <Link 
+                            to={`/task/${item.TaskID}`} 
+                            className={`font-medium hover:underline ${isCompleted ? 'text-gray-500 line-through decoration-gray-400' : 'text-primary'}`}
+                          >
+                            {item.TaskTitle}
+                          </Link>
+                          {isCompleted && (
+                            <span className="inline-flex items-center gap-1 mr-2 text-xs font-medium text-green-600 bg-green-100 dark:bg-green-900/30 px-2 py-0.5 rounded-full">
+                              <CheckCircle size={10} />
+                              مكتملة
+                            </span>
+                          )}
+                        </div>
+
+                        {item.ItemType === 'subtask' && item.SubtaskTitle && (
+                          <div className="bg-white/60 dark:bg-black/20 p-3 rounded-md border border-content/5 mb-2">
+                            <div className="flex items-center gap-2 text-content font-medium">
+                              <CheckSquare size={16} className="text-content-secondary" />
+                              {item.SubtaskTitle}
+                            </div>
+                          </div>
+                        )}
+
+                        {item.ItemType === 'comment' && item.CommentContent && (
+                          <div className="bg-white/60 dark:bg-black/20 p-3 rounded-md border border-content/5 mb-2">
+                            <div className="text-content whitespace-pre-wrap text-sm leading-relaxed">
+                              "{item.CommentContent}"
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-2 mt-2 text-xs text-content-secondary flex-wrap">
+                          <div className="flex items-center gap-1 bg-white dark:bg-gray-800 px-2 py-1 rounded-full border border-content/10">
+                            <User size={12} />
+                            <span>بواسطة: <span className="font-medium text-content">{actor}</span></span>
+                          </div>
+
+                          {item.AssignedToName && (
+                            <div className="flex items-center gap-1 bg-white dark:bg-gray-800 px-2 py-1 rounded-full border border-content/10">
+                              <Users size={12} />
+                              <span>مسند إلى: <span className="font-medium text-content">{item.AssignedToName}</span></span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              
+              {/* زر تحميل المزيد */}
+              {activityHasMore && (
+                <div className="flex justify-center pt-4">
+                  <button
+                    onClick={loadMoreActivity}
+                    disabled={isLoadingActivity}
+                    className="bg-primary text-white px-6 py-2 rounded-md hover:bg-primary-dark disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    {isLoadingActivity ? <Loader2 className="animate-spin" size={16} /> : null}
+                    {isLoadingActivity ? 'جاري التحميل...' : 'تحميل المزيد (7 أيام سابقة)'}
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-8">
+              <p className="text-content-secondary mb-4">لا توجد تحديثات في الفترة الحالية.</p>
+              {activityHasMore && (
+                <button
+                  onClick={loadMoreActivity}
+                  disabled={isLoadingActivity}
+                  className="bg-primary text-white px-6 py-2 rounded-md hover:bg-primary-dark disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {isLoadingActivity ? <Loader2 className="animate-spin" size={16} /> : null}
+                  {isLoadingActivity ? 'جاري التحميل...' : 'تحميل فترة سابقة'}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {activeTab === 'active' && (
         <div>
           <div className="flex justify-between items-center mb-6">
@@ -1239,3 +1588,4 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 export default TaskList;
 
 // جلب المهام الفرعية والتعليقات لكل مهمة لكن مع تحديد حد أقصى للتوازي (BATCH_SIZE) للحد من العواصف وتقليل أخطاء net::ERR_INSUFFICIENT_RESOURCES. كذلك تطبيق نفس النهج على جلب المهام الفرعية والتعليقات والأولوية.
+

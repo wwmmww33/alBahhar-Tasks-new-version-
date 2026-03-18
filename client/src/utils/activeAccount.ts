@@ -2,7 +2,9 @@
 // إدارة حالة "العمل نيابة عن" عبر localStorage
 
 export type ActiveAccount = {
-  userId: string;
+  actorId: string;
+  userId?: string;
+  actorName?: string | null;
   userName?: string | null;
   mode: 'self' | 'delegation';
 };
@@ -14,8 +16,14 @@ export function getActiveAccount(): ActiveAccount | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const obj = JSON.parse(raw);
-    if (!obj || typeof obj.userId !== 'string') return null;
-    return obj as ActiveAccount;
+    if (!obj || (typeof obj.actorId !== 'string' && typeof obj.userId !== 'string')) return null;
+    return {
+      actorId: typeof obj.actorId === 'string' ? obj.actorId : obj.userId,
+      userId: typeof obj.userId === 'string' ? obj.userId : undefined,
+      actorName: typeof obj.actorName === 'string' ? obj.actorName : undefined,
+      userName: typeof obj.userName === 'string' ? obj.userName : undefined,
+      mode: obj.mode === 'delegation' ? 'delegation' : 'self'
+    };
   } catch {
     return null;
   }
@@ -23,12 +31,21 @@ export function getActiveAccount(): ActiveAccount | null {
 
 export function getActiveUserId(fallbackUserId?: string): string {
   const acc = getActiveAccount();
-  return acc?.userId || fallbackUserId || '';
+  return acc?.actorId || acc?.userId || fallbackUserId || '';
+}
+
+export function getActiveActorId(fallbackActorId?: string): string {
+  const acc = getActiveAccount();
+  return acc?.actorId || acc?.userId || fallbackActorId || '';
 }
 
 export function setActiveAccount(account: ActiveAccount) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(account));
+    const normalized: ActiveAccount = {
+      ...account,
+      actorId: account.actorId || account.userId || ''
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
   } catch {}
 }
 

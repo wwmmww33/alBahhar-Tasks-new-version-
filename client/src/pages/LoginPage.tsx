@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { CurrentUser } from '../types';
 import { setActiveAccount, clearActiveAccount } from '../utils/activeAccount';
+import { resolveCurrentActorId, resolveDelegateActorId, resolveDelegatorActorId } from '../utils/actorIdentity';
 import DelegationChoiceModal from '../components/DelegationChoiceModal';
 
 type LoginPageProps = {
@@ -40,10 +41,11 @@ const LoginPage = ({ onLoginSuccess }: LoginPageProps) => {
 
       // بعد تسجيل الدخول: معاينة التفويضات واقتراح اختيار الحساب النشط
       try {
+        const currentActorId = resolveCurrentActorId(loggedInUser);
         const delegationsRes = await fetch('/api/delegations/as-delegate', {
           headers: {
             'Content-Type': 'application/json',
-            'user-id': loggedInUser.UserID
+            'user-id': currentActorId || loggedInUser.UserID
           }
         });
         let delegations: any[] = [];
@@ -54,7 +56,7 @@ const LoginPage = ({ onLoginSuccess }: LoginPageProps) => {
         // نبحث عن تفويضات فعّالة حيث المستخدم الحالي هو المفوَّض إليه
         const now = new Date();
         const activeDelegators = (Array.isArray(delegations) ? delegations : []).filter((d: any) => {
-          const isDelegate = d?.DelegateID === loggedInUser.UserID;
+          const isDelegate = resolveDelegateActorId(d) === (currentActorId || loggedInUser.UserID);
           const isActive = !!d?.IsActive;
           const notExpired = !d?.EndDate || new Date(d.EndDate) >= now;
           const started = !d?.StartDate || new Date(d.StartDate) <= now;
@@ -99,7 +101,13 @@ const LoginPage = ({ onLoginSuccess }: LoginPageProps) => {
   };
 
   const handleChooseDelegator = (delegator: any) => {
-    setActiveAccount({ userId: delegator.DelegatorID, userName: delegator.DelegatorName, mode: 'delegation' });
+    setActiveAccount({
+      actorId: resolveDelegatorActorId(delegator),
+      userId: delegator?.DelegatorID,
+      actorName: delegator?.DelegatorName,
+      userName: delegator?.DelegatorName,
+      mode: 'delegation'
+    });
     if (pendingUser) onLoginSuccess(pendingUser);
     setShowChoice(false);
     setPendingUser(null);

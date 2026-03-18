@@ -3,6 +3,8 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { FileText, Plus, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { CurrentUser } from '../types';
+import { getActiveUserId } from '../utils/activeAccount';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 
 type Procedure = { ProcedureID: number; Title: string; CreatedBy: string; IsPublic: boolean; };
 type ProceduresManagementProps = { currentUser: CurrentUser; };
@@ -14,14 +16,15 @@ const ProceduresManagement = ({ currentUser }: ProceduresManagementProps) => {
   const [newTitle, setNewTitle] = useState('');
   const [isPublic, setIsPublic] = useState(true);
   const [subtasks, setSubtasks] = useState<{ title: string; offset: number }[]>([]);
+  const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
 
   const fetchProcedures = useCallback(async () => {
     setIsLoading(true);
-    const response = await fetch(`/api/procedures?userId=${currentUser.UserID}&departmentId=${currentUser.DepartmentID}`);
+    const response = await fetch(`/api/procedures?userId=${actorId}&departmentId=${currentUser.DepartmentID}`);
     const data = await response.json();
     setProcedures(data);
     setIsLoading(false);
-  }, [currentUser]);
+  }, [actorId, currentUser.DepartmentID]);
 
   useEffect(() => {
     fetchProcedures();
@@ -38,7 +41,7 @@ const ProceduresManagement = ({ currentUser }: ProceduresManagementProps) => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const payload = {
-      Title: newTitle, IsPublic: isPublic, CreatedBy: currentUser.UserID,
+      Title: newTitle, IsPublic: isPublic, CreatedBy: actorId,
       DepartmentID: currentUser.DepartmentID, subtasks: subtasks,
     };
     await fetch('/api/procedures', {

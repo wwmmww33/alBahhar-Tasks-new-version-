@@ -20,9 +20,66 @@ exports.login = async (req, res) => {
     }
 
     try {
-        const result = await pool.request() // <-- الآن pool مضمون أنه موجود
-            .input('UserID', sql.NVarChar, userId)
-            .query(`SELECT u.*, d.Name as DepartmentName FROM Users u LEFT JOIN Departments d ON u.DepartmentID = d.DepartmentID WHERE u.UserID = @UserID`);
+        const normalizedUserId = String(userId).trim();
+
+        const schemaProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Users', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasUsersDepartmentID,
+                CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+                CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+                CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
+        `);
+
+        const hasUsersDepartmentID = !!(schemaProbe.recordset[0] && schemaProbe.recordset[0].HasUsersDepartmentID);
+        const hasProfileView = !!(schemaProbe.recordset[0] && schemaProbe.recordset[0].HasProfileView);
+        const hasLegacyUserID = !!(schemaProbe.recordset[0] && schemaProbe.recordset[0].HasLegacyUserID);
+        const hasServiceID = !!(schemaProbe.recordset[0] && schemaProbe.recordset[0].HasServiceID);
+
+        const loginWhereParts = [
+            `LTRIM(RTRIM(u.UserID)) = @LoginID`
+        ];
+        if (hasLegacyUserID) {
+            loginWhereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+        }
+        if (hasServiceID) {
+            loginWhereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+        }
+        const loginWhere = loginWhereParts.join(' OR ');
+
+        let userQuery;
+        if (hasUsersDepartmentID) {
+            userQuery = `
+                SELECT u.*, d.Name as DepartmentName
+                FROM Users u
+                LEFT JOIN Departments d ON u.DepartmentID = d.DepartmentID
+                WHERE ${loginWhere}
+            `;
+        } else if (hasProfileView) {
+            userQuery = `
+                SELECT
+                    u.*, 
+                    p.DepartmentID,
+                    p.DepartmentName,
+                    p.VacancyID,
+                    p.VacancyName,
+                    p.VacancyType,
+                    p.AssignmentID,
+                    p.AssignmentStartDate
+                FROM Users u
+                LEFT JOIN vw_UserCurrentProfile p ON p.UserID = u.UserID
+                WHERE ${loginWhere}
+            `;
+        } else {
+            userQuery = `
+                SELECT u.*
+                FROM Users u
+                WHERE ${loginWhere}
+            `;
+        }
+
+        const result = await pool.request()
+            .input('LoginID', sql.NVarChar, normalizedUserId)
+            .query(userQuery);
 
         const user = result.recordset[0];
 

@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getApiUrl } from '../config/api';
+import { getActiveUserId } from '../utils/activeAccount';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 
 interface Category {
   CategoryID: number;
@@ -8,6 +10,7 @@ interface Category {
   Description: string;
   DepartmentID: number;
   CreatedBy: string;
+  CreatedByVacancyID?: number | string | null;
   CreatedAt: string;
   UpdatedAt: string;
   IsActive: boolean;
@@ -18,6 +21,9 @@ interface Category {
 interface CategoryManagementProps {
   currentUser: {
     UserID: string;
+    VacancyID?: number | string | null;
+    CurrentVacancyID?: number | string | null;
+    ActiveVacancyID?: number | string | null;
     FullName: string;
     DepartmentID: number | null;
     IsAdmin: boolean;
@@ -26,6 +32,8 @@ interface CategoryManagementProps {
 
 const CategoryManagement: React.FC<CategoryManagementProps> = ({ currentUser }) => {
   const navigate = useNavigate();
+  const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
+  const categoryCreatorId = (category: Category) => String(category.CreatedByVacancyID ?? category.CreatedBy ?? '');
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +86,7 @@ const CategoryManagement: React.FC<CategoryManagementProps> = ({ currentUser }) 
           name: formData.name,
           description: formData.description,
           departmentId: formData.departmentId,
-          createdBy: currentUser.UserID
+          createdBy: actorId
         }),
       });
 
@@ -109,7 +117,7 @@ const CategoryManagement: React.FC<CategoryManagementProps> = ({ currentUser }) 
           name: formData.name,
           description: formData.description,
           departmentId: formData.departmentId,
-          createdBy: currentUser.UserID
+          createdBy: actorId
         }),
       });
 
@@ -141,7 +149,7 @@ const CategoryManagement: React.FC<CategoryManagementProps> = ({ currentUser }) 
         const response = await fetch(getApiUrl(`categories/${categoryId}`), {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ createdBy: currentUser.UserID })
+          body: JSON.stringify({ createdBy: actorId })
         });
         if (!response.ok) {
           throw new Error('فشل في حذف التصنيف');
@@ -174,7 +182,7 @@ const CategoryManagement: React.FC<CategoryManagementProps> = ({ currentUser }) 
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          createdBy: currentUser.UserID,
+          createdBy: actorId,
           action: deleteAction,
           newCategoryId: deleteAction === 'reassign' ? replacementCategoryId : undefined
         })
@@ -322,7 +330,7 @@ const CategoryManagement: React.FC<CategoryManagementProps> = ({ currentUser }) 
                   >
                     عرض المعلومات
                   </button>
-                  {currentUser && category.CreatedBy === currentUser.UserID && (
+                  {currentUser && categoryCreatorId(category) === actorId && (
                     <>
                       <button
                         onClick={() => startEdit(category)}

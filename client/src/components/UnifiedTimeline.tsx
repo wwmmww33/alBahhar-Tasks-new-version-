@@ -4,11 +4,13 @@ import React, { useState, useMemo } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
 import { getActiveUserId } from '../utils/activeAccount';
+import { resolveCurrentActorId, resolveUserActorId } from '../utils/actorIdentity';
 
 type Comment = {
   CommentID: number;
   Content: string;
   UserID: string;
+  CommentedByVacancyID?: number | string | null;
   UserName?: string;
   CreatedAt: string;
   ActedBy?: string;
@@ -49,6 +51,7 @@ const UnifiedTimeline = ({
   onCommentsUpdate
 }: UnifiedTimelineProps) => {
   const { refreshTasks, refreshNotifications } = useNotification();
+  const safeUsers = Array.isArray(users) ? users : [];
   const renderWithLinks = (text: string) => {
     const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/g;
     const elements: (string | JSX.Element)[] = [];
@@ -73,7 +76,7 @@ const UnifiedTimeline = ({
   };
   const getUserNameById = (id?: string) => {
     if (!id) return '';
-    return users.find(u => u.UserID === id)?.FullName || id;
+    return safeUsers.find(u => resolveUserActorId(u) === id || u.UserID === id)?.FullName || id;
   };
   const getTodayString = () => {
     const d = new Date();
@@ -120,9 +123,52 @@ const UnifiedTimeline = ({
   const [isNewTaskBulkModalOpen, setIsNewTaskBulkModalOpen] = useState(false);
   const [newSubtaskBulkUsers, setNewSubtaskBulkUsers] = useState<string[]>([]);
 
-  const actingUserId = getActiveUserId(currentUser.UserID);
-  const canManageAssignments = currentUser.IsAdmin || (task && actingUserId === task.CreatedBy);
-  const canAddSubtasks = canManageAssignments || subtasks.some(st => st.AssignedTo === actingUserId);
+  const actingUserId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
+  const taskCreatorId = String(task?.CreatedByVacancyID ?? task?.CreatedBy ?? '');
+  const userActorId = (user: User) => String(resolveUserActorId(user) || user.UserID);
+  const subtaskAssignedId = (subtask: Subtask) => String(subtask.AssignedToVacancyID ?? subtask.AssignedTo ?? '');
+
+  const actorIdCandidates = useMemo(() => {
+    const ids = new Set<string>();
+    const add = (value: unknown) => {
+      const normalized = String(value ?? '').trim();
+      if (normalized) ids.add(normalized);
+    };
+    add(actingUserId);
+    add(currentUser.UserID);
+    add(resolveCurrentActorId(currentUser));
+    add((currentUser as any).CurrentVacancyID);
+    add((currentUser as any).ActiveVacancyID);
+    add((currentUser as any).VacancyID);
+
+    const currentUserFromDepartment = safeUsers.find(
+      user => String(user.UserID ?? '').trim() === String(currentUser.UserID ?? '').trim()
+    );
+    if (currentUserFromDepartment) {
+      add(currentUserFromDepartment.UserID);
+      add(resolveUserActorId(currentUserFromDepartment));
+      add((currentUserFromDepartment as any).CurrentVacancyID);
+      add((currentUserFromDepartment as any).ActiveVacancyID);
+      add((currentUserFromDepartment as any).VacancyID);
+    }
+
+    return ids;
+  }, [actingUserId, currentUser, safeUsers]);
+
+  const isActorMatch = (value: unknown) => {
+    const normalized = String(value ?? '').trim();
+    return !!normalized && actorIdCandidates.has(normalized);
+  };
+
+  const isSubtaskAssignedToActor = (subtask: Subtask) => {
+    return isActorMatch(subtask.AssignedToVacancyID) || isActorMatch(subtask.AssignedTo);
+  };
+
+  const isSubtaskCreatorActor = (subtask: Subtask) => {
+    return isActorMatch(subtask.CreatedByVacancyID) || isActorMatch(subtask.CreatedBy);
+  };
+
+  const canAddSubtasks = Boolean(task);
 
   // دمج المهام الفرعية والتعليقات وترتيبها حسب التاريخ
   const timelineItems: TimelineItem[] = useMemo(() => {
@@ -165,7 +211,7 @@ const UnifiedTimeline = ({
              await fetch('/api/subtasks', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ 
-                TaskID: taskId, Title: newSubtaskTitle, CreatedBy: actingUserId, ActedBy: currentUser.UserID,
+                TaskID: taskId, Title: newSubtaskTitle, CreatedBy: actingUserId, ActedBy: actingUserId,
                 DueDate: newSubtaskDueDate || null, AssignedTo: userId,
                 ShowInCalendar: showInCalendar
               }),
@@ -188,7 +234,7 @@ const UnifiedTimeline = ({
         TaskID: taskId,
         Title: newSubtaskTitle,
         CreatedBy: actingUserId,
-        ActedBy: currentUser.UserID,
+        ActedBy: actingUserId,
         DueDate: newSubtaskDueDate || null,
         AssignedTo: assignTo || actingUserId,
         ShowInCalendar: showInCalendar
@@ -208,34 +254,53 @@ const UnifiedTimeline = ({
   };
 
   const handleToggleStatus = async (subtask: Subtask) => {
-    if (subtask.AssignedTo === actingUserId || currentUser.IsAdmin) {
-      await fetch(`/api/subtasks/${subtask.SubtaskID}`, {
+    if (!isSubtaskAssignedToActor(subtask)) {
+      alert('فقط الشخص المسندت له المهمة الفرعية يمكنه تغيير حالة الإكمال.');
+      return;
+    }
+
+    try {
+      const resp = await fetch(`/api/subtasks/${subtask.SubtaskID}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isCompleted: !subtask.IsCompleted }),
+        body: JSON.stringify({ isCompleted: !subtask.IsCompleted, UserID: actingUserId, isAdmin: currentUser.IsAdmin }),
       });
+
+      if (!resp.ok) {
+        if (resp.status === 403) {
+          alert('ليس لديك الصلاحية لتغيير حالة هذه المهمة.');
+          return;
+        }
+        const text = await resp.text().catch(() => '');
+        alert(`فشل تحديث حالة المهمة الفرعية (${resp.status}). ${text}`);
+        return;
+      }
+
       onSubtaskUpdate();
       refreshTasks();
-    } else {
-      alert("ليس لديك الصلاحية لتغيير حالة هذه المهمة.");
+    } catch (error) {
+      console.error('Failed to toggle subtask status:', error);
+      alert('تعذر الاتصال بالخادم أثناء تحديث حالة المهمة الفرعية.');
     }
   };
 
-  const handleAssign = async (subtaskId: number, assignedTo: string) => {
+  const handleAssign = async (subtask: Subtask, assignedTo: string) => {
+    if (!isSubtaskCreatorActor(subtask)) {
+      alert('فقط منشئ المهمة الفرعية يمكنه تغيير الإسناد.');
+      return;
+    }
+
     if (assignedTo === 'bulk') {
-        const subtask = subtasks.find(s => s.SubtaskID === subtaskId);
-        if (subtask) {
-            setSelectedSubtaskForBulk(subtask);
-            setBulkSelectedUsers(subtask.AssignedTo ? [subtask.AssignedTo] : []);
-            setIsBulkModalOpen(true);
-        }
+        setSelectedSubtaskForBulk(subtask);
+        setBulkSelectedUsers(subtaskAssignedId(subtask) ? [subtaskAssignedId(subtask)] : []);
+        setIsBulkModalOpen(true);
         return;
     }
 
-    await fetch(`/api/subtasks/${subtaskId}/assign`, {
+    await fetch(`/api/subtasks/${subtask.SubtaskID}/assign`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assignedToUserId: assignedTo || null }),
+      body: JSON.stringify({ assignedToUserId: assignedTo || null, assignedByUserId: actingUserId, UserID: actingUserId, isAdmin: currentUser.IsAdmin }),
     });
     onSubtaskUpdate();
     refreshTasks();
@@ -244,6 +309,10 @@ const UnifiedTimeline = ({
 
   const submitBulkAssign = async () => {
       if (!selectedSubtaskForBulk) return;
+      if (!isSubtaskCreatorActor(selectedSubtaskForBulk)) {
+        alert('فقط منشئ المهمة الفرعية يمكنه تغيير الإسناد.');
+        return;
+      }
       if (bulkSelectedUsers.length === 0) {
           alert("الرجاء اختيار مستخدم واحد على الأقل");
           return;
@@ -253,7 +322,7 @@ const UnifiedTimeline = ({
         const resp = await fetch(`/api/subtasks/${selectedSubtaskForBulk.SubtaskID}/bulk-assign`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ assignedToUserIds: bulkSelectedUsers, assignedByUserId: actingUserId }),
+          body: JSON.stringify({ assignedToUserIds: bulkSelectedUsers, assignedByUserId: actingUserId, UserID: actingUserId, isAdmin: currentUser.IsAdmin }),
         });
         
         if (resp.ok) {
@@ -284,7 +353,7 @@ const UnifiedTimeline = ({
       const resp = await fetch(`/api/subtasks/${subtaskId}/details`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, UserID: actingUserId, isAdmin: currentUser.IsAdmin }),
       });
       if (!resp.ok) {
         const text = await resp.text().catch(() => '');
@@ -308,7 +377,7 @@ const UnifiedTimeline = ({
       const resp = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ShowInCalendar: nextShow })
+        body: JSON.stringify({ ShowInCalendar: nextShow, UserID: actingUserId, isAdmin: currentUser.IsAdmin })
       });
       if (resp.ok) {
         window.dispatchEvent(new CustomEvent('calendar:subtask:created'));
@@ -330,14 +399,26 @@ const UnifiedTimeline = ({
   };
 
   const handleDeleteSubtask = async (subtask: Subtask) => {
-    if (subtask.CreatedBy === actingUserId || currentUser.IsAdmin) {
-      if (window.confirm('هل أنت متأكد من حذف هذه المهمة الفرعية؟')) {
-        await fetch(`/api/subtasks/${subtask.SubtaskID}`, { method: 'DELETE' });
-        onSubtaskUpdate();
-        refreshTasks();
+    if (!window.confirm('هل أنت متأكد من حذف هذه المهمة الفرعية؟')) return;
+    try {
+      const resp = await fetch(`/api/subtasks/${subtask.SubtaskID}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ UserID: actingUserId, isAdmin: currentUser.IsAdmin })
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        alert(`فشل حذف المهمة الفرعية (${resp.status}). ${text}`);
+        return;
       }
-    } else {
-      alert("ليس لديك الصلاحية لحذف هذه المهمة.");
+
+      onSubtaskUpdate();
+      refreshTasks();
+      refreshNotifications();
+    } catch (err) {
+      console.error('Network error while deleting subtask:', err);
+      alert('تعذر الاتصال بالخادم أثناء حذف المهمة الفرعية. تأكد من تشغيل الخادم.');
     }
   };
 
@@ -375,6 +456,7 @@ const UnifiedTimeline = ({
         body: JSON.stringify({
           Content: content,
           UserID: actingUserId,
+          isAdmin: currentUser.IsAdmin,
         }),
       });
       if (!resp.ok) {
@@ -393,17 +475,12 @@ const UnifiedTimeline = ({
   };
 
   const handleDeleteComment = async (comment: Comment) => {
-    const canDelete = comment.UserID === actingUserId || comment.ActedBy === actingUserId;
-    if (!canDelete) {
-      alert('ليس لديك الصلاحية لحذف هذا التعليق.');
-      return;
-    }
     if (!window.confirm('هل أنت متأكد من حذف هذا التعليق؟')) return;
     try {
       const resp = await fetch(`/api/comments/${comment.CommentID}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ UserID: actingUserId }),
+        body: JSON.stringify({ UserID: actingUserId, isAdmin: currentUser.IsAdmin }),
       });
       if (!resp.ok) {
         const text = await resp.text().catch(() => '');
@@ -419,10 +496,14 @@ const UnifiedTimeline = ({
   };
 
   const renderSubtaskItem = (subtask: Subtask) => {
-    const canDelete = subtask.CreatedBy === actingUserId || currentUser.IsAdmin;
-    const canToggle = subtask.AssignedTo === actingUserId || currentUser.IsAdmin;
-    const canEditTitle = subtask.CreatedBy === actingUserId || currentUser.IsAdmin;
-    const canEditDue = subtask.CreatedBy === actingUserId || currentUser.IsAdmin;
+    const canDelete = true;
+    const canEditTitle = true;
+    const canEditDue = true;
+    const canToggleStatus = isSubtaskAssignedToActor(subtask);
+    const canManageAssignments = isSubtaskCreatorActor(subtask);
+    const assignedId = subtaskAssignedId(subtask);
+    const assignedInUsersList = !!safeUsers.find(user => userActorId(user) === assignedId);
+    const assignedFallbackLabel = subtask.AssignedToName || (assignedId ? `منصب #${assignedId}` : '');
 
     return (
       <div className="flex items-start gap-3">
@@ -433,8 +514,12 @@ const UnifiedTimeline = ({
           <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border border-blue-200 dark:border-blue-800">
             <div className="flex items-center gap-3 mb-2">
               <div
-                onClick={() => handleToggleStatus(subtask)}
-                className={canToggle ? "cursor-pointer" : "cursor-not-allowed opacity-60"}
+                onClick={() => {
+                  if (!canToggleStatus) return;
+                  handleToggleStatus(subtask);
+                }}
+                className={canToggleStatus ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}
+                title={canToggleStatus ? 'تغيير حالة الإكمال' : 'فقط الشخص المسندت له المهمة يمكنه تغيير الحالة'}
               >
                 {subtask.IsCompleted ? (
                   <Check className="text-green-500 w-5 h-5" />
@@ -503,22 +588,25 @@ const UnifiedTimeline = ({
               <div className="flex items-center gap-2">
                 <UserPlus size={14} />
                 <select
-                  value={subtask.AssignedTo || ''}
-                  onChange={(e) => handleAssign(subtask.SubtaskID, e.target.value)}
+                  value={assignedId}
+                  onChange={(e) => handleAssign(subtask, e.target.value)}
                   disabled={!canManageAssignments}
                   className="bg-transparent text-xs focus:outline-none disabled:opacity-70 dark:text-gray-300 max-w-[120px]"
                 >
                   <option value="">غير مسندة</option>
                   <option value="bulk" className="font-bold text-primary">👥 إسناد متعدد...</option>
-                  {users.map(user => (
-                    <option key={user.UserID} value={user.UserID}>{user.FullName}</option>
+                  {assignedId && !assignedInUsersList && (
+                    <option value={assignedId}>{assignedFallbackLabel}</option>
+                  )}
+                  {safeUsers.map(user => (
+                    <option key={userActorId(user)} value={userActorId(user)}>{user.FullName}</option>
                   ))}
                 </select>
                 {canManageAssignments && (
                   <button
                     onClick={() => {
                       setSelectedSubtaskForBulk(subtask);
-                      setBulkSelectedUsers(subtask.AssignedTo ? [subtask.AssignedTo] : []);
+                      setBulkSelectedUsers(subtaskAssignedId(subtask) ? [subtaskAssignedId(subtask)] : []);
                       setIsBulkModalOpen(true);
                     }}
                     className="p-1 hover:bg-primary/10 rounded-full text-primary transition-colors"
@@ -623,7 +711,7 @@ const UnifiedTimeline = ({
   };
 
   const renderCommentItem = (comment: Comment) => {
-    const canManage = comment.UserID === actingUserId || comment.ActedBy === actingUserId;
+    const canManage = true;
     const isEditing = editingCommentId === comment.CommentID;
     const handleToggleCommentCalendar = async (next: boolean) => {
       try {
@@ -633,13 +721,20 @@ const UnifiedTimeline = ({
           body: JSON.stringify({
             UserID: actingUserId,
             ShowInCalendar: next,
+            isAdmin: currentUser.IsAdmin,
           }),
         });
         if (resp.ok) {
           onCommentsUpdate();
           window.dispatchEvent(new CustomEvent('calendar:comment:updated', { detail: { CommentID: comment.CommentID, ShowInCalendar: next } }));
+        } else {
+          const text = await resp.text().catch(() => '');
+          alert(`فشل تحديث إظهار التعليق في التقويم (${resp.status}). ${text}`);
         }
-      } catch (_) {}
+      } catch (err) {
+        console.error('Network error while toggling comment calendar flag:', err);
+        alert('تعذر الاتصال بالخادم أثناء تحديث إظهار التعليق في التقويم.');
+      }
     };
 
     return (
@@ -758,12 +853,12 @@ const UnifiedTimeline = ({
               اختر الموظفين الذين تريد إسناد المهمة لهم. سيتم تكرار المهمة لكل موظف إضافي.
             </p>
             <div className="max-h-60 overflow-y-auto space-y-2 mb-4 border border-content/10 p-2 rounded">
-              {users.map(user => (
-                <label key={user.UserID} className="flex items-center gap-2 cursor-pointer hover:bg-content/5 p-2 rounded transition-colors">
+              {safeUsers.map(user => (
+                <label key={userActorId(user)} className="flex items-center gap-2 cursor-pointer hover:bg-content/5 p-2 rounded transition-colors">
                   <input
                     type="checkbox"
-                    checked={bulkSelectedUsers.includes(user.UserID)}
-                    onChange={() => toggleUserSelection(user.UserID)}
+                    checked={bulkSelectedUsers.includes(userActorId(user))}
+                    onChange={() => toggleUserSelection(userActorId(user))}
                     className="w-4 h-4 text-primary rounded focus:ring-primary"
                   />
                   <span className="text-sm">{user.FullName}</span>
@@ -790,12 +885,12 @@ const UnifiedTimeline = ({
                       اختر الموظفين الذين تريد إسناد المهمة لهم. سيتم إنشاء مهمة فرعية لكل موظف.
                   </p>
                   <div className="max-h-60 overflow-y-auto space-y-2 mb-4 border border-content/10 p-2 rounded">
-                      {users.map(user => (
-                          <label key={user.UserID} className="flex items-center gap-2 cursor-pointer hover:bg-content/5 p-2 rounded transition-colors">
+                        {safeUsers.map(user => (
+                          <label key={userActorId(user)} className="flex items-center gap-2 cursor-pointer hover:bg-content/5 p-2 rounded transition-colors">
                               <input 
                                 type="checkbox" 
-                                checked={newSubtaskBulkUsers.includes(user.UserID)} 
-                                onChange={() => setNewSubtaskBulkUsers(prev => prev.includes(user.UserID) ? prev.filter(id => id !== user.UserID) : [...prev, user.UserID])}
+                                checked={newSubtaskBulkUsers.includes(userActorId(user))} 
+                                onChange={() => setNewSubtaskBulkUsers(prev => prev.includes(userActorId(user)) ? prev.filter(id => id !== userActorId(user)) : [...prev, userActorId(user)])}
                                 className="w-4 h-4 text-primary rounded focus:ring-primary"
                               />
                               <span className="text-sm">{user.FullName}</span>
@@ -863,8 +958,8 @@ const UnifiedTimeline = ({
               >
                 <option value="">إسناد لـ: (نفسي)</option>
                 <option value="bulk" className="font-bold text-primary">👥 إسناد متعدد...</option>
-                {users.map(user => (
-                  <option key={user.UserID} value={user.UserID}>{user.FullName}</option>
+                {safeUsers.map(user => (
+                  <option key={userActorId(user)} value={userActorId(user)}>{user.FullName}</option>
                 ))}
               </select>
               <button

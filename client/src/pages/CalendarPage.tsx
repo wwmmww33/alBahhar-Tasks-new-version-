@@ -163,6 +163,31 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     fetchCalendar();
   }, [currentUser.UserID, viewMode, currentDate]);
 
+  useEffect(() => {
+    const handleCommentUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ CommentID?: number | string; ShowInCalendar?: boolean }>).detail;
+      const commentId = Number(detail?.CommentID);
+      const shouldShow = detail?.ShowInCalendar === true;
+
+      if (!Number.isFinite(commentId)) {
+        setCurrentDate((prev) => new Date(prev.getTime()));
+        return;
+      }
+
+      if (shouldShow) {
+        setCurrentDate((prev) => new Date(prev.getTime()));
+        return;
+      }
+
+      setCommentEvents((prev) => prev.filter((comment) => Number(comment.CommentID) !== commentId));
+    };
+
+    window.addEventListener('calendar:comment:updated', handleCommentUpdated as EventListener);
+    return () => {
+      window.removeEventListener('calendar:comment:updated', handleCommentUpdated as EventListener);
+    };
+  }, []);
+
   const dateRange = useMemo(() => {
     const { start, days } = computeRange(viewMode, currentDate);
     const daysArr: { key: string; date: Date; label: string }[] = [];

@@ -6,7 +6,9 @@ interface CommentNotification {
   CommentID: number;
   TaskID: number;
   CommentedByUserID: string;
+  CommentedByVacancyID?: number | string | null;
   NotifyUserID: string;
+  NotifyVacancyID?: number | string | null;
   NotificationType: string;
   IsRead: boolean;
   CreatedAt: string;

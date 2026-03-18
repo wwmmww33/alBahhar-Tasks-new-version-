@@ -225,9 +225,28 @@ module.exports = {
   // إنشاء/تحديث دالة fn_CheckTaskDelegationPermission (آمن للتشغيل في كل مرة)
   ensureCheckTaskDelegationPermissionFunction: async function ensureCheckTaskDelegationPermissionFunction(pool) {
     try {
+      const schemaProbe = await pool.request().query(`
+        SELECT
+          CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
+                 AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL
+               THEN 1 ELSE 0 END AS IsVacancySchema,
+          CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorUserID') IS NOT NULL
+                 AND COL_LENGTH('dbo.TaskDelegations', 'DelegateUserID') IS NOT NULL
+               THEN 1 ELSE 0 END AS IsUserSchema
+      `);
+
+      const isVacancySchema = !!(schemaProbe.recordset && schemaProbe.recordset[0] && schemaProbe.recordset[0].IsVacancySchema);
+      const isUserSchema = !!(schemaProbe.recordset && schemaProbe.recordset[0] && schemaProbe.recordset[0].IsUserSchema);
+
+      if (!isVacancySchema && !isUserSchema) {
+        throw new Error('TaskDelegations schema is not recognized: no Delegator/Delegate user or vacancy columns found.');
+      }
+
+      const delegatorCol = isVacancySchema ? 'DelegatorVacancyID' : 'DelegatorUserID';
+      const delegateCol = isVacancySchema ? 'DelegateVacancyID' : 'DelegateUserID';
+
       await pool.request().query(`
-        IF OBJECT_ID('dbo.fn_CheckTaskDelegationPermission', 'FN') IS NOT NULL
-          DROP FUNCTION dbo.fn_CheckTaskDelegationPermission;
+        DROP FUNCTION IF EXISTS dbo.fn_CheckTaskDelegationPermission;
       `);
 
       const createFn = `
@@ -243,8 +262,8 @@ module.exports = {
 
           IF EXISTS (
             SELECT 1 FROM dbo.TaskDelegations 
-            WHERE DelegatorUserID = @DelegatorUserID 
-              AND DelegateUserID = @DelegateUserID 
+            WHERE ${delegatorCol} = @DelegatorUserID 
+              AND ${delegateCol} = @DelegateUserID 
               AND IsActive = 1
               AND StartDate <= GETDATE()
               AND (EndDate IS NULL OR EndDate >= GETDATE())
@@ -253,8 +272,8 @@ module.exports = {
             DECLARE @DelegationType NVARCHAR(20);
             SELECT TOP 1 @DelegationType = DelegationType 
             FROM dbo.TaskDelegations 
-            WHERE DelegatorUserID = @DelegatorUserID 
-              AND DelegateUserID = @DelegateUserID 
+            WHERE ${delegatorCol} = @DelegatorUserID 
+              AND ${delegateCol} = @DelegateUserID 
               AND IsActive = 1
               AND StartDate <= GETDATE()
               AND (EndDate IS NULL OR EndDate >= GETDATE());
@@ -268,8 +287,8 @@ module.exports = {
               IF EXISTS (
                 SELECT 1 FROM dbo.TaskDelegations td
                 INNER JOIN dbo.TaskDelegationPermissions tdp ON td.DelegationID = tdp.DelegationID
-                WHERE td.DelegatorUserID = @DelegatorUserID 
-                  AND td.DelegateUserID = @DelegateUserID 
+                WHERE td.${delegatorCol} = @DelegatorUserID 
+                  AND td.${delegateCol} = @DelegateUserID 
                   AND td.IsActive = 1
                   AND td.StartDate <= GETDATE()
                   AND (td.EndDate IS NULL OR td.EndDate >= GETDATE())
@@ -314,6 +333,59 @@ module.exports = {
       return { changed: true };
     } catch (err) {
       console.error('❌ Failed ensuring URL column in Tasks:', err);
+      throw err;
+    }
+  },
+
+  // إضافة فهارس أداء للمسارات الثقيلة (آمن للتشغيل المتكرر)
+  ensureTaskQueryPerformanceIndexes: async function ensureTaskQueryPerformanceIndexes(pool) {
+    try {
+      const sqlBatch = `
+        IF COL_LENGTH('dbo.TaskViews', 'UserID') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_TaskViews_Task_User_LastViewed' AND object_id = OBJECT_ID('dbo.TaskViews'))
+          CREATE INDEX IX_TaskViews_Task_User_LastViewed ON dbo.TaskViews(TaskID, UserID, LastViewedAt);
+
+        IF COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_TaskViews_Task_ViewedByVacancy_LastViewed' AND object_id = OBJECT_ID('dbo.TaskViews'))
+          CREATE INDEX IX_TaskViews_Task_ViewedByVacancy_LastViewed ON dbo.TaskViews(TaskID, ViewedByVacancyID, LastViewedAt);
+
+        IF COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToUserID') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_TaskAssignmentNotifications_Task_AssignedTo_Read_CreatedAt' AND object_id = OBJECT_ID('dbo.TaskAssignmentNotifications'))
+          CREATE INDEX IX_TaskAssignmentNotifications_Task_AssignedTo_Read_CreatedAt
+          ON dbo.TaskAssignmentNotifications(TaskID, AssignedToUserID, IsRead, CreatedAt);
+
+        IF COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_TaskAssignmentNotifications_Task_AssignedToVacancy_Read_CreatedAt' AND object_id = OBJECT_ID('dbo.TaskAssignmentNotifications'))
+          CREATE INDEX IX_TaskAssignmentNotifications_Task_AssignedToVacancy_Read_CreatedAt
+          ON dbo.TaskAssignmentNotifications(TaskID, AssignedToVacancyID, IsRead, CreatedAt);
+
+        IF COL_LENGTH('dbo.CommentNotifications', 'NotifyUserID') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_CommentNotifications_Task_Notify_Read_CreatedAt' AND object_id = OBJECT_ID('dbo.CommentNotifications'))
+          CREATE INDEX IX_CommentNotifications_Task_Notify_Read_CreatedAt
+          ON dbo.CommentNotifications(TaskID, NotifyUserID, IsRead, CreatedAt);
+
+        IF COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_CommentNotifications_Task_NotifyVacancy_Read_CreatedAt' AND object_id = OBJECT_ID('dbo.CommentNotifications'))
+          CREATE INDEX IX_CommentNotifications_Task_NotifyVacancy_Read_CreatedAt
+          ON dbo.CommentNotifications(TaskID, NotifyVacancyID, IsRead, CreatedAt);
+
+        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Tasks_Status_CreatedAt' AND object_id = OBJECT_ID('dbo.Tasks'))
+          CREATE INDEX IX_Tasks_Status_CreatedAt ON dbo.Tasks(Status, CreatedAt DESC);
+
+        IF COL_LENGTH('dbo.Subtasks', 'AssignedTo') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Subtasks_Task_AssignedTo_CreatedAt' AND object_id = OBJECT_ID('dbo.Subtasks'))
+          CREATE INDEX IX_Subtasks_Task_AssignedTo_CreatedAt ON dbo.Subtasks(TaskID, AssignedTo, CreatedAt DESC);
+
+        IF COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Subtasks_Task_AssignedToVacancy_CreatedAt' AND object_id = OBJECT_ID('dbo.Subtasks'))
+          CREATE INDEX IX_Subtasks_Task_AssignedToVacancy_CreatedAt ON dbo.Subtasks(TaskID, AssignedToVacancyID, CreatedAt DESC);
+      `;
+
+      await pool.request().query(sqlBatch);
+      console.log('✅ Ensured performance indexes for task notifications/search endpoints.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring performance indexes:', err);
       throw err;
     }
   }

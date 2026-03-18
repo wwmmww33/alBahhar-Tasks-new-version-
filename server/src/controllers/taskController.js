@@ -3,6 +3,284 @@ const sql = require('mssql');
 const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission, hasActiveDelegation } = require('../utils/delegationUtils');
 const encryptionConfig = require('../config/encryption.config');
 
+async function resolveEffectiveActorId(pool, rawUserId) {
+    const loginId = String(rawUserId || '').trim();
+    if (!loginId) return '';
+
+    const probe = await pool.request().query(`
+        SELECT
+          CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS UsesVacancySchema,
+          CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+            CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
+          CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+          CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
+    `);
+
+    const p = probe.recordset[0] || {};
+    const usesVacancySchema = !!p.UsesVacancySchema;
+
+    const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+    if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+    if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+    const whereClause = whereParts.join(' OR ');
+
+    if (usesVacancySchema && p.HasProfileView) {
+        const mapped = await pool.request()
+            .input('LoginID', sql.NVarChar, loginId)
+            .query(`
+                SELECT TOP 1 u.UserID, p.VacancyID
+                FROM dbo.Users u
+                LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
+                WHERE ${whereClause}
+            `);
+
+        const row = mapped.recordset[0];
+        if (!row) return loginId;
+        if (row.VacancyID !== null && row.VacancyID !== undefined && String(row.VacancyID).trim() !== '') {
+            return String(row.VacancyID).trim();
+        }
+
+        if (p.HasAssignmentsTable) {
+            const latestAssignment = await pool.request()
+                .input('UserID', sql.NVarChar, String(row.UserID || loginId).trim())
+                .query(`
+                    SELECT TOP 1 VacancyID
+                    FROM dbo.Assignments
+                    WHERE UserID = @UserID
+                      AND VacancyID IS NOT NULL
+                    ORDER BY
+                      CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
+                      ISNULL(StartDate, '1900-01-01') DESC,
+                      AssignmentID DESC
+                `);
+
+            const fallbackVacancyId = latestAssignment.recordset[0]?.VacancyID;
+            if (fallbackVacancyId !== null && fallbackVacancyId !== undefined && String(fallbackVacancyId).trim() !== '') {
+                return String(fallbackVacancyId).trim();
+            }
+        }
+
+        return String(row.UserID || loginId).trim();
+    }
+
+    const mapped = await pool.request()
+        .input('LoginID', sql.NVarChar, loginId)
+        .query(`
+            SELECT TOP 1 UserID
+            FROM dbo.Users u
+            WHERE ${whereClause}
+        `);
+
+    return String(mapped.recordset[0]?.UserID || loginId).trim();
+}
+
+async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
+    const loginId = String(rawUserId || '').trim();
+    if (!loginId) return [];
+
+    const probeResult = await pool.request().query(`
+        SELECT
+          CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
+          CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+          CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDepartmentType,
+          CASE WHEN COL_LENGTH('dbo.Users', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasUsersDepartmentID,
+          CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+          CASE WHEN COL_LENGTH('dbo.vw_UserCurrentProfile', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileDepartmentID,
+          CASE WHEN COL_LENGTH('dbo.vw_UserCurrentProfile', 'VacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileVacancyID,
+          CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+          CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID,
+          CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
+          CASE WHEN COL_LENGTH('dbo.JobVacancies', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDepartmentID
+    `);
+
+    const p = probeResult.recordset[0] || {};
+    const parentCol = p.HasParentDepartmentID ? 'ParentDepartmentID' : (p.HasParentID ? 'ParentID' : null);
+    if (!parentCol) return [];
+
+    const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+    if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+    if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+
+    let baseDepartmentId = null;
+    const userIdentity = await pool.request()
+        .input('LoginID', sql.NVarChar, loginId)
+        .query(`
+            SELECT TOP 1
+              u.UserID,
+              ${p.HasUsersDepartmentID ? 'u.DepartmentID' : 'CAST(NULL as int) as DepartmentID'},
+              ${(p.HasProfileView && p.HasProfileDepartmentID) ? 'prof.DepartmentID' : 'CAST(NULL as int) as ProfileDepartmentID'},
+              ${(p.HasProfileView && p.HasProfileVacancyID) ? 'prof.VacancyID' : 'CAST(NULL as int) as VacancyID'}
+            FROM dbo.Users u
+            ${p.HasProfileView ? 'LEFT JOIN dbo.vw_UserCurrentProfile prof ON prof.UserID = u.UserID' : ''}
+            WHERE ${whereParts.join(' OR ')}
+        `);
+
+    const identityRow = userIdentity.recordset[0] || null;
+    if (identityRow) {
+        if (identityRow.ProfileDepartmentID != null) {
+            baseDepartmentId = identityRow.ProfileDepartmentID;
+        } else if (identityRow.DepartmentID != null) {
+            baseDepartmentId = identityRow.DepartmentID;
+        }
+
+        if (baseDepartmentId == null && identityRow.VacancyID != null && p.HasVacancyDepartmentID) {
+            const vacancyDept = await pool.request()
+                .input('VacancyID', sql.Int, identityRow.VacancyID)
+                .query(`SELECT TOP 1 DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+            if (vacancyDept.recordset[0]?.DepartmentID != null) {
+                baseDepartmentId = vacancyDept.recordset[0].DepartmentID;
+            }
+        }
+
+        if (baseDepartmentId == null && p.HasAssignmentsTable && p.HasVacancyDepartmentID) {
+            const assignmentDept = await pool.request()
+                .input('UserID', sql.NVarChar, String(identityRow.UserID || loginId).trim())
+                .query(`
+                    SELECT TOP 1 jv.DepartmentID
+                    FROM dbo.Assignments a
+                    INNER JOIN dbo.JobVacancies jv ON jv.VacancyID = a.VacancyID
+                    WHERE a.UserID = @UserID
+                      AND a.VacancyID IS NOT NULL
+                    ORDER BY
+                      CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,
+                      ISNULL(a.StartDate, '1900-01-01') DESC,
+                      a.AssignmentID DESC
+                `);
+            if (assignmentDept.recordset[0]?.DepartmentID != null) {
+                baseDepartmentId = assignmentDept.recordset[0].DepartmentID;
+            }
+        }
+    }
+
+    if (baseDepartmentId == null && p.HasVacancyDepartmentID) {
+        const actorId = await resolveEffectiveActorId(pool, loginId);
+        const numericActor = parseInt(String(actorId || ''), 10);
+        if (Number.isInteger(numericActor)) {
+            const vacancyDept = await pool.request()
+                .input('VacancyID', sql.Int, numericActor)
+                .query(`SELECT TOP 1 DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+            if (vacancyDept.recordset[0]?.DepartmentID != null) {
+                baseDepartmentId = vacancyDept.recordset[0].DepartmentID;
+            }
+        }
+    }
+
+    if (baseDepartmentId == null) return [];
+    baseDepartmentId = String(baseDepartmentId).trim();
+    if (!baseDepartmentId || !/^\d+$/.test(baseDepartmentId)) return [];
+
+    let rootDepartmentId = baseDepartmentId;
+    if (p.HasDepartmentType) {
+        const rootResult = await pool.request()
+            .input('DepartmentID', sql.NVarChar, baseDepartmentId)
+            .query(`
+                ;WITH UpTree AS (
+                    SELECT DepartmentID, ${parentCol} AS ParentDepartmentID, 0 AS Depth
+                    FROM dbo.Departments
+                    WHERE DepartmentID = @DepartmentID
+                    UNION ALL
+                    SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
+                    FROM dbo.Departments d
+                    INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
+                )
+                SELECT TOP 1 u.DepartmentID
+                FROM UpTree u
+                INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
+                WHERE d.[Type] = 1
+                ORDER BY u.Depth ASC
+                OPTION (MAXRECURSION 100)
+            `);
+
+        if (rootResult.recordset[0]?.DepartmentID != null) {
+            rootDepartmentId = String(rootResult.recordset[0].DepartmentID).trim();
+        }
+    }
+    if (!rootDepartmentId || !/^\d+$/.test(String(rootDepartmentId))) return [];
+
+    const deptTreeResult = await pool.request()
+        .input('RootDepartmentID', sql.NVarChar, rootDepartmentId)
+        .query(`
+            ;WITH DeptTree AS (
+                SELECT DepartmentID, ${parentCol} AS ParentDepartmentID
+                FROM dbo.Departments
+                WHERE DepartmentID = @RootDepartmentID
+                UNION ALL
+                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
+                FROM dbo.Departments d
+                INNER JOIN DeptTree dt ON d.${parentCol} = dt.DepartmentID
+            )
+            SELECT DISTINCT DepartmentID
+            FROM DeptTree
+            OPTION (MAXRECURSION 300)
+        `);
+
+    return (deptTreeResult.recordset || [])
+        .map(r => String(r.DepartmentID || '').trim())
+        .filter(v => /^\d+$/.test(v));
+}
+
+async function canUserViewTaskByListRules(pool, rawUserId, isAdmin, taskId) {
+    if (isAdmin === true || isAdmin === 'true') return true;
+
+    const effectiveActorId = await resolveEffectiveActorId(pool, rawUserId);
+    if (!effectiveActorId) return false;
+
+    const schema = await pool.request().query(`
+        SELECT
+          CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskVacancy,
+          CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubVacancy,
+          CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
+                 AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasDelegationVacancy
+    `);
+
+    const s = schema.recordset[0] || {};
+    const isVacancy = !!(s.HasTaskVacancy || s.HasSubVacancy || s.HasDelegationVacancy);
+    const taskCreatorCol = isVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
+    const taskAssignedCol = isVacancy ? null : 'AssignedTo';
+    const subAssignedCol = isVacancy ? 'AssignedToVacancyID' : 'AssignedTo';
+    const delegatorCol = isVacancy ? 'DelegatorVacancyID' : 'DelegatorUserID';
+    const delegateCol = isVacancy ? 'DelegateVacancyID' : 'DelegateUserID';
+
+    const accessParts = [
+        `t.${taskCreatorCol} = @UserID`,
+        `EXISTS (SELECT 1 FROM Subtasks s_inner WHERE s_inner.TaskID = t.TaskID AND s_inner.${subAssignedCol} = @UserID)`,
+        `EXISTS (
+            SELECT 1
+            FROM TaskDelegations d
+            WHERE d.${delegatorCol} = t.${taskCreatorCol}
+              AND d.${delegateCol} = @UserID
+              AND d.IsActive = 1
+              AND d.StartDate <= GETDATE()
+              AND (d.EndDate IS NULL OR d.EndDate >= GETDATE())
+        )`
+    ];
+    if (taskAssignedCol) {
+        accessParts.splice(1, 0, `t.${taskAssignedCol} = @UserID`);
+    }
+
+    const scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, rawUserId);
+    if (scopeDepartmentIds.length > 0) {
+        const scopeParams = scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ');
+        accessParts.push(`t.DepartmentID IN (${scopeParams})`);
+    }
+
+    const request = pool.request()
+        .input('TaskID', sql.Int, taskId)
+        .input('UserID', sql.NVarChar, effectiveActorId);
+    scopeDepartmentIds.forEach((departmentId, index) => {
+        request.input(`ScopeDepartmentID${index}`, sql.NVarChar, departmentId);
+    });
+
+    const result = await request.query(`
+        SELECT TOP 1 1 AS Allowed
+        FROM Tasks t
+        WHERE t.TaskID = @TaskID
+          AND (${accessParts.join(' OR ')})
+    `);
+
+    return (result.recordset || []).length > 0;
+}
+
 // التراجع عن دفعة نقل (إرجاع الإسناد السابق) - REMOVED
 // exports.revertTaskTransferBatch was here
 
@@ -15,8 +293,10 @@ exports.getAllTasks = async (req, res) => {
     if (!userId) { return res.status(401).json({ message: 'User identification is required.' }); }
 
     try {
-        const query = await getTasksQueryWithDelegation(pool, userId, isAdmin === 'true');
-        const request = pool.request();
+        const effectiveActorId = await resolveEffectiveActorId(pool, userId);
+        res.set('X-Effective-Actor-ID', String(effectiveActorId || ''));
+        const query = await getTasksQueryWithDelegation(pool, effectiveActorId, isAdmin === 'true');
+        const request = pool.request().input('UserID', sql.NVarChar, effectiveActorId);
         const result = await request.query(query);
         const tasks = result.recordset.map(t => {
             if (t.Description) {
@@ -35,6 +315,168 @@ exports.getAllTasks = async (req, res) => {
     }
 };
 
+exports.getTaskActivity = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { userId, isAdmin, page, days } = req.query;
+
+    if (!userId) {
+        return res.status(401).json({ message: 'User identification is required.' });
+    }
+
+    const pageIndex = Math.max(parseInt(page, 10) || 0, 0);
+    const daysCount = Math.max(parseInt(days, 10) || 7, 1);
+
+    try {
+        const effectiveActorId = await resolveEffectiveActorId(pool, userId);
+
+        const schemaProbe = await pool.request().query(`
+            SELECT
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskCreatedByVacancy,
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskAssignedToVacancy,
+                            CASE WHEN COL_LENGTH('dbo.Tasks', 'AssignedTo') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskAssignedToUser,
+              CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubCreatedByVacancy,
+              CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubAssignedToVacancy,
+              CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+              CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
+                     AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDelegations
+        `);
+
+        const s = schemaProbe.recordset[0] || {};
+        const taskCreatedCol = s.HasTaskCreatedByVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
+        const hasTaskAssignedToUser = !!s.HasTaskAssignedToUser;
+        const taskAssignedCol = s.HasTaskAssignedToVacancy ? 'AssignedToVacancyID' : (hasTaskAssignedToUser ? 'AssignedTo' : null);
+        const subCreatedCol = s.HasSubCreatedByVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
+        const subAssignedCol = s.HasSubAssignedToVacancy ? 'AssignedToVacancyID' : 'AssignedTo';
+        const commentActorCol = s.HasCommentedByVacancy ? 'CommentedByVacancyID' : 'UserID';
+        const delegatorCol = s.HasVacancyDelegations ? 'DelegatorVacancyID' : 'DelegatorUserID';
+        const delegateCol = s.HasVacancyDelegations ? 'DelegateVacancyID' : 'DelegateUserID';
+        const identityTable = s.HasTaskCreatedByVacancy ? 'JobVacancies' : 'Users';
+        const identityKey = s.HasTaskCreatedByVacancy ? 'VacancyID' : 'UserID';
+        const identityName = s.HasTaskCreatedByVacancy ? 'Name' : 'FullName';
+
+        const accessClauses = [
+            `t.${taskCreatedCol} = @UserID`,
+            `EXISTS (
+                SELECT 1 FROM Subtasks s_access
+                WHERE s_access.TaskID = t.TaskID AND s_access.${subAssignedCol} = @UserID
+            )`,
+            `EXISTS (
+                SELECT 1 FROM TaskDelegations d
+                WHERE d.${delegatorCol} = t.${taskCreatedCol}
+                  AND d.${delegateCol} = @UserID
+                  AND d.IsActive = 1
+                  AND d.StartDate <= GETDATE()
+                  AND (d.EndDate IS NULL OR d.EndDate >= GETDATE())
+            )`
+        ];
+        if (taskAssignedCol) {
+            accessClauses.splice(1, 0, `t.${taskAssignedCol} = @UserID`);
+        }
+        const accessCondition = (isAdmin === 'true')
+            ? '1=1'
+            : `(${accessClauses.join(' OR ')})`;
+
+        const taskAssignedIdExpr = taskAssignedCol ? `t.${taskAssignedCol}` : 'CAST(NULL as nvarchar(50))';
+        const taskAssignedNameExpr = taskAssignedCol ? `assignee.${identityName}` : 'CAST(NULL as nvarchar(100))';
+        const taskAssigneeJoin = taskAssignedCol
+            ? `LEFT JOIN ${identityTable} assignee ON t.${taskAssignedCol} = assignee.${identityKey}`
+            : '';
+
+        const request = pool.request()
+            .input('UserID', sql.NVarChar, effectiveActorId)
+            .input('PageIndex', sql.Int, pageIndex)
+            .input('DaysCount', sql.Int, daysCount);
+
+        const query = `
+            DECLARE @EndDate DateTime = DATEADD(day, -(@PageIndex * @DaysCount), GETDATE());
+            DECLARE @StartDate DateTime = DATEADD(day, -@DaysCount, @EndDate);
+
+            WITH Events AS (
+                SELECT
+                    'task' as ItemType,
+                    t.TaskID,
+                    t.Title as TaskTitle,
+                    t.Status as TaskStatus,
+                    t.CreatedAt as CreatedAt,
+                    COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${taskCreatedCol}) as ActorID,
+                    creator.${identityName} as ActorName,
+                    ${taskAssignedIdExpr} as AssignedToID,
+                    ${taskAssignedNameExpr} as AssignedToName,
+                    CAST(NULL as int) as SubtaskID,
+                    CAST(NULL as nvarchar(max)) as SubtaskTitle,
+                    CAST(NULL as int) as CommentID,
+                    CAST(NULL as nvarchar(max)) as CommentContent
+                FROM Tasks t
+                LEFT JOIN ${identityTable} creator ON COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${taskCreatedCol}) = creator.${identityKey}
+                ${taskAssigneeJoin}
+                WHERE ${accessCondition}
+                AND t.CreatedAt >= @StartDate AND t.CreatedAt <= @EndDate
+
+                UNION ALL
+
+                SELECT
+                    'subtask' as ItemType,
+                    t.TaskID,
+                    t.Title as TaskTitle,
+                    t.Status as TaskStatus,
+                    s.CreatedAt as CreatedAt,
+                    COALESCE(s.ActedBy, s.LastActedByVacancyID, s.${subCreatedCol}) as ActorID,
+                    subCreator.${identityName} as ActorName,
+                    s.${subAssignedCol} as AssignedToID,
+                    subAssignee.${identityName} as AssignedToName,
+                    s.SubtaskID as SubtaskID,
+                    s.Title as SubtaskTitle,
+                    CAST(NULL as int) as CommentID,
+                    CAST(NULL as nvarchar(max)) as CommentContent
+                FROM Subtasks s
+                INNER JOIN Tasks t ON s.TaskID = t.TaskID
+                LEFT JOIN ${identityTable} subCreator ON COALESCE(s.ActedBy, s.LastActedByVacancyID, s.${subCreatedCol}) = subCreator.${identityKey}
+                LEFT JOIN ${identityTable} subAssignee ON s.${subAssignedCol} = subAssignee.${identityKey}
+                WHERE ${accessCondition}
+                AND s.CreatedAt >= @StartDate AND s.CreatedAt <= @EndDate
+
+                UNION ALL
+
+                SELECT
+                    'comment' as ItemType,
+                    t.TaskID,
+                    t.Title as TaskTitle,
+                    t.Status as TaskStatus,
+                    c.CreatedAt as CreatedAt,
+                    COALESCE(c.ActedBy, c.LastActedByVacancyID, c.${commentActorCol}) as ActorID,
+                    commenter.${identityName} as ActorName,
+                    CAST(NULL as nvarchar(50)) as AssignedToID,
+                    CAST(NULL as nvarchar(100)) as AssignedToName,
+                    CAST(NULL as int) as SubtaskID,
+                    CAST(NULL as nvarchar(max)) as SubtaskTitle,
+                    c.CommentID as CommentID,
+                    c.Content as CommentContent
+                FROM Comments c
+                INNER JOIN Tasks t ON c.TaskID = t.TaskID
+                LEFT JOIN ${identityTable} commenter ON COALESCE(c.ActedBy, c.LastActedByVacancyID, c.${commentActorCol}) = commenter.${identityKey}
+                WHERE ${accessCondition}
+                AND c.CreatedAt >= @StartDate AND c.CreatedAt <= @EndDate
+            )
+            SELECT *
+            FROM Events
+            ORDER BY CreatedAt DESC
+        `;
+
+        const result = await request.query(query);
+        const items = (result.recordset || []).map(r => {
+            try { if (r.TaskTitle) r.TaskTitle = encryptionConfig.decrypt(r.TaskTitle); } catch (_) {}
+            try { if (r.SubtaskTitle) r.SubtaskTitle = encryptionConfig.decrypt(r.SubtaskTitle); } catch (_) {}
+            try { if (r.CommentContent) r.CommentContent = encryptionConfig.decrypt(r.CommentContent); } catch (_) {}
+            return r;
+        });
+
+        return res.status(200).json(items);
+    } catch (error) {
+        console.error('DATABASE GET TASK ACTIVITY ERROR:', error);
+        return res.status(500).json({ message: 'Error fetching task activity' });
+    }
+};
+
 // الحصول على إشعارات الإسناد للمستخدم
 exports.getAssignmentNotifications = async (req, res) => {
     const pool = req.app.locals.db;
@@ -45,17 +487,32 @@ exports.getAssignmentNotifications = async (req, res) => {
     }
     
     try {
+        const effectiveActorId = await resolveEffectiveActorId(pool, userId);
+        const schema = await pool.request().query(`
+            SELECT
+              CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedToVacancy,
+              CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedByVacancy
+        `);
+
+        const s = schema.recordset[0] || {};
+        const userDeptMatch = s.HasUsersDepartmentID ? ' OR u.DepartmentID = @DepartmentID' : '';
+        const assignedToCol = s.HasAssignedToVacancy ? 'AssignedToVacancyID' : 'AssignedToUserID';
+        const assignedByCol = s.HasAssignedByVacancy ? 'AssignedByVacancyID' : 'AssignedByUserID';
+        const identityTable = s.HasAssignedByVacancy ? 'JobVacancies' : 'Users';
+        const identityKey = s.HasAssignedByVacancy ? 'VacancyID' : 'UserID';
+        const identityName = s.HasAssignedByVacancy ? 'Name' : 'FullName';
+
         const result = await pool.request()
-            .input('UserID', sql.NVarChar, userId)
+            .input('UserID', sql.NVarChar, effectiveActorId)
             .query(`
                 SELECT 
                     tan.*,
                     t.Title as TaskTitle,
-                    assignedBy.FullName as AssignedByName
+                    assignedBy.${identityName} as AssignedByName
                 FROM TaskAssignmentNotifications tan
                 LEFT JOIN Tasks t ON tan.TaskID = t.TaskID
-                LEFT JOIN Users assignedBy ON tan.AssignedByUserID = assignedBy.UserID
-                WHERE tan.AssignedToUserID = @UserID
+                LEFT JOIN ${identityTable} assignedBy ON tan.${assignedByCol} = assignedBy.${identityKey}
+                WHERE tan.${assignedToCol} = @UserID
                 AND tan.IsRead = 0
                 ORDER BY tan.CreatedAt DESC
             `);
@@ -240,22 +697,49 @@ exports.getTaskById = async (req, res) => {
   
   try {
     const { id } = req.params;
+
+        const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === 'true', 'view');
+        if (!accessCheck.hasAccess) {
+            const canViewByListRules = await canUserViewTaskByListRules(pool, userId, isAdmin === 'true', id);
+            if (!canViewByListRules) {
+                return res.status(403).json({ message: accessCheck.reason });
+            }
+        }
     
-    const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === 'true', 'view');
-    
-    if (!accessCheck.hasAccess) {
-      return res.status(403).json({ message: accessCheck.reason });
-    }
-    
-    // الحصول على تفاصيل المهمة مع معلومات إضافية
-    const result = await pool.request().input('TaskID', sql.Int, id).query(`
-      SELECT t.*, creator.FullName as CreatedByName, acted.FullName as ActedByName, c.Name as CategoryName
-      FROM Tasks t
-      LEFT JOIN Users creator ON t.CreatedBy = creator.UserID
-      LEFT JOIN Users acted ON t.ActedBy = acted.UserID
-      LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
-      WHERE t.TaskID = @TaskID
-    `);
+        const schema = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskCreatedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskCreatedByUser,
+                CASE WHEN COL_LENGTH('dbo.Tasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskAssignedToVacancy,
+                CASE WHEN COL_LENGTH('dbo.Tasks', 'AssignedTo') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskAssignedToUser
+        `);
+        const s = schema.recordset[0] || {};
+        const createdCol = s.HasTaskCreatedByVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
+        const hasAssignedToUser = !!s.HasTaskAssignedToUser;
+        const assignedCol = s.HasTaskAssignedToVacancy ? 'AssignedToVacancyID' : (hasAssignedToUser ? 'AssignedTo' : null);
+        const identityTable = s.HasTaskCreatedByVacancy ? 'JobVacancies' : 'Users';
+        const identityKey = s.HasTaskCreatedByVacancy ? 'VacancyID' : 'UserID';
+        const identityName = s.HasTaskCreatedByVacancy ? 'Name' : 'FullName';
+
+        const assignedSelect = assignedCol
+            ? `t.${assignedCol} as AssignedTo, assignee.${identityName} as AssignedToName,`
+            : `CAST(NULL as nvarchar(50)) as AssignedTo, CAST(NULL as nvarchar(200)) as AssignedToName,`;
+        const assigneeJoin = assignedCol
+            ? `LEFT JOIN ${identityTable} assignee ON t.${assignedCol} = assignee.${identityKey}`
+            : '';
+
+        // الحصول على تفاصيل المهمة مع معلومات إضافية
+        const result = await pool.request().input('TaskID', sql.Int, id).query(`
+            SELECT t.*, creator.${identityName} as CreatedByName, acted.${identityName} as ActedByName,
+                         ${assignedSelect}
+                         c.Name as CategoryName
+            FROM Tasks t
+            LEFT JOIN ${identityTable} creator ON t.${createdCol} = creator.${identityKey}
+            LEFT JOIN ${identityTable} acted ON COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${createdCol}) = acted.${identityKey}
+            ${assigneeJoin}
+            LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
+            WHERE t.TaskID = @TaskID
+        `);
     
     if (result.recordset.length === 0) { 
       return res.status(404).json({ message: 'Task not found' }); 
@@ -283,7 +767,7 @@ exports.getTaskById = async (req, res) => {
 exports.getSubtasksForTask = async (req, res) => {
   const pool = req.app.locals.db;
   const { id } = req.params;
-  const { userId, isAdmin } = req.query;
+    const { userId, isAdmin } = req.query;
   
   // التحقق من وجود معرف المستخدم
   if (!userId) {
@@ -291,20 +775,34 @@ exports.getSubtasksForTask = async (req, res) => {
   }
   
   try {
-    const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === 'true', 'view');
-    
-    if (!accessCheck.hasAccess) {
-      return res.status(403).json({ message: accessCheck.reason });
-    }
+        const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === 'true', 'view');
+        if (!accessCheck.hasAccess) {
+            const canViewByListRules = await canUserViewTaskByListRules(pool, userId, isAdmin === 'true', id);
+            if (!canViewByListRules) {
+                return res.status(403).json({ message: accessCheck.reason });
+            }
+        }
     
     // الحصول على المهام الفرعية
-    let query = `
+        const schema = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubAssignedToVacancy,
+                CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubCreatedByVacancy
+        `);
+        const s = schema.recordset[0] || {};
+        const assignedCol = s.HasSubAssignedToVacancy ? 'AssignedToVacancyID' : 'AssignedTo';
+        const createdCol = s.HasSubCreatedByVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
+        const identityTable = s.HasSubAssignedToVacancy ? 'JobVacancies' : 'Users';
+        const identityKey = s.HasSubAssignedToVacancy ? 'VacancyID' : 'UserID';
+        const identityName = s.HasSubAssignedToVacancy ? 'Name' : 'FullName';
+
+        const query = `
       SELECT s.*, 
-             u.FullName as AssignedToName,
-             creator.FullName as CreatedByName
+                         u.${identityName} as AssignedToName,
+                         creator.${identityName} as CreatedByName
       FROM Subtasks s 
-      LEFT JOIN Users u ON s.AssignedTo = u.UserID 
-      LEFT JOIN Users creator ON s.CreatedBy = creator.UserID
+            LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey} 
+            LEFT JOIN ${identityTable} creator ON s.${createdCol} = creator.${identityKey}
       WHERE s.TaskID = @TaskID 
       ORDER BY s.CreatedAt DESC
     `;
@@ -326,7 +824,7 @@ exports.getSubtasksForTask = async (req, res) => {
 exports.getCommentsForTask = async (req, res) => {
   const pool = req.app.locals.db;
   const { id } = req.params;
-  const { userId, isAdmin } = req.query;
+    const { userId, isAdmin } = req.query;
   
   // التحقق من وجود معرف المستخدم
   if (!userId) {
@@ -334,20 +832,33 @@ exports.getCommentsForTask = async (req, res) => {
   }
   
   try {
-    const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === 'true', 'view');
-    
-    if (!accessCheck.hasAccess) {
-      return res.status(403).json({ message: accessCheck.reason });
-    }
+        const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === 'true', 'view');
+        if (!accessCheck.hasAccess) {
+            const canViewByListRules = await canUserViewTaskByListRules(pool, userId, isAdmin === 'true', id);
+            if (!canViewByListRules) {
+                return res.status(403).json({ message: accessCheck.reason });
+            }
+        }
     
     // الحصول على التعليقات
-    const result = await pool.request().input('TaskID', sql.Int, id).query(`
-      SELECT c.*, u.FullName as UserName 
-      FROM Comments c 
-      LEFT JOIN Users u ON c.UserID = u.UserID 
-      WHERE c.TaskID = @TaskID 
-      ORDER BY c.CreatedAt DESC
-    `);
+        const schema = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser
+        `);
+        const s = schema.recordset[0] || {};
+        const commentActorCol = s.HasCommentedByVacancy ? 'CommentedByVacancyID' : 'UserID';
+        const identityTable = s.HasCommentedByVacancy ? 'JobVacancies' : 'Users';
+        const identityKey = s.HasCommentedByVacancy ? 'VacancyID' : 'UserID';
+        const identityName = s.HasCommentedByVacancy ? 'Name' : 'FullName';
+
+        const result = await pool.request().input('TaskID', sql.Int, id).query(`
+            SELECT c.*, u.${identityName} as UserName 
+            FROM Comments c 
+            LEFT JOIN ${identityTable} u ON COALESCE(c.ActedBy, c.LastActedByVacancyID, c.${commentActorCol}) = u.${identityKey} 
+            WHERE c.TaskID = @TaskID 
+            ORDER BY c.CreatedAt DESC
+        `);
     const comments = result.recordset.map(c => {
       if (c.Content) {
         try { c.Content = encryptionConfig.decrypt(c.Content); } catch (e) {}
@@ -364,10 +875,154 @@ exports.getCommentsForTask = async (req, res) => {
 exports.getUsersByDepartment = async (req, res) => {
   const pool = req.app.locals.db;
   try {
-    const { departmentId } = req.params;
-    const result = await pool.request().input('DepartmentID', sql.Int, departmentId).query('SELECT UserID, FullName FROM Users WHERE DepartmentID = @DepartmentID');
-    res.status(200).json(result.recordset);
-  } catch (error) { res.status(500).send({ message: 'Error fetching department users' }); }
+        const { departmentId } = req.params;
+        const parsedDepartmentId = parseInt(departmentId, 10);
+        if (!Number.isInteger(parsedDepartmentId)) {
+            return res.status(400).json({ message: 'departmentId must be an integer' });
+        }
+
+        const schema = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS UsesSubtaskVacancy,
+                CASE WHEN COL_LENGTH('dbo.Users', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasUsersDepartmentID,
+                CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+                CASE WHEN COL_LENGTH('dbo.vw_UserCurrentProfile', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileDepartmentID,
+                CASE WHEN COL_LENGTH('dbo.JobVacancies', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDepartmentID,
+                CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
+                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID
+        `);
+        const s = schema.recordset[0] || {};
+
+        const parentCol = s.HasParentID ? 'ParentID' : (s.HasParentDepartmentID ? 'ParentDepartmentID' : null);
+        const deptScopeCte = parentCol ? `
+            WITH UpTree AS (
+                SELECT DepartmentID, ${parentCol} AS ParentDepartmentID
+                FROM dbo.Departments
+                WHERE DepartmentID = @DepartmentID
+                UNION ALL
+                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
+                FROM dbo.Departments d
+                INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
+            ),
+            RootDept AS (
+                SELECT TOP 1 DepartmentID AS RootDepartmentID
+                FROM UpTree
+                WHERE ParentDepartmentID IS NULL
+                ORDER BY DepartmentID
+            ),
+            DeptTree AS (
+                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
+                FROM dbo.Departments d
+                CROSS JOIN RootDept r
+                WHERE d.DepartmentID = r.RootDepartmentID
+                UNION ALL
+                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
+                FROM dbo.Departments d
+                INNER JOIN DeptTree t ON d.${parentCol} = t.DepartmentID
+            )
+        ` : '';
+
+        const inDeptProfile = parentCol
+            ? `EXISTS (SELECT 1 FROM DeptTree dt WHERE dt.DepartmentID = p.DepartmentID)`
+            : `p.DepartmentID = @DepartmentID`;
+        const inDeptVacancy = parentCol
+            ? `EXISTS (SELECT 1 FROM DeptTree dt WHERE dt.DepartmentID = jv.DepartmentID)`
+            : `jv.DepartmentID = @DepartmentID`;
+        const inDeptUsers = parentCol
+            ? `EXISTS (SELECT 1 FROM DeptTree dt WHERE dt.DepartmentID = u.DepartmentID)`
+            : `u.DepartmentID = @DepartmentID`;
+
+        let result = { recordset: [] };
+
+        if (s.UsesSubtaskVacancy) {
+            if (s.HasProfileView) {
+                const profileDeptPredicate = s.HasProfileDepartmentID ? inDeptProfile : '1=0';
+                const usersDeptPredicate = s.HasUsersDepartmentID ? inDeptUsers : '1=0';
+                const vacancyDeptPredicate = s.HasVacancyDepartmentID ? inDeptVacancy : '1=0';
+
+                result = await pool.request()
+                    .input('DepartmentID', sql.Int, parsedDepartmentId)
+                    .query(`
+                        ${deptScopeCte}
+                        SELECT DISTINCT
+                            u.UserID,
+                            COALESCE(jv.Name, u.FullName, u.UserID)
+                            + CASE
+                                    WHEN jv.Name IS NOT NULL AND u.FullName IS NOT NULL AND LTRIM(RTRIM(u.FullName)) <> ''
+                                        THEN N' - ' + u.FullName
+                                    ELSE N''
+                                END AS FullName,
+                            p.VacancyID
+                        FROM dbo.Users u
+                        LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
+                        LEFT JOIN dbo.JobVacancies jv ON p.VacancyID = jv.VacancyID
+                        WHERE (
+                                ${profileDeptPredicate}
+                                OR ${vacancyDeptPredicate}
+                                OR ${usersDeptPredicate}
+                            )
+                        ORDER BY FullName
+                    `);
+            }
+
+            if ((!result.recordset || result.recordset.length === 0) && s.HasVacancyDepartmentID) {
+                result = await pool.request()
+                    .input('DepartmentID', sql.Int, parsedDepartmentId)
+                    .query(`
+                        ${deptScopeCte}
+                        SELECT DISTINCT
+                            CAST(jv.VacancyID AS NVARCHAR(50)) AS UserID,
+                            COALESCE(jv.Name, CAST(jv.VacancyID AS NVARCHAR(50))) AS FullName,
+                            jv.VacancyID
+                        FROM dbo.JobVacancies jv
+                        WHERE ${inDeptVacancy}
+                        ORDER BY FullName
+                    `);
+            }
+
+            if ((!result.recordset || result.recordset.length <= 1) && s.HasAssignmentsTable && s.HasVacancyDepartmentID) {
+                result = await pool.request()
+                    .input('DepartmentID', sql.Int, parsedDepartmentId)
+                    .query(`
+                        ${deptScopeCte}
+                        SELECT DISTINCT
+                            u.UserID,
+                            COALESCE(jv.Name, u.FullName, u.UserID)
+                            + CASE
+                                    WHEN jv.Name IS NOT NULL AND u.FullName IS NOT NULL AND LTRIM(RTRIM(u.FullName)) <> ''
+                                        THEN N' - ' + u.FullName
+                                    ELSE N''
+                                END AS FullName,
+                            a.VacancyID
+                        FROM dbo.Assignments a
+                        INNER JOIN dbo.Users u ON a.UserID = u.UserID
+                        LEFT JOIN dbo.JobVacancies jv ON a.VacancyID = jv.VacancyID
+                        WHERE a.VacancyID IS NOT NULL
+                            AND ${inDeptVacancy}
+                        ORDER BY FullName
+                    `);
+            }
+        } else if (s.HasUsersDepartmentID) {
+            result = await pool.request()
+                .input('DepartmentID', sql.Int, parsedDepartmentId)
+                .query(`
+                    ${deptScopeCte}
+                    SELECT DISTINCT
+                        u.UserID,
+                        u.FullName,
+                        NULL AS VacancyID
+                    FROM dbo.Users u
+                    WHERE ${inDeptUsers}
+                    ORDER BY u.FullName
+                `);
+        }
+
+        res.status(200).json(result.recordset || []);
+    } catch (error) {
+        console.error('GET USERS BY DEPARTMENT ERROR:', error);
+        res.status(500).send({ message: 'Error fetching department users' });
+    }
 };
 
 exports.updateTaskStatus = async (req, res) => {
@@ -433,58 +1088,64 @@ exports.updateUserTaskPriority = async (req, res) => {
     const { userId } = req.query;
     
     console.log('UPDATE USER TASK PRIORITY - UserID:', userId, 'TaskID:', id, 'Priority:', priority);
-    
-    if (!userId) {
-        console.log('ERROR: No user ID provided');
-        return res.status(400).json({ message: 'User ID is required' });
-    }
-    
     if (!priority || !['normal', 'urgent', 'starred'].includes(priority)) {
-        console.log('ERROR: Invalid priority:', priority);
         return res.status(400).json({ message: 'Valid priority is required (normal, urgent, starred)' });
     }
-    
+    if (!userId) {
+        return res.status(400).json({ message: 'userId is required' });
+    }
+
     try {
-        // التحقق من وجود المهمة
         const taskCheck = await pool.request()
             .input('TaskID', sql.Int, id)
             .query('SELECT TaskID FROM Tasks WHERE TaskID = @TaskID');
-            
+
         if (taskCheck.recordset.length === 0) {
-            console.log('ERROR: Task not found:', id);
             return res.status(404).json({ message: 'Task not found' });
         }
-        
-        // التحقق من وجود جدول UserTaskPriorities
+
         const tableCheck = await pool.request()
             .query(`
-                SELECT COUNT(*) as tableExists 
+                SELECT 
+                    COUNT(*) as tableExists,
+                    CASE WHEN COL_LENGTH('dbo.UserTaskPriorities', 'VacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyID,
+                    CASE WHEN COL_LENGTH('dbo.UserTaskPriorities', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasUserID
                 FROM INFORMATION_SCHEMA.TABLES 
                 WHERE TABLE_NAME = 'UserTaskPriorities'
             `);
-            
+
         if (tableCheck.recordset[0].tableExists === 0) {
-            console.log('ERROR: UserTaskPriorities table does not exist');
-            return res.status(500).json({ 
-                message: 'UserTaskPriorities table not found. Please run the database migration script first.',
+            return res.status(500).json({
+                message: 'UserTaskPriorities table does not exist. Please run database migration first.',
                 error: 'TABLE_NOT_EXISTS'
             });
         }
-        
-        // إدراج أو تحديث الأولوية الشخصية
+
+        const hasVacancyID = !!tableCheck.recordset[0].HasVacancyID;
+        const hasUserID = !!tableCheck.recordset[0].HasUserID;
+        const actorCol = hasVacancyID ? 'VacancyID' : (hasUserID ? 'UserID' : null);
+        if (!actorCol) {
+            return res.status(500).json({ message: 'No actor column found in UserTaskPriorities table' });
+        }
+
+        const effectiveActorId = String(await resolveEffectiveActorId(pool, userId) || '').trim();
+        if (!effectiveActorId) {
+            return res.status(400).json({ message: 'Unable to resolve user identity for priority update' });
+        }
+
         await pool.request()
-            .input('UserID', sql.NVarChar, userId)
+            .input('ActorID', sql.NVarChar, effectiveActorId)
             .input('TaskID', sql.Int, id)
             .input('Priority', sql.NVarChar, priority)
             .query(`
                 MERGE UserTaskPriorities AS target
-                USING (SELECT @UserID AS UserID, @TaskID AS TaskID, @Priority AS Priority) AS source
-                ON target.UserID = source.UserID AND target.TaskID = source.TaskID
+                USING (SELECT @ActorID AS ActorID, @TaskID AS TaskID, @Priority AS Priority) AS source
+                ON target.${actorCol} = source.ActorID AND target.TaskID = source.TaskID
                 WHEN MATCHED THEN
                     UPDATE SET Priority = source.Priority, UpdatedAt = GETDATE()
                 WHEN NOT MATCHED THEN
-                    INSERT (UserID, TaskID, Priority, CreatedAt, UpdatedAt)
-                    VALUES (source.UserID, source.TaskID, source.Priority, GETDATE(), GETDATE());
+                    INSERT (${actorCol}, TaskID, Priority, CreatedAt, UpdatedAt)
+                    VALUES (source.ActorID, source.TaskID, source.Priority, GETDATE(), GETDATE());
             `);
             
         console.log('SUCCESS: User task priority updated successfully');
@@ -510,13 +1171,38 @@ exports.getUserTaskPriority = async (req, res) => {
     }
     
     try {
+        const tableCheck = await pool.request().query(`
+            SELECT 
+                COUNT(*) as tableExists,
+                CASE WHEN COL_LENGTH('dbo.UserTaskPriorities', 'VacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyID,
+                CASE WHEN COL_LENGTH('dbo.UserTaskPriorities', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasUserID
+            FROM INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_NAME = 'UserTaskPriorities'
+        `);
+
+        if (tableCheck.recordset[0].tableExists === 0) {
+            return res.status(200).json({ priority: 'normal' });
+        }
+
+        const hasVacancyID = !!tableCheck.recordset[0].HasVacancyID;
+        const hasUserID = !!tableCheck.recordset[0].HasUserID;
+        const actorCol = hasVacancyID ? 'VacancyID' : (hasUserID ? 'UserID' : null);
+        if (!actorCol) {
+            return res.status(200).json({ priority: 'normal' });
+        }
+
+        const effectiveActorId = String(await resolveEffectiveActorId(pool, userId) || '').trim();
+        if (!effectiveActorId) {
+            return res.status(200).json({ priority: 'normal' });
+        }
+
         const result = await pool.request()
-            .input('UserID', sql.NVarChar, userId)
+            .input('ActorID', sql.NVarChar, effectiveActorId)
             .input('TaskID', sql.Int, id)
             .query(`
                 SELECT Priority 
                 FROM UserTaskPriorities 
-                WHERE UserID = @UserID AND TaskID = @TaskID
+                WHERE ${actorCol} = @ActorID AND TaskID = @TaskID
             `);
             
         if (result.recordset.length === 0) {
@@ -595,18 +1281,34 @@ exports.updateTaskView = async (req, res) => {
     }
     
     try {
+        const schema = await pool.request().query(`
+            SELECT
+              CASE WHEN COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasViewedByVacancy,
+              CASE WHEN COL_LENGTH('dbo.TaskViews', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasUserID
+        `);
+        const s = schema.recordset[0] || {};
+        const actorCol = s.HasViewedByVacancy ? 'ViewedByVacancyID' : (s.HasUserID ? 'UserID' : null);
+        if (!actorCol) {
+            return res.status(500).json({ message: 'No actor column found in TaskViews table' });
+        }
+
+        const effectiveActorId = String(await resolveEffectiveActorId(pool, userId) || '').trim();
+        if (!effectiveActorId) {
+            return res.status(400).json({ message: 'Unable to resolve user identity for task view update' });
+        }
+
         await pool.request()
-            .input('UserID', sql.NVarChar, userId)
+            .input('ActorID', sql.NVarChar, effectiveActorId)
             .input('TaskID', sql.Int, taskId)
             .query(`
                 MERGE TaskViews AS target
-                USING (SELECT @UserID AS UserID, @TaskID AS TaskID) AS source
-                ON target.UserID = source.UserID AND target.TaskID = source.TaskID
+                USING (SELECT @ActorID AS ActorID, @TaskID AS TaskID) AS source
+                ON target.${actorCol} = source.ActorID AND target.TaskID = source.TaskID
                 WHEN MATCHED THEN
                     UPDATE SET LastViewedAt = GETDATE()
                 WHEN NOT MATCHED THEN
-                    INSERT (UserID, TaskID, LastViewedAt)
-                    VALUES (source.UserID, source.TaskID, GETDATE());
+                    INSERT (${actorCol}, TaskID, LastViewedAt)
+                    VALUES (source.ActorID, source.TaskID, GETDATE());
             `);
         res.status(200).json({ message: 'Task view updated successfully' });
     } catch (error) {
@@ -627,7 +1329,7 @@ exports.updateTaskUrl = async (req, res) => {
 
     try {
         // التحقق من الصلاحية
-        const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === true || isAdmin === 'true', 'edit');
+        const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === true || isAdmin === 'true', 'view');
         if (!accessCheck.hasAccess) {
             return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية لتعديل هذه المهمة' });
         }
@@ -712,7 +1414,7 @@ exports.updateTaskTitle = async (req, res) => {
 
     try {
         // التحقق من الصلاحية
-        const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === true || isAdmin === 'true', 'edit');
+        const accessCheck = await checkTaskAccess(pool, id, userId, isAdmin === true || isAdmin === 'true', 'view');
         if (!accessCheck.hasAccess) {
             return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية لتعديل هذه المهمة' });
         }
@@ -752,88 +1454,114 @@ exports.getTasksWithNotifications = async (req, res) => {
     if (!userId) {
         return res.status(400).json({ message: 'userId is required' });
     }
-    
+
     try {
-        const baseQuery = await getTasksQueryWithDelegation(pool, userId, isAdmin === 'true');
+        const effectiveActorId = await resolveEffectiveActorId(pool, userId);
+        res.set('X-Effective-Actor-ID', String(effectiveActorId || ''));
+        const schema = await pool.request().query(`
+            SELECT
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskVacancy,
+              CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubVacancy,
+              CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
+                     AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasDelegationVacancy,
+              CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignNotifVacancy,
+              CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentNotifVacancy,
+              CASE WHEN COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskViewsVacancy
+        `);
 
-        // تعديل الاستعلام لإضافة معلومات الإشعارات مع الحفاظ على ActedByName
-        let query = baseQuery.replace(
-            'SELECT DISTINCT t.*, creator.FullName as CreatedByName, acted.FullName as ActedByName, c.Name as CategoryName',
-            `SELECT DISTINCT
+        const s = schema.recordset[0] || {};
+        const isVacancy = !!(s.HasTaskVacancy || s.HasSubVacancy || s.HasDelegationVacancy);
+
+        const taskCreatorCol = isVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
+        const taskAssignedCol = isVacancy ? null : 'AssignedTo';
+        const subAssignedCol = isVacancy ? 'AssignedToVacancyID' : 'AssignedTo';
+        const delegatorCol = isVacancy ? 'DelegatorVacancyID' : 'DelegatorUserID';
+        const delegateCol = isVacancy ? 'DelegateVacancyID' : 'DelegateUserID';
+        const assignNotifCol = s.HasAssignNotifVacancy ? 'AssignedToVacancyID' : 'AssignedToUserID';
+        const commentNotifCol = s.HasCommentNotifVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
+        const taskViewCol = s.HasTaskViewsVacancy ? 'ViewedByVacancyID' : 'UserID';
+        const identityTable = isVacancy ? 'JobVacancies' : 'Users';
+        const identityKey = isVacancy ? 'VacancyID' : 'UserID';
+        const identityName = isVacancy ? 'Name' : 'FullName';
+
+        const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
+
+        const accessParts = [
+            `t.${taskCreatorCol} = @UserID`,
+            `EXISTS (SELECT 1 FROM Subtasks s_inner WHERE s_inner.TaskID = t.TaskID AND s_inner.${subAssignedCol} = @UserID)`,
+            `EXISTS (
+                SELECT 1
+                FROM TaskDelegations d
+                WHERE d.${delegatorCol} = t.${taskCreatorCol}
+                  AND d.${delegateCol} = @UserID
+                  AND d.IsActive = 1
+                  AND d.StartDate <= GETDATE()
+                  AND (d.EndDate IS NULL OR d.EndDate >= GETDATE())
+            )`
+        ];
+        if (taskAssignedCol) {
+            accessParts.splice(1, 0, `t.${taskAssignedCol} = @UserID`);
+        }
+        if (scopeDepartmentIds.length > 0) {
+            const scopeParams = scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ');
+            accessParts.push(`t.DepartmentID IN (${scopeParams})`);
+        }
+
+        const assigneeSelect = taskAssignedCol
+            ? `t.${taskAssignedCol} as AssignedTo, assignee.${identityName} as AssignedToName,`
+            : `CAST(NULL as nvarchar(50)) as AssignedTo, CAST(NULL as nvarchar(200)) as AssignedToName,`;
+
+        const assigneeJoin = taskAssignedCol
+            ? `LEFT JOIN ${identityTable} assignee ON t.${taskAssignedCol} = assignee.${identityKey}`
+            : '';
+
+        const query = `
+            SELECT DISTINCT
                 t.*,
-                creator.FullName as CreatedByName,
-                acted.FullName as ActedByName,
+                creator.${identityName} as CreatedByName,
+                acted.${identityName} as ActedByName,
+                ${assigneeSelect}
                 c.Name as CategoryName,
-                CASE 
+                CASE
                     WHEN EXISTS (
-                        SELECT 1 FROM Subtasks s 
+                        SELECT 1 FROM Subtasks s
                         WHERE s.TaskID = t.TaskID
                     ) THEN 1
                     ELSE 0
                 END as HasNewSubtasks,
-                CASE 
+                CASE
                     WHEN EXISTS (
-                        SELECT 1 FROM TaskAssignmentNotifications tan 
-                        WHERE tan.TaskID = t.TaskID 
-                        AND tan.AssignedToUserID = '${userId}'
-                        AND tan.IsRead = 0
-                        AND tan.CreatedAt > ISNULL(tv.LastViewedAt, '1900-01-01')
+                        SELECT 1 FROM TaskAssignmentNotifications tan
+                        WHERE tan.TaskID = t.TaskID
+                          AND tan.${assignNotifCol} = @UserID
+                          AND tan.IsRead = 0
+                          AND tan.CreatedAt > ISNULL(tv.LastViewedAt, '1900-01-01')
                     ) THEN 1
                     ELSE 0
                 END as HasAssignmentNotifications,
                 (
-                    SELECT COUNT(*) 
+                    SELECT COUNT(*)
                     FROM CommentNotifications cn
                     WHERE cn.TaskID = t.TaskID
-                      AND cn.NotifyUserID = '${userId}'
+                      AND cn.${commentNotifCol} = @UserID
                       AND cn.IsRead = 0
                       AND cn.CreatedAt > ISNULL(tv.LastViewedAt, '1900-01-01')
-                ) as HasCommentNotifications`
-        );
+                ) as HasCommentNotifications
+            FROM Tasks t
+            LEFT JOIN ${identityTable} creator ON t.${taskCreatorCol} = creator.${identityKey}
+            LEFT JOIN ${identityTable} acted ON COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${taskCreatorCol}) = acted.${identityKey}
+            ${assigneeJoin}
+            LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
+            LEFT JOIN TaskViews tv ON tv.TaskID = t.TaskID AND tv.${taskViewCol} = @UserID
+            WHERE t.Status NOT IN ('completed', 'cancelled')
+              AND (${isAdmin === 'true' ? '1=1' : accessParts.join(' OR ')})
+            ORDER BY t.CreatedAt DESC
+        `;
 
-        // دعم صيغة المدير بدون DISTINCT
-        query = query.replace(
-            'SELECT t.*, creator.FullName as CreatedByName, acted.FullName as ActedByName, c.Name as CategoryName',
-            `SELECT
-                t.*,
-                creator.FullName as CreatedByName,
-                acted.FullName as ActedByName,
-                c.Name as CategoryName,
-                CASE 
-                    WHEN EXISTS (
-                        SELECT 1 FROM Subtasks s 
-                        WHERE s.TaskID = t.TaskID
-                    ) THEN 1
-                    ELSE 0
-                END as HasNewSubtasks,
-                CASE 
-                    WHEN EXISTS (
-                        SELECT 1 FROM TaskAssignmentNotifications tan 
-                        WHERE tan.TaskID = t.TaskID 
-                        AND tan.AssignedToUserID = '${userId}'
-                        AND tan.IsRead = 0
-                        AND tan.CreatedAt > ISNULL(tv.LastViewedAt, '1900-01-01')
-                    ) THEN 1
-                    ELSE 0
-                END as HasAssignmentNotifications,
-                (
-                    SELECT COUNT(*) 
-                    FROM CommentNotifications cn
-                    WHERE cn.TaskID = t.TaskID
-                      AND cn.NotifyUserID = '${userId}'
-                      AND cn.IsRead = 0
-                      AND cn.CreatedAt > ISNULL(tv.LastViewedAt, '1900-01-01')
-                ) as HasCommentNotifications`
-        );
-
-        // إضافة الربط مع TaskViews لأي صيغة
-        query = query.replace(
-            'LEFT JOIN Categories c ON t.CategoryID = c.CategoryID',
-            `LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
-             LEFT JOIN TaskViews tv ON tv.TaskID = t.TaskID AND tv.UserID = '${userId}'`
-        );
-        
-        const request = pool.request();
+        const request = pool.request().input('UserID', sql.NVarChar, effectiveActorId);
+        scopeDepartmentIds.forEach((departmentId, index) => {
+            request.input(`ScopeDepartmentID${index}`, sql.NVarChar, departmentId);
+        });
         const result = await request.query(query);
         const tasks = result.recordset.map(t => {
             if (t.Description) {
@@ -863,7 +1591,7 @@ exports.updateTaskCategory = async (req, res) => {
 
     try {
         // التحقق من الصلاحية
-        const accessCheck = await checkTaskAccess(pool, taskId, userId, isAdmin === true || isAdmin === 'true', 'edit');
+        const accessCheck = await checkTaskAccess(pool, taskId, userId, isAdmin === true || isAdmin === 'true', 'view');
         if (!accessCheck.hasAccess) {
             return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية لتعديل هذه المهمة' });
         }
@@ -904,6 +1632,10 @@ exports.getCompletedTasks = async (req, res) => {
     const offset = (page - 1) * pageSize;
 
     try {
+        const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
+        const deptScopeClause = scopeDepartmentIds.length > 0
+            ? ` OR t.DepartmentID IN (${scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ')})`
+            : '';
         let query;
 
         if (isAdmin === 'true') {
@@ -916,7 +1648,7 @@ exports.getCompletedTasks = async (req, res) => {
                 LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
                 WHERE t.Status IN ('completed', 'cancelled')
                 ORDER BY t.CreatedAt DESC
-                OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY
+                OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             `;
         } else {
             // المستخدم العادي: المهام المكتملة/الملغاة التي أنشأها أو لديه فيها مهام فرعية
@@ -928,18 +1660,25 @@ exports.getCompletedTasks = async (req, res) => {
                 LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
                 WHERE t.Status IN ('completed', 'cancelled')
                   AND (
-                    t.CreatedBy = '${userId}'
+                                        t.CreatedBy = @UserID
                     OR EXISTS (
                         SELECT 1 FROM Subtasks s 
-                        WHERE s.TaskID = t.TaskID AND s.AssignedTo = '${userId}'
+                                                WHERE s.TaskID = t.TaskID AND s.AssignedTo = @UserID
                     )
+                                        ${deptScopeClause}
                   )
                 ORDER BY t.CreatedAt DESC
-                OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY
+                                OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             `;
         }
 
-        const request = pool.request();
+                const request = pool.request()
+                        .input('UserID', sql.NVarChar, userId)
+                        .input('Offset', sql.Int, offset)
+                        .input('PageSize', sql.Int, pageSize);
+                scopeDepartmentIds.forEach((departmentId, index) => {
+                    request.input(`ScopeDepartmentID${index}`, sql.NVarChar, departmentId);
+                });
         const result = await request.query(query);
         const tasks = result.recordset.map(t => {
             if (t.Description) {
@@ -964,7 +1703,7 @@ exports.getCompletedTasks = async (req, res) => {
 // البحث في المهام المكتملة في قاعدة البيانات (العنوان، التفاصيل، المهام الفرعية، التعليقات)
 exports.searchCompletedTasks = async (req, res) => {
     const pool = req.app.locals.db;
-    const { userId, isAdmin, q } = req.query;
+    const { userId, isAdmin, q, maxScan } = req.query;
 
     if (!userId) {
         return res.status(401).json({ message: 'User identification is required.' });
@@ -974,13 +1713,18 @@ exports.searchCompletedTasks = async (req, res) => {
     }
 
     const searchTerm = q.toLowerCase();
+    const maxTasksToScan = Math.min(Math.max(parseInt(maxScan, 10) || 600, 50), 3000);
 
     try {
+        const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
+        const deptScopeClause = scopeDepartmentIds.length > 0
+            ? ` OR t.DepartmentID IN (${scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ')})`
+            : '';
         let tasksQuery;
 
         if (isAdmin === 'true') {
             tasksQuery = `
-                SELECT t.*, 
+                SELECT TOP (@MaxScan) t.*, 
                        creator.FullName as CreatedByName, 
                        acted.FullName as ActedByName, 
                        assignee.FullName as AssignedToName,
@@ -995,7 +1739,7 @@ exports.searchCompletedTasks = async (req, res) => {
             `;
         } else {
             tasksQuery = `
-                SELECT DISTINCT t.*, 
+                SELECT DISTINCT TOP (@MaxScan) t.*, 
                        creator.FullName as CreatedByName, 
                        acted.FullName as ActedByName, 
                        assignee.FullName as AssignedToName,
@@ -1007,17 +1751,24 @@ exports.searchCompletedTasks = async (req, res) => {
                 LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
                 WHERE t.Status IN ('completed', 'cancelled')
                   AND (
-                    t.CreatedBy = '${userId}'
+                                        t.CreatedBy = @UserID
                     OR EXISTS (
                         SELECT 1 FROM Subtasks s 
-                        WHERE s.TaskID = t.TaskID AND s.AssignedTo = '${userId}'
+                                                WHERE s.TaskID = t.TaskID AND s.AssignedTo = @UserID
                     )
+                    ${deptScopeClause}
                   )
                 ORDER BY t.CreatedAt DESC
             `;
         }
 
-        const tasksResult = await pool.request().query(tasksQuery);
+        const request = pool.request()
+            .input('UserID', sql.NVarChar, userId)
+            .input('MaxScan', sql.Int, maxTasksToScan);
+        scopeDepartmentIds.forEach((departmentId, index) => {
+            request.input(`ScopeDepartmentID${index}`, sql.NVarChar, departmentId);
+        });
+        const tasksResult = await request.query(tasksQuery);
         let tasks = tasksResult.recordset.map(t => {
             if (t.Description) {
                 try { t.Description = encryptionConfig.decrypt(t.Description); } catch (e) {}
@@ -1032,48 +1783,77 @@ exports.searchCompletedTasks = async (req, res) => {
             return res.status(200).json([]);
         }
 
-        const taskIds = tasks.map(t => t.TaskID);
-        const idsList = taskIds.join(',');
+        // المرحلة الأولى: مطابقة حقول المهمة نفسها فقط (أسرع)
+        const taskFieldMatches = new Set();
+        for (const t of tasks) {
+            const matchesTaskFields =
+                (t.Title && t.Title.toLowerCase().includes(searchTerm)) ||
+                (t.Description && t.Description.toLowerCase().includes(searchTerm)) ||
+                (t.CreatedByName && t.CreatedByName.toLowerCase().includes(searchTerm)) ||
+                (t.AssignedToName && t.AssignedToName.toLowerCase().includes(searchTerm));
+            if (matchesTaskFields) {
+                taskFieldMatches.add(t.TaskID);
+            }
+        }
+
+        // المرحلة الثانية: نبحث داخل المهام الفرعية/التعليقات فقط للمهام غير المطابقة أولياً
+        const unresolvedTaskIds = tasks
+            .map(t => Number(t.TaskID))
+            .filter(id => Number.isFinite(id) && !taskFieldMatches.has(id));
 
         let subtasksByTaskId = {};
         let commentsByTaskId = {};
 
-        // جلب المهام الفرعية لكل المهام المكتملة
-        const subtasksResult = await pool.request().query(`
-            SELECT s.*, 
-                   u.FullName as AssignedToName,
-                   creator.FullName as CreatedByName
-            FROM Subtasks s 
-            LEFT JOIN Users u ON s.AssignedTo = u.UserID 
-            LEFT JOIN Users creator ON s.CreatedBy = creator.UserID
-            WHERE s.TaskID IN (${idsList})
-            ORDER BY s.CreatedAt DESC
-        `);
-        subtasksByTaskId = subtasksResult.recordset.reduce((acc, s) => {
-            if (s.Title) {
-                try { s.Title = encryptionConfig.decrypt(s.Title); } catch (_) {}
-            }
-            if (!acc[s.TaskID]) acc[s.TaskID] = [];
-            acc[s.TaskID].push(s);
-            return acc;
-        }, {});
+        if (unresolvedTaskIds.length > 0) {
+            const unresolvedIdsList = unresolvedTaskIds.join(',');
 
-        // جلب التعليقات لكل المهام المكتملة
-        const commentsResult = await pool.request().query(`
-            SELECT c.*, u.FullName as UserName 
-            FROM Comments c 
-            LEFT JOIN Users u ON c.UserID = u.UserID 
-            WHERE c.TaskID IN (${idsList})
-            ORDER BY c.CreatedAt DESC
-        `);
-        commentsByTaskId = commentsResult.recordset.reduce((acc, c) => {
-            if (c.Content) {
-                try { c.Content = encryptionConfig.decrypt(c.Content); } catch (e) {}
-            }
-            if (!acc[c.TaskID]) acc[c.TaskID] = [];
-            acc[c.TaskID].push(c);
-            return acc;
-        }, {});
+            const subtasksResult = await pool.request()
+                .input('TaskIDs', sql.NVarChar(sql.MAX), unresolvedIdsList)
+                .query(`
+                SELECT s.*, 
+                       u.FullName as AssignedToName,
+                       creator.FullName as CreatedByName
+                FROM Subtasks s 
+                LEFT JOIN Users u ON s.AssignedTo = u.UserID 
+                LEFT JOIN Users creator ON s.CreatedBy = creator.UserID
+                WHERE s.TaskID IN (
+                    SELECT TRY_CAST(value AS INT)
+                    FROM STRING_SPLIT(@TaskIDs, ',')
+                    WHERE TRY_CAST(value AS INT) IS NOT NULL
+                )
+                ORDER BY s.CreatedAt DESC
+            `);
+            subtasksByTaskId = subtasksResult.recordset.reduce((acc, s) => {
+                if (s.Title) {
+                    try { s.Title = encryptionConfig.decrypt(s.Title); } catch (_) {}
+                }
+                if (!acc[s.TaskID]) acc[s.TaskID] = [];
+                acc[s.TaskID].push(s);
+                return acc;
+            }, {});
+
+            const commentsResult = await pool.request()
+                .input('TaskIDs', sql.NVarChar(sql.MAX), unresolvedIdsList)
+                .query(`
+                SELECT c.*, u.FullName as UserName 
+                FROM Comments c 
+                LEFT JOIN Users u ON c.UserID = u.UserID 
+                WHERE c.TaskID IN (
+                    SELECT TRY_CAST(value AS INT)
+                    FROM STRING_SPLIT(@TaskIDs, ',')
+                    WHERE TRY_CAST(value AS INT) IS NOT NULL
+                )
+                ORDER BY c.CreatedAt DESC
+            `);
+            commentsByTaskId = commentsResult.recordset.reduce((acc, c) => {
+                if (c.Content) {
+                    try { c.Content = encryptionConfig.decrypt(c.Content); } catch (e) {}
+                }
+                if (!acc[c.TaskID]) acc[c.TaskID] = [];
+                acc[c.TaskID].push(c);
+                return acc;
+            }, {});
+        }
 
         const filteredTasks = tasks
             .map(t => {
@@ -1081,10 +1861,7 @@ exports.searchCompletedTasks = async (req, res) => {
                 const taskComments = commentsByTaskId[t.TaskID] || [];
 
                 const matchesSearch =
-                    (t.Title && t.Title.toLowerCase().includes(searchTerm)) ||
-                    (t.Description && t.Description.toLowerCase().includes(searchTerm)) ||
-                    (t.CreatedByName && t.CreatedByName.toLowerCase().includes(searchTerm)) ||
-                    (t.AssignedToName && t.AssignedToName.toLowerCase().includes(searchTerm)) ||
+                    taskFieldMatches.has(t.TaskID) ||
                     (taskSubtasks.length > 0 &&
                         taskSubtasks.some(st => st.Title && st.Title.toLowerCase().includes(searchTerm))) ||
                     (taskComments.length > 0 &&
