@@ -92,55 +92,83 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   const [activityError, setActivityError] = useState<string | null>(null);
   const [activityHasMore, setActivityHasMore] = useState(true);
   const [activityPage, setActivityPage] = useState(0);
+  const [activityInfoMsg, setActivityInfoMsg] = useState<string | null>(null);
   const [effectiveActorIdFromApi, setEffectiveActorIdFromApi] = useState<string>('');
+
+  // حدّ أقصى للعودة للوراء: 52 أسبوعاً (سنة كاملة)
+  const ACTIVITY_MAX_PAGES = 52;
 
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   const subtaskAssigneeId = (subtask: Subtask) => String((subtask as any).AssignedToVacancyID ?? (subtask as any).AssignedTo ?? '');
 
-  const actorIdCandidates = useMemo(() => {
-    const ids = new Set<string>();
-    const add = (value: unknown) => {
-      const normalized = String(value ?? '').trim();
-      if (normalized) ids.add(normalized);
-    };
 
-    add(actorId);
-    add(effectiveActorIdFromApi);
-    add(currentUser.UserID);
-    add(resolveCurrentActorId(currentUser));
-    add((currentUser as any).CurrentVacancyID);
-    add((currentUser as any).ActiveVacancyID);
-    add((currentUser as any).VacancyID);
 
-    return ids;
-  }, [actorId, effectiveActorIdFromApi, currentUser]);
+  // معرّف المنصب الحالي للمستخدم (VacancyID) من localStorage
+  const currentVacancyId = String(
+    (currentUser as any).CurrentVacancyID ||
+    (currentUser as any).ActiveVacancyID ||
+    (currentUser as any).VacancyID ||
+    ''
+  ).trim();
 
-  const isActorMatch = (value: unknown) => {
-    const normalized = String(value ?? '').trim();
-    return !!normalized && actorIdCandidates.has(normalized);
-  };
+  // UserID الصريح للمستخدم (بدون أرقام المناصب)
+  const currentUserIdStrict = String(currentUser.UserID ?? '').trim();
 
+  // VacancyID الفعلي: يفضّل قيمة localStorage، ويقع على effectiveActorIdFromApi كاحتياط
+  // effectiveActorIdFromApi هو المعرّف الذي حلّه الخادم ويُرسَل في ترويسة X-Effective-Actor-ID
+  const effectiveVacancyId = currentVacancyId || effectiveActorIdFromApi;
+
+  // مطابقة صارمة: VacancyID مع VacancyID، UserID مع UserID — لا خلط بينهما
   const isTaskCreatedByActor = (task: Task) => {
-    return isActorMatch(task.CreatedByVacancyID) || isActorMatch(task.CreatedBy);
+    const taskVacancyId = String((task as any).CreatedByVacancyID ?? '').trim();
+    const taskCreatedBy = String(task.CreatedBy ?? '').trim();
+    if (taskVacancyId && effectiveVacancyId && taskVacancyId === effectiveVacancyId) return true;
+    if (taskCreatedBy && currentUserIdStrict && taskCreatedBy === currentUserIdStrict) return true;
+    return false;
   };
 
   const isSubtaskAssignedToActor = (subtask: Subtask) => {
-    return isActorMatch((subtask as any).AssignedToVacancyID) || isActorMatch((subtask as any).AssignedTo);
+    const subVacancyId = String((subtask as any).AssignedToVacancyID ?? '').trim();
+    const subAssignedTo = String((subtask as any).AssignedTo ?? '').trim();
+    if (subVacancyId && effectiveVacancyId && subVacancyId === effectiveVacancyId) return true;
+    if (subAssignedTo && currentUserIdStrict && subAssignedTo === currentUserIdStrict) return true;
+    return false;
+  };
+
+  // تمييز بصري: VacancyID حصراً (باستخدام effectiveVacancyId كاحتياط)
+  const isMySubtaskByVacancyId = (subtask: Subtask): boolean => {
+    if (!effectiveVacancyId) return false;
+    const subtaskVacancyId = String((subtask as any).AssignedToVacancyID ?? '').trim();
+    return !!subtaskVacancyId && subtaskVacancyId === effectiveVacancyId;
+  };
+
+  const isCommentByActor = (task: Task) => {
+    return (task.comments || []).some(comment => {
+      const commentVacancyId = String((comment as any).CommentedByVacancyID ?? '').trim();
+      const commentUserId = String((comment as any).UserID ?? '').trim();
+      if (commentVacancyId && effectiveVacancyId && commentVacancyId === effectiveVacancyId) return true;
+      if (commentUserId && currentUserIdStrict && commentUserId === currentUserIdStrict) return true;
+      return false;
+    });
   };
 
   const isTaskRelatedToActor = (task: Task) => {
     if (isTaskCreatedByActor(task)) return true;
-    return (task.subtasks || []).some(st => isSubtaskAssignedToActor(st));
+    if ((task.subtasks || []).some(st => isSubtaskAssignedToActor(st))) return true;
+    if (isCommentByActor(task)) return true;
+    return false;
   };
 
+  // نعتمد على قيم أوّلية (string/boolean) بدل كائن currentUser لتفادي إعادة إنشاء الدالة
+  // مع كل render → ما كان يسبّب تصفير activityPage فور النقر على "تحميل المزيد".
+  const isAdminFlag = !!currentUser.IsAdmin;
   const fetchActivity = useCallback(async (pageIndex = 0) => {
     setIsLoadingActivity(true);
     setActivityError(null);
+    setActivityInfoMsg(null);
     try {
-      const actingUserId = actorId;
-      const isAdmin = currentUser.IsAdmin;
       // Fetch 7 days of activity based on pageIndex
-      const res = await fetch(`/api/tasks/activity?userId=${actingUserId}&isAdmin=${isAdmin}&page=${pageIndex}&days=7`);
+      const res = await fetch(`/api/tasks/activity?userId=${actorId}&isAdmin=${isAdminFlag}&page=${pageIndex}&days=7`);
       const ct = res.headers.get('content-type') || '';
       if (!res.ok || !ct.includes('application/json')) {
         if (pageIndex === 0) setActivityItems([]);
@@ -149,10 +177,24 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       }
       const data = await res.json().catch(() => []);
       const newItems = Array.isArray(data) ? (data as ActivityItem[]) : [];
-      
-      // Always allow loading more for time-based pagination (up to a reasonable limit)
-      // If we receive 0 items, it just means no activity in that specific week.
-      setActivityHasMore(true);
+
+      // بناء نص نطاق الفترة التي تم جلبها (للعرض للمستخدم)
+      const endDate = new Date();
+      endDate.setDate(endDate.getDate() - (pageIndex * 7));
+      const startDate = new Date(endDate);
+      startDate.setDate(startDate.getDate() - 7);
+      const fmt = (d: Date) => d.toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' });
+      const rangeLabel = `${fmt(startDate)} — ${fmt(endDate)}`;
+
+      // تغذية راجعة عند وجود أسبوع بلا نشاط — حتى لا يبدو الزر كأنه لا يعمل
+      if (newItems.length === 0 && pageIndex > 0) {
+        setActivityInfoMsg(`لا توجد تحديثات في الفترة: ${rangeLabel}. اضغط "تحميل المزيد" للبحث في فترة أبعد.`);
+      } else if (newItems.length > 0) {
+        setActivityInfoMsg(`آخر فترة تم جلبها: ${rangeLabel}`);
+      }
+
+      // السماح بالتحميل حتى الحدّ الأقصى
+      setActivityHasMore(pageIndex < ACTIVITY_MAX_PAGES);
 
       setActivityItems(prev => pageIndex === 0 ? newItems : [...prev, ...newItems]);
       setActivityPage(pageIndex);
@@ -162,21 +204,29 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     } finally {
       setIsLoadingActivity(false);
     }
-  }, [currentUser]);
+  }, [actorId, isAdminFlag]);
 
   useEffect(() => {
     if (activeTab === 'updates') {
-      // Reset and fetch first page
+      // Reset and fetch first page — فقط عند تبديل التبويب فعلياً
       setActivityPage(0);
       setActivityHasMore(true);
+      setActivityInfoMsg(null);
       fetchActivity(0);
     }
-  }, [activeTab, fetchActivity]);
+    // نتعمّد استبعاد fetchActivity من الـ deps كي لا يُعاد التصفير عند كل render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   const loadMoreActivity = () => {
-    if (!isLoadingActivity && activityHasMore) {
-      fetchActivity(activityPage + 1);
+    if (isLoadingActivity) return;
+    if (!activityHasMore) return;
+    if (activityPage >= ACTIVITY_MAX_PAGES) {
+      setActivityHasMore(false);
+      setActivityInfoMsg('تم الوصول إلى الحدّ الأقصى للفترات المتاحة (سنة كاملة).');
+      return;
     }
+    fetchActivity(activityPage + 1);
   };
 
   const exportActivityLog = () => {
@@ -715,55 +765,33 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
 
 
-  const activeTasks = filteredTasks.filter(task => {
-    // استبعاد المهام غير المفتوحة
-    if (
-      task.Status === 'completed' ||
-      task.Status === 'cancelled' ||
-      task.Status === 'external' ||
-      task.Status === 'approved-in-progress'
-    ) {
-      return false;
-    }
+  const isOpenStatus = (task: Task) =>
+    task.Status !== 'completed' &&
+    task.Status !== 'cancelled' &&
+    task.Status !== 'external' &&
+    task.Status !== 'approved-in-progress';
 
+  const activeTasks = filteredTasks.filter(task => {
+    if (!isOpenStatus(task)) return false;
+    const subtasks = task.subtasks || [];
+    if (subtasks.some(subtask => isSubtaskAssignedToActor(subtask) && !subtask.IsCompleted)) return true;
+    if (subtasks.length === 0 && isTaskCreatedByActor(task)) return true;
+    return false;
+  });
+
+  const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
+  const externalTasks = filteredTasks.filter(task => task.Status === 'external');
+
+  // المهام المتعلقة بي ولا يوجد فيها إجراء معلق (سواء أنشأتها أو أنهيت جميع مهامي الفرعية)
+  // "أنجزت إجرائي فيها": مفتوحة + متعلقة بي + لا توجد مهام فرعية معلقة لي
+  // يشمل: مهام أنشأتها بلا مهام فرعية لي، ومهام أنهيت فيها جميع مهامي الفرعية
+  const actionedTasks = filteredTasks.filter(task => {
+    if (!isOpenStatus(task)) return false;
     const subtasks = task.subtasks || [];
     const hasMyIncompleteSubtasks = subtasks.some(
       subtask => isSubtaskAssignedToActor(subtask) && !subtask.IsCompleted
     );
-
-    const allSubtasksCompleted = subtasks.length === 0 || subtasks.every(subtask => subtask.IsCompleted);
-    const createdByMeAndAllCompleted = isTaskCreatedByActor(task) && allSubtasksCompleted;
-
-    return hasMyIncompleteSubtasks || createdByMeAndAllCompleted;
-  });
-  const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
-  const externalTasks = filteredTasks.filter(task => task.Status === 'external');
-  
-  // المهام التي أنجزت إجرائي فيها:
-  // - إما أكملت كل المهام الفرعية المسندة إليّ
-  // - أو أنني منشئ المهمة وليس لدي مهام فرعية مسندة لي، لكن توجد مهام فرعية مسندة لآخرين
-  const actionedTasks = filteredTasks.filter(task => {
-    // استبعاد المهام غير المفتوحة
-    if (
-      task.Status === 'completed' ||
-      task.Status === 'cancelled' ||
-      task.Status === 'external' ||
-      task.Status === 'approved-in-progress'
-    ) {
-      return false;
-    }
-
-    const subtasks = task.subtasks || [];
-    if (subtasks.length === 0) return false;
-
-    const otherAssignedSubtasks = subtasks.filter(
-      subtask => {
-        const assignedTo = subtaskAssigneeId(subtask as any);
-        return !!assignedTo && !isSubtaskAssignedToActor(subtask);
-      }
-    );
-
-    return otherAssignedSubtasks.length > 0;
+    return !hasMyIncompleteSubtasks;
   });
 
   // دالة للحصول على أكبر معرف للمهام الفرعية الغير مكتملة
@@ -1208,6 +1236,12 @@ const TaskList = ({ currentUser }: TaskListProps) => {
           </div>
           </div>
 
+          {activityInfoMsg && (
+            <div className="mb-4 text-sm text-center text-content-secondary bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md py-2 px-3">
+              {activityInfoMsg}
+            </div>
+          )}
+
           {isLoadingActivity && activityItems.length === 0 ? (
             <div className="flex justify-center items-center py-8">
               <Loader2 className="animate-spin mr-2" />
@@ -1325,15 +1359,17 @@ const TaskList = ({ currentUser }: TaskListProps) => {
           ) : (
             <div className="flex flex-col items-center justify-center py-8">
               <p className="text-content-secondary mb-4">لا توجد تحديثات في الفترة الحالية.</p>
-              {activityHasMore && (
+              {activityHasMore ? (
                 <button
                   onClick={loadMoreActivity}
                   disabled={isLoadingActivity}
                   className="bg-primary text-white px-6 py-2 rounded-md hover:bg-primary-dark disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   {isLoadingActivity ? <Loader2 className="animate-spin" size={16} /> : null}
-                  {isLoadingActivity ? 'جاري التحميل...' : 'تحميل فترة سابقة'}
+                  {isLoadingActivity ? 'جاري التحميل...' : 'تحميل فترة سابقة (7 أيام قبل ذلك)'}
                 </button>
+              ) : (
+                <p className="text-xs text-gray-400">تم الوصول إلى الحدّ الأقصى للبحث في الأنشطة (سنة كاملة).</p>
               )}
             </div>
           )}
@@ -1363,6 +1399,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
+                    isMySubtask={isMySubtaskByVacancyId}
                   />
                 ))}
               </div>
@@ -1376,6 +1413,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
+                    isMySubtask={isMySubtaskByVacancyId}
                   />
                 ))}
               </div>
@@ -1414,6 +1452,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
+                    isMySubtask={isMySubtaskByVacancyId}
                   />
                 ))}
               </div>
@@ -1427,6 +1466,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
+                    isMySubtask={isMySubtaskByVacancyId}
                   />
                 ))}
               </div>
@@ -1467,6 +1507,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
+                    isMySubtask={isMySubtaskByVacancyId}
                   />
                 ))}
               </div>
@@ -1480,6 +1521,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
+                    isMySubtask={isMySubtaskByVacancyId}
                   />
                 ))}
               </div>
@@ -1555,6 +1597,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
+                    isMySubtask={isMySubtaskByVacancyId}
                   />
                 ))}
               </div>
@@ -1568,6 +1611,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
+                    isMySubtask={isMySubtaskByVacancyId}
                   />
                 ))}
               </div>

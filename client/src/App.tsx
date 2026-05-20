@@ -78,7 +78,7 @@ function App() {
                         <Route path="/profile" element={<UserProfile currentUser={currentUser} onUserUpdate={handleUserUpdate} />} />
                         <Route path="/delegations" element={<DelegationsPage />} />
                         <Route path="/calendar" element={<CalendarPage currentUser={currentUser} />} />
-                        {currentUser.IsAdmin && <Route path="/system-management" element={<SystemManagement />} />}
+                        {(currentUser.IsAdmin || currentUser.Role === 2) && <Route path="/system-management" element={<SystemManagement currentUser={currentUser} />} />}
                         
                         {/* 3. التوجيه الافتراضي أصبح إلى /tasks */}
                         <Route path="/" element={<Navigate to="/tasks" replace />} />

@@ -13,8 +13,10 @@ app.use(cors());
 app.use(express.json());
 
 // تهيئة خدمة الملفات الثابتة للواجهة الأمامية (dist) بمسارات احتياطية مرنة
+const exeDir = process.pkg ? path.dirname(process.execPath) : null;
 const candidateStaticDirs = [
   process.env.STATIC_DIR && path.resolve(process.env.STATIC_DIR),
+  exeDir && path.join(exeDir, 'dist'),          // مجلد dist بجانب الـ exe
   path.join(__dirname, '..', 'dist'),
   path.join(__dirname, '..', 'client', 'dist'),
   path.resolve(process.cwd(), 'dist'),
@@ -50,6 +52,8 @@ const commentNotificationRoutes = require('./routes/commentNotificationRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const calendarRoutes = require('./routes/calendarRoutes');
 const delegationRoutes = require('./routes/delegationRoutes');
+const vacancyRoutes = require('./routes/vacancyRoutes');
+const ranksRoutes = require('./routes/ranksRoutes');
 const {
   ensureSubtasksCalendarFlag,
   ensureCommentsCalendarFlag,
@@ -61,7 +65,8 @@ const {
   ensureTaskDelegationPermissionsTable,
   ensureCheckTaskDelegationPermissionFunction,
   ensureTaskUrlColumn,
-  ensureTaskQueryPerformanceIndexes
+  ensureTaskQueryPerformanceIndexes,
+  ensureSubtaskEndDateColumn
 } = require('./utils/dbMigrations');
 
 
@@ -79,6 +84,8 @@ app.use('/api/comment-notifications', commentNotificationRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/calendar', calendarRoutes);
 app.use('/api/delegations', delegationRoutes);
+app.use('/api/vacancies', vacancyRoutes);
+app.use('/api/ranks', ranksRoutes);
 
 
 // --- 3. المسار الشامل (Catch-all) يجب أن يكون هو الأخير دائماً ---
@@ -139,6 +146,13 @@ const startServer = async () => {
       await ensureTaskQueryPerformanceIndexes(pool);
     } catch (perfIndexErr) {
       console.error('⚠️ Database migration (Performance Indexes) failed. Server continues running.', perfIndexErr);
+    }
+
+    // --- عمود تاريخ الانتهاء للمهام الفرعية ---
+    try {
+      await ensureSubtaskEndDateColumn(pool);
+    } catch (endDateErr) {
+      console.error('⚠️ Database migration (Subtasks.EndDate) failed. Server continues running.', endDateErr);
     }
     
     app.listen(port, '0.0.0.0', () => {

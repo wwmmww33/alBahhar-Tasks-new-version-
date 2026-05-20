@@ -7,5 +7,8 @@ server/dist/
 NewTask - V10 url/
 server/release/
 Production-Release/
-
+release/
+Release/
+server/release/
+Production-Release/
 *.exe

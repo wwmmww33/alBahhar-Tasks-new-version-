@@ -8,8 +8,12 @@ type CalendarItem = {
   SubtaskTitle: string;
   TaskTitle: string;
   DueDate: string;
+  EndDate?: string | null;
   AssignedToName?: string;
 };
+
+type SpanPos = 'single' | 'start' | 'middle' | 'end';
+type CalendarItemWithSpan = CalendarItem & { _spanPos: SpanPos };
 
 type PersonalEventItem = {
   EventID: number;
@@ -60,6 +64,12 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
   const openTaskInNewTab = (taskId: number) => {
     window.open(`/task/${taskId}`, '_blank', 'noopener,noreferrer');
   };
+
+  const SPAN_COLORS = [
+    '#3b82f6', '#22c55e', '#a855f7', '#f97316',
+    '#ec4899', '#14b8a6', '#ef4444', '#eab308',
+  ];
+  const getSpanColor = (subtaskId: number) => SPAN_COLORS[subtaskId % SPAN_COLORS.length];
 
   const toLocalYMD = (d: Date) => {
     const y = d.getFullYear();
@@ -205,12 +215,31 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
   }, [viewMode, currentDate]);
 
   const itemsByDay = useMemo(() => {
-    const map: Record<string, CalendarItem[]> = {};
+    const map: Record<string, CalendarItemWithSpan[]> = {};
     for (const it of items) {
-      const d = new Date(it.DueDate);
-      const key = toLocalYMD(d);
-      if (!map[key]) map[key] = [];
-      map[key].push(it);
+      const due = new Date(it.DueDate);
+      const dueNorm = new Date(due.getFullYear(), due.getMonth(), due.getDate());
+      const endRaw = it.EndDate ? new Date(it.EndDate) : null;
+      const endNorm = endRaw ? new Date(endRaw.getFullYear(), endRaw.getMonth(), endRaw.getDate()) : null;
+
+      if (!endNorm) {
+        const key = toLocalYMD(dueNorm);
+        if (!map[key]) map[key] = [];
+        map[key].push({ ...it, _spanPos: 'single' });
+      } else {
+        const cur = new Date(dueNorm);
+        let safety = 0;
+        while (cur <= endNorm && safety < 366) {
+          const key = toLocalYMD(cur);
+          if (!map[key]) map[key] = [];
+          const isFirst = cur.getTime() === dueNorm.getTime();
+          const isLast = cur.getTime() === endNorm.getTime();
+          const pos: SpanPos = isFirst && isLast ? 'single' : isFirst ? 'start' : isLast ? 'end' : 'middle';
+          map[key].push({ ...it, _spanPos: pos });
+          cur.setDate(cur.getDate() + 1);
+          safety++;
+        }
+      }
     }
     return map;
   }, [items]);
@@ -585,108 +614,162 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                   <div key={label}>{label}</div>
                 ))}
               </div>
-              <div className="grid grid-cols-7 border-t border-content/10">
+              <div className="border-t border-content/10">
                 {(() => {
                   if (dateRange.length === 0) return null;
                   const firstDate = dateRange[0].date;
                   const startOffset = firstDate.getDay();
                   const cells: { key: string; date: Date | null }[] = [];
-                  for (let i = 0; i < startOffset; i++) {
-                    cells.push({ key: `empty-${i}`, date: null });
+                  for (let i = 0; i < startOffset; i++) cells.push({ key: `empty-${i}`, date: null });
+                  for (const d of dateRange) cells.push({ key: d.key, date: d.date });
+
+                  // تقسيم إلى أسابيع
+                  const weeks: typeof cells[] = [];
+                  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, Math.min(i + 7, cells.length)));
+
+                  // الأحداث الممتدة (بتاريخ انتهاء) - للأشرطة
+                  const spanItems = viewFilter !== 'personal' ? items.filter(it => !!it.EndDate) : [];
+                  // الأحداث ليوم واحد - للخلايا
+                  const singleDayMap: Record<string, CalendarItem[]> = {};
+                  for (const it of items.filter(it => !it.EndDate)) {
+                    const key = toLocalYMD(new Date(it.DueDate));
+                    if (!singleDayMap[key]) singleDayMap[key] = [];
+                    singleDayMap[key].push(it);
                   }
-                  for (const d of dateRange) {
-                    cells.push({ key: d.key, date: d.date });
-                  }
+
                   const todayKey = toLocalYMD(new Date());
-                  return cells.map((cell, idx) => {
-                    if (!cell.date) {
-                      return (
-                        <div
-                          key={cell.key + idx}
-                          className="h-28 border border-content/10 bg-transparent"
-                        />
-                      );
+
+                  return weeks.map((week, weekIdx) => {
+                    const validCells = week.filter(c => c.date !== null);
+                    if (validCells.length === 0) return <div key={`week-empty-${weekIdx}`} className="grid grid-cols-7">{week.map((c,i) => <div key={c.key+i} className="h-24 border border-content/10 bg-transparent" />)}</div>;
+
+                    const wd0 = validCells[0].date!;
+                    const wdN = validCells[validCells.length - 1].date!;
+                    const weekStartD = new Date(wd0.getFullYear(), wd0.getMonth(), wd0.getDate());
+                    const weekEndD   = new Date(wdN.getFullYear(), wdN.getMonth(), wdN.getDate());
+
+                    // بناء أشرطة الأسبوع
+                    type BarInfo = { item: CalendarItem; startCol: number; endCol: number; lane: number; isFirst: boolean; isLast: boolean };
+                    const bars: BarInfo[] = [];
+
+                    for (const item of spanItems) {
+                      const dD = new Date(item.DueDate); const dueD = new Date(dD.getFullYear(), dD.getMonth(), dD.getDate());
+                      const eD = new Date(item.EndDate!); const endD = new Date(eD.getFullYear(), eD.getMonth(), eD.getDate());
+                      if (dueD > weekEndD || endD < weekStartD) continue;
+
+                      const clampedStart = dueD < weekStartD ? weekStartD : dueD;
+                      const clampedEnd   = endD > weekEndD   ? weekEndD   : endD;
+
+                      const startCol = week.findIndex(c => c.date && toLocalYMD(c.date) === toLocalYMD(clampedStart));
+                      const endCol   = week.findIndex(c => c.date && toLocalYMD(c.date) === toLocalYMD(clampedEnd));
+                      if (startCol === -1 || endCol === -1) continue;
+
+                      let lane = 0;
+                      while (bars.some(b => b.lane === lane && b.startCol <= endCol && b.endCol >= startCol)) lane++;
+
+                      bars.push({ item, startCol, endCol, lane, isFirst: dueD >= weekStartD, isLast: endD <= weekEndD });
                     }
-                    const key = toLocalYMD(cell.date);
-                    const isToday = key === todayKey;
-                    const sharedForDay = itemsByDay[key] || [];
-                    const personalForDay = personalByDay[key] || [];
-                    const commentsForDay = commentsByDay[key] || [];
-                    const visibleShared = viewFilter !== 'personal' ? sharedForDay : [];
-                    const visiblePersonal = viewFilter !== 'shared' ? personalForDay : [];
-                    const visibleComments = viewFilter !== 'shared' ? commentsForDay : [];
-                    const hasEvents =
-                      visibleShared.length > 0 ||
-                      visiblePersonal.length > 0 ||
-                      visibleComments.length > 0;
+
+                    const maxLane = bars.length > 0 ? Math.max(...bars.map(b => b.lane)) : -1;
+                    const barAreaH = maxLane >= 0 ? (maxLane + 1) * 22 + 4 : 0;
+
                     return (
-                      <div
-                        key={cell.key}
-                        className={`h-28 border p-1 flex flex-col ${
-                          isToday
-                            ? 'bg-yellow-100 dark:bg-yellow-900 border-yellow-400 dark:border-yellow-500'
-                            : hasEvents
-                              ? 'bg-white dark:bg-gray-900 border-content/10'
-                              : 'bg-white/60 dark:bg-gray-900/40 border-content/10'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span
-                            className={`text-xs font-semibold ${
-                              isToday
-                                ? 'bg-primary text-white rounded-full px-1'
-                                : ''
-                            }`}
-                          >
-                            {cell.date.getDate()}
-                          </span>
-                          {hasEvents && (
-                            <span className="w-2 h-2 rounded-full bg-primary inline-block" />
-                          )}
-                        </div>
-                        <div className="space-y-0.5 overflow-y-auto">
-                          {visibleShared.slice(0, 2).map((item) => (
-                            <button
-                              key={item.SubtaskID}
-                              type="button"
-                              onClick={() => openTaskInNewTab(item.TaskID)}
-                              className="text-[10px] text-right text-blue-800 dark:text-blue-200 hover:underline w-full text-right"
-                            >
-                              <div>
-                                {item.SubtaskTitle}
-                                {item.AssignedToName ? ` (${item.AssignedToName})` : ''}
-                              </div>
-                              <div className="text-[9px] text-blue-600 dark:text-blue-300">
-                                ضمن: {item.TaskTitle}
-                              </div>
-                            </button>
-                          ))}
-                          {visiblePersonal.slice(0, 1).map((ev) => (
-                            <div key={ev.EventID} className="text-[10px] text-right">
-                              <span className="text-green-800 dark:text-green-200">{ev.Title}</span>
+                      <div key={weekIdx}>
+                        {/* منطقة أشرطة الأحداث الممتدة */}
+                        {barAreaH > 0 && (
+                          <div className="relative bg-content/[0.02]" style={{ height: `${barAreaH}px` }}>
+                            {/* خطوط الأعمدة */}
+                            <div className="absolute inset-0 grid grid-cols-7 pointer-events-none">
+                              {week.map((_c, i) => <div key={i} className="border-r border-content/10 last:border-r-0 h-full" />)}
                             </div>
-                          ))}
-                          {visibleComments.slice(0, 1).map((comment) => (
-                            <button
-                              key={comment.CommentID}
-                              type="button"
-                              onClick={() => openTaskInNewTab(comment.TaskID)}
-                              className="text-[10px] text-right text-purple-800 dark:text-purple-200 hover:underline w-full text-right"
-                            >
-                              <div>{comment.Content}</div>
-                              <div className="text-[9px] text-content-secondary">
-                                ضمن: {comment.TaskTitle}
+                            {/* الأشرطة */}
+                            {bars.map(bar => {
+                              const barColor = getSpanColor(bar.item.SubtaskID);
+                              return (
+                              <button
+                                key={bar.item.SubtaskID}
+                                type="button"
+                                onClick={() => openTaskInNewTab(bar.item.TaskID)}
+                                title={`${bar.item.SubtaskTitle} — ضمن: ${bar.item.TaskTitle}`}
+                                style={{
+                                  position: 'absolute',
+                                  top:   `${bar.lane * 22 + 2}px`,
+                                  right:  `calc(${(bar.startCol / 7) * 100}% + ${bar.isFirst ? 2 : 0}px)`,
+                                  width: `calc(${((bar.endCol - bar.startCol + 1) / 7) * 100}% - ${(bar.isFirst ? 2 : 0) + (bar.isLast ? 2 : 0)}px)`,
+                                  height: '18px',
+                                  backgroundColor: barColor,
+                                }}
+                                className={[
+                                  'text-white text-[9px] px-2 flex items-center overflow-hidden whitespace-nowrap z-10',
+                                  bar.isFirst ? 'rounded-r-full' : '',
+                                  bar.isLast  ? 'rounded-l-full' : '',
+                                ].join(' ')}
+                              >
+                                {bar.isFirst && bar.item.SubtaskTitle}
+                              </button>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {/* خلايا الأيام */}
+                        <div className="grid grid-cols-7">
+                          {week.map((cell, colIdx) => {
+                            if (!cell.date) {
+                              return <div key={cell.key + colIdx} className="h-24 border border-content/10 bg-transparent" />;
+                            }
+                            const key = toLocalYMD(cell.date);
+                            const isToday = key === todayKey;
+                            const sharedForDay   = viewFilter !== 'personal' ? (singleDayMap[key] || []) : [];
+                            const personalForDay = viewFilter !== 'shared'   ? (personalByDay[key] || []) : [];
+                            const commentsForDay = viewFilter !== 'shared'   ? (commentsByDay[key] || []) : [];
+                            const hasBarOnDay    = bars.some(b => b.startCol <= colIdx && b.endCol >= colIdx);
+                            const hasEvents = sharedForDay.length > 0 || personalForDay.length > 0 || commentsForDay.length > 0 || hasBarOnDay;
+
+                            return (
+                              <div
+                                key={key}
+                                className={`h-24 border p-1 flex flex-col ${
+                                  isToday
+                                    ? 'bg-yellow-100 dark:bg-yellow-900 border-yellow-400 dark:border-yellow-500'
+                                    : hasEvents
+                                      ? 'bg-white dark:bg-gray-900 border-content/10'
+                                      : 'bg-white/60 dark:bg-gray-900/40 border-content/10'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className={`text-xs font-semibold ${isToday ? 'bg-primary text-white rounded-full px-1' : ''}`}>
+                                    {cell.date.getDate()}
+                                  </span>
+                                  {(sharedForDay.length > 0 || personalForDay.length > 0 || commentsForDay.length > 0) && (
+                                    <span className="w-2 h-2 rounded-full bg-primary inline-block" />
+                                  )}
+                                </div>
+                                <div className="space-y-0.5 overflow-y-auto">
+                                  {sharedForDay.slice(0, 2).map((item) => (
+                                    <button key={item.SubtaskID} type="button" onClick={() => openTaskInNewTab(item.TaskID)} className="text-[10px] text-right text-blue-800 dark:text-blue-200 hover:underline w-full">
+                                      <div>{item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}</div>
+                                      <div className="text-[9px] text-blue-600 dark:text-blue-300">ضمن: {item.TaskTitle}</div>
+                                    </button>
+                                  ))}
+                                  {personalForDay.slice(0, 1).map((ev) => (
+                                    <div key={ev.EventID} className="text-[10px] text-right">
+                                      <span className="text-green-800 dark:text-green-200">{ev.Title}</span>
+                                    </div>
+                                  ))}
+                                  {commentsForDay.slice(0, 1).map((comment) => (
+                                    <button key={comment.CommentID} type="button" onClick={() => openTaskInNewTab(comment.TaskID)} className="text-[10px] text-right text-purple-800 dark:text-purple-200 hover:underline w-full">
+                                      <div>{comment.Content}</div>
+                                      <div className="text-[9px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
+                                    </button>
+                                  ))}
+                                  {hasEvents && (sharedForDay.length > 2 || personalForDay.length > 1 || commentsForDay.length > 1) && (
+                                    <div className="text-[10px] text-content-secondary text-right">المزيد...</div>
+                                  )}
+                                </div>
                               </div>
-                            </button>
-                          ))}
-                          {hasEvents &&
-                            (visibleShared.length > 2 ||
-                              visiblePersonal.length > 1 ||
-                              visibleComments.length > 1) && (
-                              <div className="text-[10px] text-content-secondary text-right">
-                                المزيد...
-                              </div>
-                            )}
+                            );
+                          })}
                         </div>
                       </div>
                     );
@@ -735,19 +818,25 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                     </div>
                     {visibleShared.length > 0 && (
                       <div className="space-y-1 text-right">
-                    {visibleShared.map((item) => (
-                      <div key={item.SubtaskID} className="text-xs">
-                        <button
-                          type="button"
-                          onClick={() => openTaskInNewTab(item.TaskID)}
-                          className="font-semibold text-blue-800 dark:text-blue-200 hover:underline"
-                        >
-                          {item.SubtaskTitle}
-                          {item.AssignedToName ? ` (${item.AssignedToName})` : ''}
-                        </button>
-                        <div className="text-blue-600 dark:text-blue-300">ضمن: {item.TaskTitle}</div>
-                      </div>
-                    ))}
+                        {visibleShared.map((item) => {
+                          if (item._spanPos === 'middle' || item._spanPos === 'end') return null;
+                          const spanning = item._spanPos === 'start';
+                          const color = spanning ? getSpanColor(item.SubtaskID) : undefined;
+                          return (
+                            <div key={`${item.SubtaskID}-${item._spanPos}`} className="text-xs">
+                              <button
+                                type="button"
+                                onClick={() => openTaskInNewTab(item.TaskID)}
+                                style={{ color }}
+                                className="font-semibold hover:underline"
+                              >
+                                {item.SubtaskTitle}
+                                {item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                              </button>
+                              <div className="opacity-70">ضمن: {item.TaskTitle}</div>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                     {visiblePersonal.length > 0 && (

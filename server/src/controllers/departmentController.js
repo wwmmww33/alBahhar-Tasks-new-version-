@@ -8,7 +8,8 @@ const resolveDeptColumns = async (pool) => {
     const names = new Set(result.recordset.map(r => r.COLUMN_NAME));
     const parentCol = names.has('ParentID') ? 'ParentID' : (names.has('ParentDepartmentID') ? 'ParentDepartmentID' : null);
     const activeCol = names.has('IsActive') ? 'IsActive' : (names.has('Active') ? 'Active' : null);
-    _deptColsCache = { parentCol, activeCol };
+    const hasTypeCol = names.has('Type');
+    _deptColsCache = { parentCol, activeCol, hasTypeCol };
     return _deptColsCache;
 };
 
@@ -27,15 +28,18 @@ exports.createDepartment = async (req, res) => {
         const parent = req.body.ParentID ?? req.body.ParentDepartmentID ?? null;
         const activeVal = req.body.IsActive ?? req.body.Active;
         const active = typeof activeVal === 'boolean' ? activeVal : (typeof activeVal === 'number' ? activeVal !== 0 : null);
+        const typeVal = req.body.Type != null ? String(req.body.Type) : null;
 
         const reqq = pool.request().input('Name', sql.NVarChar, Name);
         if (cols.parentCol) reqq.input('Parent', sql.Int, parent);
         if (cols.activeCol) reqq.input('Active', sql.Bit, active === null ? true : active);
+        if (cols.hasTypeCol) reqq.input('Type', sql.NVarChar, typeVal);
 
         let query = 'INSERT INTO Departments (Name';
         let values = 'VALUES (@Name';
         if (cols.parentCol) { query += `, ${cols.parentCol}`; values += ', @Parent'; }
         if (cols.activeCol) { query += `, ${cols.activeCol}`; values += ', @Active'; }
+        if (cols.hasTypeCol) { query += `, Type`; values += ', @Type'; }
         query += `) OUTPUT INSERTED.* ${values})`;
 
         const result = await reqq.query(query);
@@ -51,16 +55,21 @@ exports.updateDepartment = async (req, res) => {
         const parent = req.body.ParentID ?? req.body.ParentDepartmentID ?? null;
         const activeVal = req.body.IsActive ?? req.body.Active;
         const active = typeof activeVal === 'boolean' ? activeVal : (typeof activeVal === 'number' ? activeVal !== 0 : null);
+        const typeVal = req.body.Type != null ? String(req.body.Type) : null;
 
         const reqq = pool.request().input('DepartmentID', sql.Int, id).input('Name', sql.NVarChar, Name);
         if (cols.parentCol) reqq.input('Parent', sql.Int, parent);
         if (cols.activeCol) reqq.input('Active', sql.Bit, active === null ? true : active);
+        if (cols.hasTypeCol) reqq.input('Type', sql.NVarChar, typeVal);
 
         let setParts = ['Name = @Name'];
         if (cols.parentCol) setParts.push(`${cols.parentCol} = @Parent`);
         if (cols.activeCol) setParts.push(`${cols.activeCol} = @Active`);
+        if (cols.hasTypeCol) setParts.push('Type = @Type');
         const query = `UPDATE Departments SET ${setParts.join(', ')} WHERE DepartmentID = @DepartmentID`;
         await reqq.query(query);
+        // مسح الكاش لإعادة قراءة الأعمدة عند الحاجة
+        _deptColsCache = null;
         res.status(200).json({ message: 'Department updated successfully' });
     } catch (error) { res.status(500).send({ message: 'Error updating department' }); }
 };

@@ -304,7 +304,7 @@ exports.getAllSubtasks = async (req, res) => {
 exports.createSubtask = async (req, res) => {
   const pool = req.app.locals.db;
   // --- تأكد من أننا نستقبل كل هذه الحقول ---
-  const { TaskID, Title, CreatedBy, ActedBy, DueDate, AssignedTo, ShowInCalendar } = req.body;
+  const { TaskID, Title, CreatedBy, ActedBy, DueDate, EndDate, AssignedTo, ShowInCalendar } = req.body;
   
   if (!TaskID || !Title || !CreatedBy) {
     return res.status(400).json({ message: 'TaskID, Title, and CreatedBy are required.' });
@@ -335,6 +335,7 @@ exports.createSubtask = async (req, res) => {
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasActedBy,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'DueDate') IS NOT NULL THEN 1 ELSE 0 END AS HasDueDate,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'EndDate') IS NOT NULL THEN 1 ELSE 0 END AS HasEndDate,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'IsCompleted') IS NOT NULL THEN 1 ELSE 0 END AS HasIsCompleted,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedAt') IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedAt,
@@ -362,11 +363,16 @@ exports.createSubtask = async (req, res) => {
       ? await resolveActorId(pool, actorUserId, !!schema.HasCreatedByVacancy)
       : '';
 
-    // تطبيع DueDate إلى تاريخ محلي فقط لتجنب انحراف المنطقة الزمنية
+    // تطبيع DueDate وEndDate إلى تاريخ محلي فقط لتجنب انحراف المنطقة الزمنية
     let dueDateNormalized = null;
     if (DueDate) {
       const d = new Date(DueDate);
       dueDateNormalized = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+    let endDateNormalized = null;
+    if (EndDate) {
+      const d = new Date(EndDate);
+      endDateNormalized = new Date(d.getFullYear(), d.getMonth(), d.getDate());
     }
     const createReq = pool.request()
       .input('TaskID', sql.Int, TaskID)
@@ -395,6 +401,11 @@ exports.createSubtask = async (req, res) => {
       createReq.input('DueDate', sql.Date, dueDateNormalized);
       insertColumns.push('DueDate');
       insertValues.push('@DueDate');
+    }
+    if (schema.HasEndDate) {
+      createReq.input('EndDate', sql.Date, endDateNormalized);
+      insertColumns.push('EndDate');
+      insertValues.push('@EndDate');
     }
     if (schema.HasCreatedAt) {
       insertColumns.push('CreatedAt');
@@ -740,10 +751,10 @@ exports.deleteSubtask = async (req, res) => {
 exports.updateSubtaskDetails = async (req, res) => {
   const pool = req.app.locals.db;
   const { subtaskId } = req.params;
-  const { Title, DueDate } = req.body;
+  const { Title, DueDate, EndDate } = req.body;
 
-  if (typeof Title === 'undefined' && typeof DueDate === 'undefined') {
-    return res.status(400).json({ message: 'Provide Title and/or DueDate to update.' });
+  if (typeof Title === 'undefined' && typeof DueDate === 'undefined' && typeof EndDate === 'undefined') {
+    return res.status(400).json({ message: 'Provide Title and/or DueDate and/or EndDate to update.' });
   }
 
   try {
@@ -786,16 +797,17 @@ exports.updateSubtaskDetails = async (req, res) => {
     // تجهيز القيم
     const hasTitle = typeof Title !== 'undefined';
     const hasDue = typeof DueDate !== 'undefined';
+    const hasEnd = typeof EndDate !== 'undefined';
     const encryptedTitle = hasTitle ? encryptionConfig.encrypt(Title) : null;
     let dueDateNormalized = null;
-    if (hasDue) {
-      if (DueDate) {
-        const d = new Date(DueDate);
-        dueDateNormalized = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-      } else {
-        // إذا أُرسلت قيمة فارغة، نجعلها NULL لإزالة تاريخ الاستحقاق
-        dueDateNormalized = null;
-      }
+    if (hasDue && DueDate) {
+      const d = new Date(DueDate);
+      dueDateNormalized = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+    let endDateNormalized = null;
+    if (hasEnd && EndDate) {
+      const d = new Date(EndDate);
+      endDateNormalized = new Date(d.getFullYear(), d.getMonth(), d.getDate());
     }
 
     await pool.request()
@@ -804,12 +816,17 @@ exports.updateSubtaskDetails = async (req, res) => {
       .input('Title', sql.NVarChar, encryptedTitle)
       .input('HasDue', sql.Bit, hasDue ? 1 : 0)
       .input('DueDate', sql.Date, dueDateNormalized)
+      .input('HasEnd', sql.Bit, hasEnd ? 1 : 0)
+      .input('EndDate', sql.Date, endDateNormalized)
       .query(`
         UPDATE Subtasks
         SET
           Title = CASE WHEN @HasTitle = 1 THEN @Title ELSE Title END,
           DueDate = CASE WHEN @HasDue = 1 THEN @DueDate ELSE DueDate END
-        WHERE SubtaskID = @SubtaskID
+        WHERE SubtaskID = @SubtaskID;
+
+        IF COL_LENGTH('dbo.Subtasks','EndDate') IS NOT NULL AND @HasEnd = 1
+          UPDATE Subtasks SET EndDate = @EndDate WHERE SubtaskID = @SubtaskID;
       `);
 
     const result = await pool.request()

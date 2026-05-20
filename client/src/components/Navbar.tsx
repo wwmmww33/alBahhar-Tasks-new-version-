@@ -62,7 +62,7 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
           <NavLink to="/categories" className={navLinkStyle}><FolderOpen size={18} /><span>التصنيفات</span></NavLink>
           <NavLink to="/delegations" className={navLinkStyle}><Share2 size={18} /><span>التفويضات</span></NavLink>
           <NavLink to="/profile" className={navLinkStyle}><User size={18} /><span>الملف الشخصي</span></NavLink>
-          {currentUser.IsAdmin && <NavLink to="/system-management" className={navLinkStyle}><Shield size={18} /><span>إدارة النظام</span></NavLink>}
+          {(currentUser.IsAdmin || currentUser.Role === 2) && <NavLink to="/system-management" className={navLinkStyle}><Shield size={18} /><span>إدارة النظام</span></NavLink>}
         </nav>
       </div>
 
@@ -117,7 +117,7 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
             <div className="flex items-center gap-3">
             <div className="text-right">
                 <p className="font-semibold text-sm text-content">{currentUser.FullName}</p>
-                <p className="text-xs text-content-secondary">{currentUser.DepartmentName || 'الإدارة'}</p>
+                <p className="text-xs text-content-secondary">{currentUser.VacancyName || currentUser.DepartmentName || 'الإدارة'}</p>
             </div>
             <button onClick={onLogout} title="تسجيل الخروج" className="p-2 rounded-full text-content-secondary hover:bg-red-500/10 hover:text-red-500 transition-colors">
                 <LogOut size={20} />

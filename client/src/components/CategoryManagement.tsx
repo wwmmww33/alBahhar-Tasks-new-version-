@@ -330,23 +330,23 @@ const CategoryManagement: React.FC<CategoryManagementProps> = ({ currentUser }) 
                   >
                     عرض المعلومات
                   </button>
+                  {currentUser && (
+                    <button
+                      onClick={() => startEdit(category)}
+                      className="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-sm transition-colors"
+                      title="تعديل التصنيف"
+                    >
+                      تعديل
+                    </button>
+                  )}
                   {currentUser && categoryCreatorId(category) === actorId && (
-                    <>
-                      <button
-                        onClick={() => startEdit(category)}
-                        className="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-sm transition-colors"
-                        title="تعديل التصنيف"
-                      >
-                        تعديل
-                      </button>
-                      <button
-                        onClick={() => handleDeleteCategory(category.CategoryID)}
-                        className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded text-sm transition-colors"
-                        title="حذف التصنيف"
-                      >
-                        حذف
-                      </button>
-                    </>
+                    <button
+                      onClick={() => handleDeleteCategory(category.CategoryID)}
+                      className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded text-sm transition-colors"
+                      title="حذف التصنيف"
+                    >
+                      حذف
+                    </button>
                   )}
                 </div>
               </div>

@@ -388,5 +388,22 @@ module.exports = {
       console.error('❌ Failed ensuring performance indexes:', err);
       throw err;
     }
+  },
+
+  // إضافة عمود EndDate إلى جدول Subtasks إذا لم يكن موجودًا
+  ensureSubtaskEndDateColumn: async function ensureSubtaskEndDateColumn(pool) {
+    try {
+      const query = `
+        IF COL_LENGTH('dbo.Subtasks', 'EndDate') IS NULL BEGIN
+          ALTER TABLE dbo.Subtasks ADD EndDate DATE NULL;
+        END;
+      `;
+      await pool.request().query(query);
+      console.log('✅ Ensured EndDate column exists in Subtasks.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring EndDate column in Subtasks:', err);
+      throw err;
+    }
   }
 };

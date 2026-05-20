@@ -1,15 +1,32 @@
 // src/components/UserManagement.tsx
 import React, { useState, useEffect, useCallback } from 'react';
 import { Edit, Power, PowerOff } from 'lucide-react';
+import type { CurrentUser } from '../types';
 
-type User = { UserID: string; FullName: string; DepartmentID: number | null; DepartmentName: string | null; IsActive: boolean; };
+type User = {
+  UserID: string;
+  FullName: string;
+  DepartmentID: number | null;
+  DepartmentName: string | null;
+  IsActive: boolean;
+  Role?: number;
+};
 type Department = { DepartmentID: number; Name: string; };
 
-const UserManagement = () => {
+const ROLE_LABELS: Record<number, { label: string; className: string }> = {
+  0: { label: 'مستخدم',    className: 'bg-gray-100 text-gray-600' },
+  1: { label: 'مدير عام',  className: 'bg-red-100 text-red-700' },
+  2: { label: 'مدير قسم', className: 'bg-blue-100 text-blue-700' },
+};
+
+const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
+  const currentUserRole = currentUser?.Role ?? 0;
   const [users, setUsers] = useState<User[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
+  const [encryptingPasswords, setEncryptingPasswords] = useState(false);
+  const [encryptResult, setEncryptResult] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -61,11 +78,54 @@ const UserManagement = () => {
     fetchData();
   };
 
+  const handleSetRole = async (user: User, role: number) => {
+    await fetch(`/api/users/${user.UserID}/role`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role }),
+    });
+    fetchData();
+  };
+
+  const handleEncryptPasswords = async () => {
+    if (!window.confirm('سيتم تشفير جميع كلمات المرور غير المشفرة في قاعدة البيانات. هل تريد المتابعة؟')) return;
+    setEncryptingPasswords(true);
+    setEncryptResult(null);
+    try {
+      const res = await fetch('/api/users/encrypt-passwords', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        setEncryptResult(`تم بنجاح: تم تشفير ${data.encrypted} كلمة مرور، تم تخطي ${data.skipped} مشفرة مسبقاً.`);
+      } else {
+        setEncryptResult(`فشل: ${data.message}`);
+      }
+    } catch {
+      setEncryptResult('خطأ في الاتصال بالخادم.');
+    } finally {
+      setEncryptingPasswords(false);
+    }
+  };
+
   return (
     <div className="grid grid-cols-1 md:grid-cols-5 gap-8">
       {/* جدول المستخدمين */}
       <div className="md:col-span-3 bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
-        <h2 className="text-2xl font-semibold mb-4 text-content">المستخدمون الحاليون</h2>
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h2 className="text-2xl font-semibold text-content">المستخدمون الحاليون</h2>
+          <div className="flex flex-col items-end gap-1">
+            <button
+              type="button"
+              onClick={handleEncryptPasswords}
+              disabled={encryptingPasswords}
+              className="px-3 py-1.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded disabled:opacity-60"
+            >
+              {encryptingPasswords ? 'جارٍ التشفير...' : 'تشفير كلمات المرور الحالية'}
+            </button>
+            {encryptResult && (
+              <span className="text-xs text-content-secondary">{encryptResult}</span>
+            )}
+          </div>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-right">
             <thead className="border-b border-content/10">
@@ -73,26 +133,49 @@ const UserManagement = () => {
                 <th className="p-2 font-semibold">الحالة</th>
                 <th className="p-2 font-semibold">الاسم الكامل</th>
                 <th className="p-2 font-semibold">القسم</th>
+                <th className="p-2 font-semibold">الدور</th>
                 <th className="p-2 font-semibold">إجراءات</th>
               </tr>
             </thead>
             <tbody>
-              {users.map(user => (
-                <tr key={user.UserID} className="border-b border-content/10 hover:bg-content/5">
-                  <td className="p-2">
-                    <button onClick={() => handleToggleActive(user)} title={user.IsActive ? 'إيقاف المستخدم' : 'تفعيل المستخدم'}>
-                      {user.IsActive ? <Power size={18} className="text-green-500"/> : <PowerOff size={18} className="text-red-500"/>}
-                    </button>
-                  </td>
-                  <td className="p-2">{user.FullName}</td>
-                  <td className="p-2">{user.DepartmentName || <span className="text-xs text-gray-400">غير محدد</span>}</td>
-                  <td className="p-2">
-                    <button onClick={() => { setEditingUser(user); setNewPassword(''); }} className="text-primary hover:text-primary-dark">
-                      <Edit size={16}/>
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {users.map(user => {
+                const role = user.Role ?? 0;
+                const roleInfo = ROLE_LABELS[role] ?? ROLE_LABELS[0];
+                const isCurrentUser = user.UserID === currentUser?.UserID;
+                return (
+                  <tr key={user.UserID} className="border-b border-content/10 hover:bg-content/5">
+                    <td className="p-2">
+                      <button onClick={() => handleToggleActive(user)} title={user.IsActive ? 'إيقاف المستخدم' : 'تفعيل المستخدم'}>
+                        {user.IsActive ? <Power size={18} className="text-green-500"/> : <PowerOff size={18} className="text-red-500"/>}
+                      </button>
+                    </td>
+                    <td className="p-2">{user.FullName}</td>
+                    <td className="p-2">{user.DepartmentName || <span className="text-xs text-gray-400">غير محدد</span>}</td>
+                    <td className="p-2">
+                      {currentUserRole === 1 && !isCurrentUser ? (
+                        <select
+                          value={role}
+                          onChange={e => handleSetRole(user, parseInt(e.target.value))}
+                          className={`text-xs px-2 py-0.5 rounded border-0 font-semibold cursor-pointer ${roleInfo.className}`}
+                        >
+                          <option value={0}>مستخدم</option>
+                          <option value={1}>مدير عام</option>
+                          <option value={2}>مدير قسم</option>
+                        </select>
+                      ) : (
+                        <span className={`text-xs px-2 py-0.5 rounded font-semibold ${roleInfo.className}`}>
+                          {roleInfo.label}
+                        </span>
+                      )}
+                    </td>
+                    <td className="p-2">
+                      <button onClick={() => { setEditingUser(user); setNewPassword(''); }} className="text-primary hover:text-primary-dark">
+                        <Edit size={16}/>
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

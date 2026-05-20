@@ -1,10 +1,47 @@
 // src/controllers/delegationController.js
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
+const { detectSchema, resolveVacancyId } = require('../utils/vacancyResolver');
 
 // قراءة معرف المستخدم من الهيدر أو البودي
 function getCurrentUserId(req) {
   return (req.headers['user-id'] || req.body?.UserID || req.query?.userId || '').toString();
+}
+
+// في المخطط الجديد الأعمدة أصبحت DelegatorVacancyID / DelegateVacancyID (int)
+// وفي المخطط القديم DelegatorUserID / DelegateUserID (nvarchar).
+// هذه الدالة المساعدة تُرجِع الأسماء الصحيحة + نوع الحجة + القيمة المحوَّلة.
+async function getDelegationColumns(pool) {
+  const schema = await detectSchema(pool);
+  if (schema.hasDelegationVacancy) {
+    return {
+      isVacancy: true,
+      delegatorCol: 'DelegatorVacancyID',
+      delegateCol: 'DelegateVacancyID',
+      sqlType: sql.Int,
+      createdByType: sql.Int,
+      identityTable: 'JobVacancies',
+      identityKey: 'VacancyID',
+      identityName: 'Name',
+    };
+  }
+  return {
+    isVacancy: false,
+    delegatorCol: 'DelegatorUserID',
+    delegateCol: 'DelegateUserID',
+    sqlType: sql.NVarChar,
+    createdByType: sql.NVarChar,
+    identityTable: 'Users',
+    identityKey: 'UserID',
+    identityName: 'FullName',
+  };
+}
+
+// يحوّل UserID إلى القيمة الصحيحة حسب المخطط (int VacancyID أو UserID نصّي)
+async function toDelegationPrincipal(pool, userId, cols) {
+  if (!cols.isVacancy) return userId;
+  const vid = await resolveVacancyId(pool, userId);
+  return vid;
 }
 
 // جلب التفويضات الخاصة بالمفوض (المستخدم الحالي)
@@ -15,22 +52,28 @@ exports.getDelegations = async (req, res) => {
   if (!currentUserId) return res.status(400).json({ message: 'user-id header is required.' });
 
   try {
+    const cols = await getDelegationColumns(pool);
+    const delegatorPrincipal = await toDelegationPrincipal(pool, currentUserId, cols);
+    if (cols.isVacancy && delegatorPrincipal == null) {
+      return res.status(200).json([]);
+    }
+
     const result = await pool.request()
-      .input('DelegatorUserID', sql.NVarChar, currentUserId)
+      .input('Delegator', cols.sqlType, delegatorPrincipal)
       .query(`
         SELECT td.DelegationID,
-               td.DelegatorUserID AS DelegatorID,
-               du.FullName AS DelegatorName,
-               td.DelegateUserID AS DelegateID,
-               uu.FullName AS DelegateName,
+               td.${cols.delegatorCol} AS DelegatorID,
+               du.${cols.identityName} AS DelegatorName,
+               td.${cols.delegateCol} AS DelegateID,
+               uu.${cols.identityName} AS DelegateName,
                td.StartDate,
                td.EndDate,
                td.IsActive,
                td.CreatedAt
         FROM TaskDelegations td
-        INNER JOIN Users du ON td.DelegatorUserID = du.UserID
-        INNER JOIN Users uu ON td.DelegateUserID = uu.UserID
-        WHERE td.DelegatorUserID = @DelegatorUserID
+        INNER JOIN ${cols.identityTable} du ON td.${cols.delegatorCol} = du.${cols.identityKey}
+        INNER JOIN ${cols.identityTable} uu ON td.${cols.delegateCol} = uu.${cols.identityKey}
+        WHERE td.${cols.delegatorCol} = @Delegator
         ORDER BY td.CreatedAt DESC
       `);
 
@@ -41,7 +84,7 @@ exports.getDelegations = async (req, res) => {
   }
 };
 
-// جلب التفويضات حيث المستخدم الحالي مفوَّض إليه (ليظهر له خيار العمل نيابةً عن المفوِّضين)
+// جلب التفويضات حيث المستخدم الحالي مفوَّض إليه
 exports.getDelegationsAsDelegate = async (req, res) => {
   const pool = req.app.locals.db;
   const currentUserId = getCurrentUserId(req);
@@ -49,22 +92,28 @@ exports.getDelegationsAsDelegate = async (req, res) => {
   if (!currentUserId) return res.status(400).json({ message: 'user-id header is required.' });
 
   try {
+    const cols = await getDelegationColumns(pool);
+    const delegatePrincipal = await toDelegationPrincipal(pool, currentUserId, cols);
+    if (cols.isVacancy && delegatePrincipal == null) {
+      return res.status(200).json([]);
+    }
+
     const result = await pool.request()
-      .input('DelegateUserID', sql.NVarChar, currentUserId)
+      .input('Delegate', cols.sqlType, delegatePrincipal)
       .query(`
         SELECT td.DelegationID,
-               td.DelegatorUserID AS DelegatorID,
-               du.FullName AS DelegatorName,
-               td.DelegateUserID AS DelegateID,
-               uu.FullName AS DelegateName,
+               td.${cols.delegatorCol} AS DelegatorID,
+               du.${cols.identityName} AS DelegatorName,
+               td.${cols.delegateCol} AS DelegateID,
+               uu.${cols.identityName} AS DelegateName,
                td.StartDate,
                td.EndDate,
                td.IsActive,
                td.CreatedAt
         FROM TaskDelegations td
-        INNER JOIN Users du ON td.DelegatorUserID = du.UserID
-        INNER JOIN Users uu ON td.DelegateUserID = uu.UserID
-        WHERE td.DelegateUserID = @DelegateUserID
+        INNER JOIN ${cols.identityTable} du ON td.${cols.delegatorCol} = du.${cols.identityKey}
+        INNER JOIN ${cols.identityTable} uu ON td.${cols.delegateCol} = uu.${cols.identityKey}
+        WHERE td.${cols.delegateCol} = @Delegate
         ORDER BY td.CreatedAt DESC
       `);
 
@@ -84,22 +133,22 @@ exports.createDelegation = async (req, res) => {
   if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
   if (!currentUserId) return res.status(400).json({ message: 'user-id header is required.' });
   if (!DelegateID || !StartDate) return res.status(400).json({ message: 'DelegateID and StartDate are required.' });
-  if (DelegateID === currentUserId) return res.status(400).json({ message: 'لا يمكن التفويض لنفس المستخدم.' });
+  if (String(DelegateID) === String(currentUserId)) return res.status(400).json({ message: 'لا يمكن التفويض لنفس المستخدم.' });
 
   try {
-    // تحقق من أن المستخدمين موجودون
+    const cols = await getDelegationColumns(pool);
+
+    // تحقق من أن المستخدمين موجودون (بـ UserID حتى قبل أي تحويل)
     const usersCheck = await pool.request()
       .input('DelegatorUserID', sql.NVarChar, currentUserId)
       .input('DelegateUserID', sql.NVarChar, DelegateID)
-      .query(`
-        SELECT UserID FROM Users WHERE UserID IN (@DelegatorUserID, @DelegateUserID)
-      `);
-    const foundIds = new Set(usersCheck.recordset.map(r => r.UserID));
-    if (!foundIds.has(currentUserId)) {
+      .query(`SELECT UserID FROM Users WHERE UserID IN (@DelegatorUserID, @DelegateUserID)`);
+    const foundIds = new Set(usersCheck.recordset.map(r => String(r.UserID).trim()));
+    if (!foundIds.has(String(currentUserId).trim())) {
       return res.status(400).json({ message: 'المفوض غير موجود في قاعدة البيانات.' });
     }
-    if (!foundIds.has(DelegateID)) {
-      return res.status(400).json({ message: 'المفوَّض إليه غير موجود في قاعدة البيانات.' });
+    if (!foundIds.has(String(DelegateID).trim())) {
+      return res.status(400).json({ message: 'المفوَّض إليه غير موجود في قاعدة البيانات.' });
     }
 
     // التحقق من صحة التواريخ
@@ -119,18 +168,29 @@ exports.createDelegation = async (req, res) => {
       }
     }
 
+    // تحويل إلى VacancyID إن لزم
+    const delegatorPrincipal = await toDelegationPrincipal(pool, currentUserId, cols);
+    const delegatePrincipal = await toDelegationPrincipal(pool, DelegateID, cols);
+
+    if (cols.isVacancy && (delegatorPrincipal == null || delegatePrincipal == null)) {
+      return res.status(400).json({ message: 'تعذّر تحديد المنصب (VacancyID) لأحد الطرفين. تأكد من وجود إسناد نشط.' });
+    }
+
+    // CreatedBy في المخطط الجديد int، في القديم nvarchar
+    const createdByValue = cols.isVacancy ? delegatorPrincipal : currentUserId;
+
     const insertResult = await pool.request()
-      .input('DelegatorUserID', sql.NVarChar, currentUserId)
-      .input('DelegateUserID', sql.NVarChar, DelegateID)
+      .input('Delegator', cols.sqlType, delegatorPrincipal)
+      .input('Delegate', cols.sqlType, delegatePrincipal)
       .input('DelegationType', sql.NVarChar, DelegationType)
       .input('StartDate', sql.DateTime, start)
       .input('EndDate', sql.DateTime, end)
       .input('IsActive', sql.Bit, 1)
       .input('Reason', sql.NVarChar, Reason)
-      .input('CreatedBy', sql.NVarChar, currentUserId)
+      .input('CreatedBy', cols.createdByType, createdByValue)
       .query(`
-        INSERT INTO TaskDelegations (DelegatorUserID, DelegateUserID, DelegationType, StartDate, EndDate, IsActive, Reason, CreatedBy)
-        VALUES (@DelegatorUserID, @DelegateUserID, @DelegationType, @StartDate, @EndDate, @IsActive, @Reason, @CreatedBy);
+        INSERT INTO TaskDelegations (${cols.delegatorCol}, ${cols.delegateCol}, DelegationType, StartDate, EndDate, IsActive, Reason, CreatedBy)
+        VALUES (@Delegator, @Delegate, @DelegationType, @StartDate, @EndDate, @IsActive, @Reason, @CreatedBy);
         SELECT CAST(SCOPE_IDENTITY() AS INT) AS DelegationID;
       `);
 
@@ -153,13 +213,22 @@ exports.updateDelegation = async (req, res) => {
   if (!currentUserId) return res.status(400).json({ message: 'user-id header is required.' });
 
   try {
+    const cols = await getDelegationColumns(pool);
+    const delegatorPrincipal = await toDelegationPrincipal(pool, currentUserId, cols);
+
     // تحقق أن المستخدم الحالي هو المفوِّض لهذا التفويض
     const check = await pool.request()
       .input('DelegationID', sql.Int, parseInt(id))
-      .query(`SELECT DelegatorUserID FROM TaskDelegations WHERE DelegationID = @DelegationID`);
+      .query(`SELECT ${cols.delegatorCol} AS DelegatorID FROM TaskDelegations WHERE DelegationID = @DelegationID`);
     if (!check.recordset.length) return res.status(404).json({ message: 'Delegation not found' });
-    if (check.recordset[0].DelegatorUserID !== currentUserId)
+
+    const ownerId = check.recordset[0].DelegatorID;
+    const isOwner = cols.isVacancy
+      ? parseInt(ownerId, 10) === parseInt(delegatorPrincipal, 10)
+      : String(ownerId).trim() === String(currentUserId).trim();
+    if (!isOwner) {
       return res.status(403).json({ message: 'لا تملك صلاحية تعديل هذا التفويض' });
+    }
 
     const request = pool.request()
       .input('DelegationID', sql.Int, parseInt(id));
@@ -210,12 +279,21 @@ exports.deleteDelegation = async (req, res) => {
   if (!currentUserId) return res.status(400).json({ message: 'user-id header is required.' });
 
   try {
+    const cols = await getDelegationColumns(pool);
+    const delegatorPrincipal = await toDelegationPrincipal(pool, currentUserId, cols);
+
     const check = await pool.request()
       .input('DelegationID', sql.Int, parseInt(id))
-      .query(`SELECT DelegatorUserID FROM TaskDelegations WHERE DelegationID = @DelegationID`);
+      .query(`SELECT ${cols.delegatorCol} AS DelegatorID FROM TaskDelegations WHERE DelegationID = @DelegationID`);
     if (!check.recordset.length) return res.status(404).json({ message: 'Delegation not found' });
-    if (check.recordset[0].DelegatorUserID !== currentUserId)
+
+    const ownerId = check.recordset[0].DelegatorID;
+    const isOwner = cols.isVacancy
+      ? parseInt(ownerId, 10) === parseInt(delegatorPrincipal, 10)
+      : String(ownerId).trim() === String(currentUserId).trim();
+    if (!isOwner) {
       return res.status(403).json({ message: 'لا تملك صلاحية حذف هذا التفويض' });
+    }
 
     await pool.request()
       .input('DelegationID', sql.Int, parseInt(id))
@@ -228,7 +306,7 @@ exports.deleteDelegation = async (req, res) => {
   }
 };
 
-// تحديث أو حذف الرمز السري الخاص بالتفويض للمستخدم الحالي
+// تحديث أو حذف الرمز السري الخاص بالتفويض للمستخدم الحالي (يبقى على Users.UserID — لا يتأثر)
 exports.updateDelegationSecret = async (req, res) => {
   const pool = req.app.locals.db;
   const currentUserId = getCurrentUserId(req);
@@ -272,7 +350,7 @@ exports.getDelegationSecret = async (req, res) => {
   }
 };
 
-// تحديث الرمز السري لتفويض محدد (حسب DelegationID) — تخزينه في TaskDelegations.DelegationSecretHash
+// تحديث الرمز السري لتفويض محدد (حسب DelegationID)
 exports.updateDelegationSecretForDelegation = async (req, res) => {
   const pool = req.app.locals.db;
   const currentUserId = getCurrentUserId(req);
@@ -283,12 +361,21 @@ exports.updateDelegationSecretForDelegation = async (req, res) => {
   if (!currentUserId) return res.status(400).json({ message: 'user-id header is required.' });
 
   try {
+    const cols = await getDelegationColumns(pool);
+    const delegatorPrincipal = await toDelegationPrincipal(pool, currentUserId, cols);
+
     const check = await pool.request()
       .input('DelegationID', sql.Int, parseInt(id))
-      .query(`SELECT DelegatorUserID FROM TaskDelegations WHERE DelegationID = @DelegationID`);
+      .query(`SELECT ${cols.delegatorCol} AS DelegatorID FROM TaskDelegations WHERE DelegationID = @DelegationID`);
     if (!check.recordset.length) return res.status(404).json({ message: 'Delegation not found' });
-    if (check.recordset[0].DelegatorUserID !== currentUserId)
+
+    const ownerId = check.recordset[0].DelegatorID;
+    const isOwner = cols.isVacancy
+      ? parseInt(ownerId, 10) === parseInt(delegatorPrincipal, 10)
+      : String(ownerId).trim() === String(currentUserId).trim();
+    if (!isOwner) {
       return res.status(403).json({ message: 'لا تملك صلاحية تحديث سر هذا التفويض' });
+    }
 
     const combined = DelegationPassword ? encryptionConfig.hashPassword(DelegationPassword).combined : null;
 
@@ -309,18 +396,27 @@ exports.getDelegationSecretForDelegation = async (req, res) => {
   const pool = req.app.locals.db;
   const currentUserId = getCurrentUserId(req);
   const { id } = req.params;
- 
+
   if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
   if (!currentUserId) return res.status(400).json({ message: 'user-id header is required.' });
- 
+
   try {
+    const cols = await getDelegationColumns(pool);
+    const delegatorPrincipal = await toDelegationPrincipal(pool, currentUserId, cols);
+
     const check = await pool.request()
       .input('DelegationID', sql.Int, parseInt(id))
-      .query(`SELECT DelegatorUserID, DelegationSecretHash FROM TaskDelegations WHERE DelegationID = @DelegationID`);
+      .query(`SELECT ${cols.delegatorCol} AS DelegatorID, DelegationSecretHash FROM TaskDelegations WHERE DelegationID = @DelegationID`);
     if (!check.recordset.length) return res.status(404).json({ message: 'Delegation not found' });
-    if (check.recordset[0].DelegatorUserID !== currentUserId)
+
+    const ownerId = check.recordset[0].DelegatorID;
+    const isOwner = cols.isVacancy
+      ? parseInt(ownerId, 10) === parseInt(delegatorPrincipal, 10)
+      : String(ownerId).trim() === String(currentUserId).trim();
+    if (!isOwner) {
       return res.status(403).json({ message: 'لا تملك صلاحية قراءة سر هذا التفويض' });
- 
+    }
+
     const secret = check.recordset[0].DelegationSecretHash || null;
     res.status(200).json({ DelegationSecretHash: secret, isSet: !!secret });
   } catch (err) {

@@ -1,35 +1,122 @@
 const sql = require('mssql');
 const dbConfig = require('../config/db.config');
 const encryptionConfig = require('../config/encryption.config');
+const { detectSchema, resolveVacancyId, ensureVacancyId } = require('../utils/vacancyResolver');
 
-// تم إزالة دالة إصلاح الترميز - يجب أن تُخزن البيانات بشكل صحيح في قاعدة البيانات
+// أفضّل استخدام pool المُجمَّع من req.app.locals.db، وإلا نقع على sql.connect(dbConfig)
+async function getPool(req) {
+    if (req && req.app && req.app.locals && req.app.locals.db) {
+        return req.app.locals.db;
+    }
+    return await sql.connect(dbConfig);
+}
 
-// الحصول على جميع التصنيفات لقسم معين
+// بناء JOIN لعمود CreatedBy (Users في المخطط القديم، JobVacancies في الجديد)
+function identityJoinForCreatedBy(schema, cteAlias, column) {
+    if (schema.isVacancy) {
+        return `LEFT JOIN JobVacancies jv_${cteAlias} ON ${cteAlias}.${column} = jv_${cteAlias}.VacancyID`;
+    }
+    return `LEFT JOIN Users u_${cteAlias} ON ${cteAlias}.${column} = u_${cteAlias}.UserID`;
+}
+function identityNameForCreatedBy(schema, cteAlias) {
+    return schema.isVacancy
+        ? `jv_${cteAlias}.Name`
+        : `u_${cteAlias}.FullName`;
+}
+
+// حلّ قيمة CreatedBy المستخدمة حسب المخطط (int VacancyID أو nvarchar UserID)
+async function resolveCreatedByValue(pool, req, bodyCreatedBy, schema) {
+    const rawUserId = (req && req.user && req.user.userId) || bodyCreatedBy || 'admin';
+    if (!schema.isVacancy) {
+        return { value: rawUserId, type: sql.NVarChar(50), isVacancy: false };
+    }
+    // إن كان لدينا req.user.vacancyId جاهز من middleware استخدمه مباشرة
+    let vid = (req && req.user && req.user.vacancyId) || null;
+    if (vid == null) {
+        vid = await resolveVacancyId(pool, rawUserId);
+    }
+    return { value: vid, type: sql.Int, isVacancy: true };
+}
+
+// الحصول على جميع التصنيفات لوحدة معين (جميع الأقسام التابعة لها)
 const getCategoriesByDepartment = async (req, res) => {
     try {
         const { departmentId } = req.params;
-        
-        const pool = await sql.connect(dbConfig);
-        const result = await pool.request()
-            .input('DepartmentID', sql.Int, departmentId)
-            .query(`
-                SELECT 
-                    c.CategoryID,
-                    c.Name,
-                    c.Description,
-                    c.DepartmentID,
-                    c.CreatedBy,
-                    c.CreatedAt,
-                    c.UpdatedAt,
-                    c.IsActive,
-                    u.FullName as CreatedByName,
-                    d.Name as DepartmentName
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
+
+        const deptProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
+                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+                CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
+        `);
+        const dp = deptProbe.recordset[0] || {};
+        const parentCol = dp.HasParentDepartmentID ? 'ParentDepartmentID' : (dp.HasParentID ? 'ParentID' : null);
+
+        const createdByJoin = identityJoinForCreatedBy(schema, 'c', 'CreatedBy');
+        const createdByName = identityNameForCreatedBy(schema, 'c');
+
+        const request = pool.request().input('DepartmentID', sql.Int, parseInt(departmentId, 10));
+        let query;
+
+        if (parentCol) {
+            const typeGuard = dp.HasDeptType
+                ? `AND (TRY_CAST(d.[Type] AS INT) <> 0 OR d.[Type] IS NULL)`
+                : '';
+            query = `
+                WITH UpTree AS (
+                    SELECT DepartmentID, ${parentCol} AS PID, 0 AS Depth
+                    FROM dbo.Departments WHERE DepartmentID = @DepartmentID
+                    UNION ALL
+                    SELECT d.DepartmentID, d.${parentCol}, u.Depth + 1
+                    FROM dbo.Departments d
+                    INNER JOIN UpTree u ON d.DepartmentID = u.PID
+                    WHERE TRY_CAST(d.[Type] AS INT) <> 0 OR d.[Type] IS NULL
+                ),
+                RootDept AS (
+                    SELECT TOP 1 DepartmentID AS RootDepartmentID
+                    FROM UpTree ORDER BY Depth DESC
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d CROSS JOIN RootDept r
+                    WHERE d.DepartmentID = r.RootDepartmentID
+                    UNION ALL
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d
+                    INNER JOIN DeptScope ds ON d.${parentCol} = ds.DepartmentID
+                    ${typeGuard}
+                )
+                SELECT
+                    c.CategoryID, c.Name, c.Description, c.DepartmentID,
+                    c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.IsActive,
+                    ${createdByName} as CreatedByName,
+                    dep.Name as DepartmentName
                 FROM Categories c
-                LEFT JOIN Users u ON c.CreatedBy = u.UserID
-                LEFT JOIN Departments d ON c.DepartmentID = d.DepartmentID
+                ${createdByJoin}
+                LEFT JOIN Departments dep ON c.DepartmentID = dep.DepartmentID
+                WHERE c.DepartmentID IN (SELECT DepartmentID FROM DeptScope)
+                    AND c.IsActive = 1
+                ORDER BY c.Name
+                OPTION (MAXRECURSION 100)
+            `;
+        } else {
+            query = `
+                SELECT
+                    c.CategoryID, c.Name, c.Description, c.DepartmentID,
+                    c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.IsActive,
+                    ${createdByName} as CreatedByName,
+                    dep.Name as DepartmentName
+                FROM Categories c
+                ${createdByJoin}
+                LEFT JOIN Departments dep ON c.DepartmentID = dep.DepartmentID
                 WHERE c.DepartmentID = @DepartmentID AND c.IsActive = 1
                 ORDER BY c.Name
-            `);
+            `;
+        }
+
+        const result = await request.query(query);
         const categories = result.recordset.map(c => {
             if (c.Description) { try { c.Description = encryptionConfig.decrypt(c.Description); } catch (e) {} }
             return c;
@@ -45,14 +132,18 @@ const getCategoriesByDepartment = async (req, res) => {
 const getCategoryById = async (req, res) => {
     try {
         const { categoryId } = req.params;
-        
-        const pool = await sql.connect(dbConfig);
-        
-        // جلب بيانات التصنيف
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
+
+        const catJoin = identityJoinForCreatedBy(schema, 'c', 'CreatedBy');
+        const catName = identityNameForCreatedBy(schema, 'c');
+        const infoJoin = identityJoinForCreatedBy(schema, 'ci', 'CreatedBy');
+        const infoName = identityNameForCreatedBy(schema, 'ci');
+
         const categoryResult = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query(`
-                SELECT 
+                SELECT
                     c.CategoryID,
                     c.Name,
                     c.Description,
@@ -61,23 +152,22 @@ const getCategoryById = async (req, res) => {
                     c.CreatedAt,
                     c.UpdatedAt,
                     c.IsActive,
-                    u.FullName as CreatedByName,
+                    ${catName} as CreatedByName,
                     d.Name as DepartmentName
                 FROM Categories c
-                LEFT JOIN Users u ON c.CreatedBy = u.UserID
+                ${catJoin}
                 LEFT JOIN Departments d ON c.DepartmentID = d.DepartmentID
                 WHERE c.CategoryID = @CategoryID AND c.IsActive = 1
             `);
-        
+
         if (categoryResult.recordset.length === 0) {
             return res.status(404).json({ error: 'التصنيف غير موجود' });
         }
-        
-        // جلب معلومات التصنيف
+
         const infoResult = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query(`
-                SELECT 
+                SELECT
                     ci.InfoID,
                     ci.CategoryID,
                     ci.Title,
@@ -87,17 +177,20 @@ const getCategoryById = async (req, res) => {
                     ci.CreatedAt,
                     ci.UpdatedAt,
                     ci.IsActive,
-                    u.FullName as CreatedByName
+                    ${infoName} as CreatedByName
                 FROM CategoryInformation ci
-                LEFT JOIN Users u ON ci.CreatedBy = u.UserID
+                ${infoJoin}
                 WHERE ci.CategoryID = @CategoryID AND ci.IsActive = 1
                 ORDER BY ci.OrderIndex, ci.CreatedAt
             `);
-        
+
         const category = categoryResult.recordset[0];
-        
-        category.information = infoResult.recordset;
-        
+        if (category.Description) { try { category.Description = encryptionConfig.decrypt(category.Description); } catch (e) {} }
+        category.information = infoResult.recordset.map(i => {
+            if (i.Content) { try { i.Content = encryptionConfig.decrypt(i.Content); } catch (e) {} }
+            return i;
+        });
+
         res.json(category);
     } catch (error) {
         console.error('Error fetching category:', error);
@@ -109,59 +202,59 @@ const getCategoryById = async (req, res) => {
 const createCategory = async (req, res) => {
     try {
         const { name, description, departmentId, createdBy: createdByBody } = req.body;
-        const createdBy = req.user?.userId || createdByBody || 'admin'; // استخدام معرف المنشئ القادم من الواجهة عند غياب المصادقة
-        
+
         if (!name || !departmentId) {
             return res.status(400).json({ error: 'اسم التصنيف والقسم مطلوبان' });
         }
-        
-        const pool = await sql.connect(dbConfig);
-        
+
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
+
+        const createdByRes = await resolveCreatedByValue(pool, req, createdByBody, schema);
+        if (schema.isVacancy && createdByRes.value == null) {
+            return res.status(400).json({ error: 'تعذّر تحديد المنصب (VacancyID) للمنشئ.' });
+        }
+
         // التحقق من عدم وجود تصنيف بنفس الاسم في نفس القسم
         const existingCategory = await pool.request()
             .input('Name', sql.NVarChar(100), name)
             .input('DepartmentID', sql.Int, departmentId)
             .query(`
-                SELECT CategoryID FROM Categories 
+                SELECT CategoryID FROM Categories
                 WHERE Name = @Name AND DepartmentID = @DepartmentID AND IsActive = 1
             `);
-        
+
         if (existingCategory.recordset.length > 0) {
             return res.status(400).json({ error: 'يوجد تصنيف بنفس الاسم في هذا القسم' });
         }
-        
-        // إنشاء التصنيف الجديد
+
         const encryptedDescription = description ? encryptionConfig.encrypt(description) : null;
         const result = await pool.request()
             .input('Name', sql.NVarChar(100), name)
-            .input('Description', sql.NVarChar(500), encryptedDescription)
+            .input('Description', sql.NVarChar(sql.MAX), encryptedDescription)
             .input('DepartmentID', sql.Int, departmentId)
-            .input('CreatedBy', sql.NVarChar(50), createdBy)
+            .input('CreatedBy', createdByRes.type, createdByRes.value)
             .query(`
-                INSERT INTO Categories (Name, Description, DepartmentID, CreatedBy)
+                INSERT INTO Categories (Name, Description, DepartmentID, CreatedBy, IsActive, CreatedAt)
                 OUTPUT INSERTED.CategoryID
-                VALUES (@Name, @Description, @DepartmentID, @CreatedBy)
+                VALUES (@Name, @Description, @DepartmentID, @CreatedBy, 1, GETDATE())
             `);
-        
+
         const categoryId = result.recordset[0].CategoryID;
-        
-        // جلب التصنيف المنشأ حديثاً
+
+        const catJoin = identityJoinForCreatedBy(schema, 'c', 'CreatedBy');
+        const catName = identityNameForCreatedBy(schema, 'c');
+
         const newCategory = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query(`
-                SELECT 
-                    c.CategoryID,
-                    c.Name,
-                    c.Description,
-                    c.DepartmentID,
-                    c.CreatedBy,
-                    c.CreatedAt,
-                    c.UpdatedAt,
-                    c.IsActive,
-                    u.FullName as CreatedByName,
+                SELECT
+                    c.CategoryID, c.Name, c.Description, c.DepartmentID,
+                    c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.IsActive,
+                    ${catName} as CreatedByName,
                     d.Name as DepartmentName
                 FROM Categories c
-                LEFT JOIN Users u ON c.CreatedBy = u.UserID
+                ${catJoin}
                 LEFT JOIN Departments d ON c.DepartmentID = d.DepartmentID
                 WHERE c.CategoryID = @CategoryID
             `);
@@ -179,70 +272,60 @@ const updateCategory = async (req, res) => {
     try {
         const { categoryId } = req.params;
         const { name, description } = req.body;
-        
+
         if (!name) {
             return res.status(400).json({ error: 'اسم التصنيف مطلوب' });
         }
-        
-        const pool = await sql.connect(dbConfig);
-        
-        // التحقق من وجود التصنيف والصلاحية
+
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
+
+        // التحقق من وجود التصنيف
         const existingCategory = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query('SELECT CategoryID, DepartmentID, CreatedBy FROM Categories WHERE CategoryID = @CategoryID AND IsActive = 1');
-        
+
         if (existingCategory.recordset.length === 0) {
             return res.status(404).json({ error: 'التصنيف غير موجود' });
         }
-        
-        // التحقق من أن المستخدم هو من أنشأ التصنيف
-        const userId = req.user?.userId || req.body.createdBy || 'admin';
-        if (existingCategory.recordset[0].CreatedBy !== userId) {
-            return res.status(403).json({ error: 'ليس لديك صلاحية لتعديل هذا التصنيف' });
-        }
-        
+
         // التحقق من عدم وجود تصنيف آخر بنفس الاسم في نفس القسم
         const duplicateCategory = await pool.request()
             .input('Name', sql.NVarChar(100), name)
             .input('DepartmentID', sql.Int, existingCategory.recordset[0].DepartmentID)
             .input('CategoryID', sql.Int, categoryId)
             .query(`
-                SELECT CategoryID FROM Categories 
+                SELECT CategoryID FROM Categories
                 WHERE Name = @Name AND DepartmentID = @DepartmentID AND CategoryID != @CategoryID AND IsActive = 1
             `);
-        
+
         if (duplicateCategory.recordset.length > 0) {
             return res.status(400).json({ error: 'يوجد تصنيف بنفس الاسم في هذا القسم' });
         }
-        
-        // تحديث التصنيف
+
         await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .input('Name', sql.NVarChar(100), name)
-            .input('Description', sql.NVarChar(500), description ? encryptionConfig.encrypt(description) : null)
+            .input('Description', sql.NVarChar(sql.MAX), description ? encryptionConfig.encrypt(description) : null)
             .query(`
-                UPDATE Categories 
+                UPDATE Categories
                 SET Name = @Name, Description = @Description, UpdatedAt = GETDATE()
                 WHERE CategoryID = @CategoryID
             `);
-        
-        // جلب التصنيف المحدث
+
+        const catJoin = identityJoinForCreatedBy(schema, 'c', 'CreatedBy');
+        const catName = identityNameForCreatedBy(schema, 'c');
+
         const updatedCategory = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query(`
-                SELECT 
-                    c.CategoryID,
-                    c.Name,
-                    c.Description,
-                    c.DepartmentID,
-                    c.CreatedBy,
-                    c.CreatedAt,
-                    c.UpdatedAt,
-                    c.IsActive,
-                    u.FullName as CreatedByName,
+                SELECT
+                    c.CategoryID, c.Name, c.Description, c.DepartmentID,
+                    c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.IsActive,
+                    ${catName} as CreatedByName,
                     d.Name as DepartmentName
                 FROM Categories c
-                LEFT JOIN Users u ON c.CreatedBy = u.UserID
+                ${catJoin}
                 LEFT JOIN Departments d ON c.DepartmentID = d.DepartmentID
                 WHERE c.CategoryID = @CategoryID
             `);
@@ -261,9 +344,9 @@ const deleteCategory = async (req, res) => {
         const { categoryId } = req.params;
         const { createdBy, action, newCategoryId } = req.body || {};
 
-        const pool = await sql.connect(dbConfig);
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
 
-        // التحقق من وجود التصنيف والصلاحية
         const existingCategory = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query('SELECT CategoryID, CreatedBy, DepartmentID FROM Categories WHERE CategoryID = @CategoryID AND IsActive = 1');
@@ -272,13 +355,16 @@ const deleteCategory = async (req, res) => {
             return res.status(404).json({ error: 'التصنيف غير موجود' });
         }
 
-        // التحقق من أن المستخدم هو من أنشأ التصنيف
-        const userId = req.user?.userId || createdBy || 'admin';
-        if (existingCategory.recordset[0].CreatedBy !== userId) {
+        const createdByRes = await resolveCreatedByValue(pool, req, createdBy, schema);
+        const ownerDb = existingCategory.recordset[0].CreatedBy;
+        const isOwner = schema.isVacancy
+            ? parseInt(ownerDb, 10) === parseInt(createdByRes.value, 10)
+            : String(ownerDb).trim() === String(createdByRes.value).trim();
+
+        if (!isOwner) {
             return res.status(403).json({ error: 'ليس لديك صلاحية لحذف هذا التصنيف' });
         }
 
-        // التحقق من وجود مهام مرتبطة بهذا التصنيف
         const linkedTasks = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query('SELECT COUNT(*) as TaskCount FROM Tasks WHERE CategoryID = @CategoryID');
@@ -313,12 +399,10 @@ const deleteCategory = async (req, res) => {
             }
         }
 
-        // حذف التصنيف منطقياً
         await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query('UPDATE Categories SET IsActive = 0, UpdatedAt = GETDATE() WHERE CategoryID = @CategoryID');
 
-        // حذف معلومات التصنيف منطقياً
         await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query('UPDATE CategoryInformation SET IsActive = 0, UpdatedAt = GETDATE() WHERE CategoryID = @CategoryID');
@@ -334,7 +418,7 @@ const deleteCategory = async (req, res) => {
 const getLinkedTaskCount = async (req, res) => {
     try {
         const { categoryId } = req.params;
-        const pool = await sql.connect(dbConfig);
+        const pool = await getPool(req);
         const result = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query('SELECT COUNT(*) as TaskCount FROM Tasks WHERE CategoryID = @CategoryID');
@@ -351,56 +435,53 @@ const addCategoryInformation = async (req, res) => {
     try {
         const { categoryId } = req.params;
         const { title, content, orderIndex, createdBy } = req.body;
-        const userId = createdBy || 'admin'; // مؤقت حتى يتم تفعيل المصادقة
-        
+
         if (!content) {
             return res.status(400).json({ error: 'المحتوى مطلوب' });
         }
-        
-        const pool = await sql.connect(dbConfig);
-        
-        // التحقق من وجود التصنيف فقط
+
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
+
+        const createdByRes = await resolveCreatedByValue(pool, req, createdBy, schema);
+        if (schema.isVacancy && createdByRes.value == null) {
+            return res.status(400).json({ error: 'تعذّر تحديد المنصب (VacancyID) للمنشئ.' });
+        }
+
         const existingCategory = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query('SELECT CategoryID FROM Categories WHERE CategoryID = @CategoryID AND IsActive = 1');
-        
+
         if (existingCategory.recordset.length === 0) {
             return res.status(404).json({ error: 'التصنيف غير موجود' });
         }
-        
-        // إضافة المعلومة الجديدة
+
         const encryptedContent = content ? encryptionConfig.encrypt(content) : null;
         const result = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .input('Title', sql.NVarChar(200), title)
             .input('Content', sql.NVarChar(sql.MAX), encryptedContent)
             .input('OrderIndex', sql.Int, orderIndex || 0)
-            .input('CreatedBy', sql.NVarChar(50), userId)
+            .input('CreatedBy', createdByRes.type, createdByRes.value)
             .query(`
-                INSERT INTO CategoryInformation (CategoryID, Title, Content, OrderIndex, CreatedBy)
+                INSERT INTO CategoryInformation (CategoryID, Title, Content, OrderIndex, CreatedBy, IsActive, CreatedAt)
                 OUTPUT INSERTED.InfoID
-                VALUES (@CategoryID, @Title, @Content, @OrderIndex, @CreatedBy)
+                VALUES (@CategoryID, @Title, @Content, @OrderIndex, @CreatedBy, 1, GETDATE())
             `);
-        
+
         const infoId = result.recordset[0].InfoID;
-        
-        // جلب المعلومة المنشأة حديثاً
+        const infoJoin = identityJoinForCreatedBy(schema, 'ci', 'CreatedBy');
+        const infoName = identityNameForCreatedBy(schema, 'ci');
+
         const newInfo = await pool.request()
             .input('InfoID', sql.Int, infoId)
             .query(`
-                SELECT 
-                    ci.InfoID,
-                    ci.CategoryID,
-                    ci.Title,
-                    ci.Content,
-                    ci.OrderIndex,
-                    ci.CreatedBy,
-                    ci.CreatedAt,
-                    ci.UpdatedAt,
-                    ci.IsActive,
-                    u.FullName as CreatedByName
+                SELECT
+                    ci.InfoID, ci.CategoryID, ci.Title, ci.Content, ci.OrderIndex,
+                    ci.CreatedBy, ci.CreatedAt, ci.UpdatedAt, ci.IsActive,
+                    ${infoName} as CreatedByName
                 FROM CategoryInformation ci
-                LEFT JOIN Users u ON ci.CreatedBy = u.UserID
+                ${infoJoin}
                 WHERE ci.InfoID = @InfoID
             `);
         const info = newInfo.recordset[0];
@@ -417,28 +498,27 @@ const updateCategoryInformation = async (req, res) => {
     try {
         const { infoId } = req.params;
         const { title, content, orderIndex } = req.body;
-        
+
         if (!content) {
             return res.status(400).json({ error: 'المحتوى مطلوب' });
         }
-        
-        const pool = await sql.connect(dbConfig);
-        
-        // التحقق من وجود المعلومة فقط
+
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
+
         const existingInfo = await pool.request()
             .input('InfoID', sql.Int, infoId)
             .query(`
-                SELECT ci.InfoID, ci.CategoryID 
+                SELECT ci.InfoID, ci.CategoryID
                 FROM CategoryInformation ci
                 JOIN Categories c ON ci.CategoryID = c.CategoryID
                 WHERE ci.InfoID = @InfoID AND ci.IsActive = 1 AND c.IsActive = 1
             `);
-        
+
         if (existingInfo.recordset.length === 0) {
             return res.status(404).json({ error: 'المعلومة غير موجودة' });
         }
-        
-        // تحديث المعلومة
+
         const encryptedUpdateContent = content ? encryptionConfig.encrypt(content) : null;
         await pool.request()
             .input('InfoID', sql.Int, infoId)
@@ -446,28 +526,23 @@ const updateCategoryInformation = async (req, res) => {
             .input('Content', sql.NVarChar(sql.MAX), encryptedUpdateContent)
             .input('OrderIndex', sql.Int, orderIndex || 0)
             .query(`
-                UPDATE CategoryInformation 
+                UPDATE CategoryInformation
                 SET Title = @Title, Content = @Content, OrderIndex = @OrderIndex, UpdatedAt = GETDATE()
                 WHERE InfoID = @InfoID
             `);
-        
-        // جلب المعلومة المحدثة
+
+        const infoJoin = identityJoinForCreatedBy(schema, 'ci', 'CreatedBy');
+        const infoName = identityNameForCreatedBy(schema, 'ci');
+
         const updatedInfo = await pool.request()
             .input('InfoID', sql.Int, infoId)
             .query(`
-                SELECT 
-                    ci.InfoID,
-                    ci.CategoryID,
-                    ci.Title,
-                    ci.Content,
-                    ci.OrderIndex,
-                    ci.CreatedBy,
-                    ci.CreatedAt,
-                    ci.UpdatedAt,
-                    ci.IsActive,
-                    u.FullName as CreatedByName
+                SELECT
+                    ci.InfoID, ci.CategoryID, ci.Title, ci.Content, ci.OrderIndex,
+                    ci.CreatedBy, ci.CreatedAt, ci.UpdatedAt, ci.IsActive,
+                    ${infoName} as CreatedByName
                 FROM CategoryInformation ci
-                LEFT JOIN Users u ON ci.CreatedBy = u.UserID
+                ${infoJoin}
                 WHERE ci.InfoID = @InfoID
             `);
         const updated = updatedInfo.recordset[0];
@@ -479,27 +554,36 @@ const updateCategoryInformation = async (req, res) => {
     }
 };
 
-// حذف معلومة تصنيف
+// حذف معلومة تصنيف (يُسمح فقط لمن أنشأها)
 const deleteCategoryInformation = async (req, res) => {
     try {
         const { infoId } = req.params;
-        
-        const pool = await sql.connect(dbConfig);
-        
-        // التحقق من وجود المعلومة
+        const { createdBy } = req.body || {};
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
+
         const existingInfo = await pool.request()
             .input('InfoID', sql.Int, infoId)
-            .query('SELECT InfoID FROM CategoryInformation WHERE InfoID = @InfoID AND IsActive = 1');
-        
+            .query('SELECT InfoID, CreatedBy FROM CategoryInformation WHERE InfoID = @InfoID AND IsActive = 1');
+
         if (existingInfo.recordset.length === 0) {
             return res.status(404).json({ error: 'المعلومة غير موجودة' });
         }
-        
-        // حذف المعلومة منطقياً
+
+        const createdByRes = await resolveCreatedByValue(pool, req, createdBy, schema);
+        const ownerDb = existingInfo.recordset[0].CreatedBy;
+        const isOwner = schema.isVacancy
+            ? parseInt(ownerDb, 10) === parseInt(createdByRes.value, 10)
+            : String(ownerDb).trim() === String(createdByRes.value).trim();
+
+        if (!isOwner) {
+            return res.status(403).json({ error: 'لا يمكنك حذف معلومة أضافها شخص آخر' });
+        }
+
         await pool.request()
             .input('InfoID', sql.Int, infoId)
             .query('UPDATE CategoryInformation SET IsActive = 0, UpdatedAt = GETDATE() WHERE InfoID = @InfoID');
-        
+
         res.json({ message: 'تم حذف المعلومة بنجاح' });
     } catch (error) {
         console.error('Error deleting category information:', error);
@@ -511,26 +595,21 @@ const deleteCategoryInformation = async (req, res) => {
 const getCategoryInformation = async (req, res) => {
     try {
         const { categoryId } = req.params;
-        
-        const pool = await sql.connect(dbConfig);
-        
-        // جلب معلومات التصنيف
+        const pool = await getPool(req);
+        const schema = await detectSchema(pool);
+
+        const infoJoin = identityJoinForCreatedBy(schema, 'ci', 'CreatedBy');
+        const infoName = identityNameForCreatedBy(schema, 'ci');
+
         const infoResult = await pool.request()
             .input('CategoryID', sql.Int, categoryId)
             .query(`
-                SELECT 
-                    ci.InfoID,
-                    ci.CategoryID,
-                    ci.Title,
-                    ci.Content,
-                    ci.OrderIndex,
-                    ci.CreatedBy,
-                    ci.CreatedAt,
-                    ci.UpdatedAt,
-                    ci.IsActive,
-                    u.FullName as CreatedByName
+                SELECT
+                    ci.InfoID, ci.CategoryID, ci.Title, ci.Content, ci.OrderIndex,
+                    ci.CreatedBy, ci.CreatedAt, ci.UpdatedAt, ci.IsActive,
+                    ${infoName} as CreatedByName
                 FROM CategoryInformation ci
-                LEFT JOIN Users u ON ci.CreatedBy = u.UserID
+                ${infoJoin}
                 WHERE ci.CategoryID = @CategoryID AND ci.IsActive = 1
                 ORDER BY ci.OrderIndex, ci.CreatedAt
             `);

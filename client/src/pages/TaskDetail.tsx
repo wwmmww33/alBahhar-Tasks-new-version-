@@ -41,8 +41,6 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
 
   const taskCreatorId = (t: Task | null) => String((t as any)?.CreatedByVacancyID ?? t?.CreatedBy ?? '');
-  const taskAssigneeId = (t: Task | null) => String((t as any)?.AssignedToVacancyID ?? (t as any)?.AssignedTo ?? '');
-  const subtaskAssigneeId = (st: Subtask) => String((st as any)?.AssignedToVacancyID ?? (st as any)?.AssignedTo ?? '');
 
   const copyToClipboard = async (text: string) => {
     try {
@@ -87,7 +85,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         const [subtasksRes, commentsRes, usersRes, categoriesRes] = await Promise.all([
           fetch(getApiUrl(`tasks/${taskId}/subtasks?userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}`)),
           fetch(getApiUrl(`tasks/${taskId}/comments?userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}`)),
-          fetch(getApiUrl(`tasks/department/${taskData.DepartmentID}/users`)),
+          fetch(getApiUrl(`vacancies/department/${currentUser.DepartmentID || taskData.DepartmentID}/scope`)),
           fetch(getApiUrl(`categories/department/${taskData.DepartmentID}`))
         ]);
         
@@ -364,7 +362,6 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   const actingUserId = actorId;
   
   // التحقق من صلاحية التعديل (المنشئ، المدير، أو المسند إليهم)
-  const canCloseTask = actingUserId === taskCreatorId(task) || currentUser.IsAdmin;
   const canEditTaskDetails = true;
   const canDeleteTask = actingUserId === taskCreatorId(task);
 

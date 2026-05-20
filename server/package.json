@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "cross-env NODE_ENV=development nodemon src/server.js",
-    "build": "npx pkg . --assets \"dist/**/*\" --targets node18-win-x64 --output release/bahar.exe",
+    "bundle": "node build.mjs",
+    "build": "node build.mjs && npx @yao-pkg/pkg bundle.js --targets node18-win-x64 --output release/bahar.exe",
     "backfill": "cross-env NODE_ENV=production node src/scripts/backfill.js --mode=encrypt --batch=500",
     "backfill:dry": "cross-env NODE_ENV=production node src/scripts/backfill.js --mode=encrypt --batch=100 --dry-run",
     "backfill:rollback": "cross-env NODE_ENV=production node src/scripts/backfill.js --mode=rollback",
@@ -17,7 +18,12 @@
     "build:backfill": "npx pkg src/scripts/backfill.js --targets node18-win-x64 --output release/bahar-backfill.exe"
   },
   "pkg": {
-    "assets": "dist/**/*",
+    "assets": [
+      "dist/**/*",
+      "node_modules/@typespec/**/*",
+      "node_modules/mssql/**/*",
+      "node_modules/tedious/**/*"
+    ],
     "targets": "node18-win-x64",
     "outputPath": "release",
     "scripts": "src/**/*.js",
@@ -34,7 +40,9 @@
     "path": "^0.12.7"
   },
   "devDependencies": {
+    "@yao-pkg/pkg": "^6.19.0",
     "cross-env": "^7.0.3",
+    "esbuild": "^0.28.0",
     "nodemon": "^3.1.0",
     "pkg": "^5.8.1"
   }

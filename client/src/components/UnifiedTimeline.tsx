@@ -97,6 +97,7 @@ const UnifiedTimeline = ({
   
   const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
   const [newSubtaskDueDate, setNewSubtaskDueDate] = useState(getTodayString());
+  const [newSubtaskEndDate, setNewSubtaskEndDate] = useState('');
   const [assignTo, setAssignTo] = useState('');
   const [showInCalendar, setShowInCalendar] = useState(false);
   const [newComment, setNewComment] = useState('');
@@ -111,6 +112,8 @@ const UnifiedTimeline = ({
   const [editingTitleValue, setEditingTitleValue] = useState('');
   const [editingDueSubtaskId, setEditingDueSubtaskId] = useState<number | null>(null);
   const [editingDueValue, setEditingDueValue] = useState<string>('');
+  const [editingEndSubtaskId, setEditingEndSubtaskId] = useState<number | null>(null);
+  const [editingEndValue, setEditingEndValue] = useState<string>('');
   const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
   const [editingCommentValue, setEditingCommentValue] = useState('');
 
@@ -124,7 +127,6 @@ const UnifiedTimeline = ({
   const [newSubtaskBulkUsers, setNewSubtaskBulkUsers] = useState<string[]>([]);
 
   const actingUserId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
-  const taskCreatorId = String(task?.CreatedByVacancyID ?? task?.CreatedBy ?? '');
   const userActorId = (user: User) => String(resolveUserActorId(user) || user.UserID);
   const subtaskAssignedId = (subtask: Subtask) => String(subtask.AssignedToVacancyID ?? subtask.AssignedTo ?? '');
 
@@ -210,16 +212,17 @@ const UnifiedTimeline = ({
         for (const userId of newSubtaskBulkUsers) {
              await fetch('/api/subtasks', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ 
+              body: JSON.stringify({
                 TaskID: taskId, Title: newSubtaskTitle, CreatedBy: actingUserId, ActedBy: actingUserId,
-                DueDate: newSubtaskDueDate || null, AssignedTo: userId,
-                ShowInCalendar: showInCalendar
+                DueDate: newSubtaskDueDate || null, EndDate: newSubtaskEndDate || null, AssignedTo: userId,
+                ShowInCalendar: showInCalendar,
+                UserID: actingUserId, isAdmin: currentUser.IsAdmin
               }),
             });
         }
         window.dispatchEvent(new CustomEvent('calendar:subtask:created', { detail: { ShowInCalendar: showInCalendar, DueDate: newSubtaskDueDate } }));
         
-        setNewSubtaskTitle(''); setNewSubtaskDueDate(getTodayString()); setAssignTo(''); setShowInCalendar(false);
+        setNewSubtaskTitle(''); setNewSubtaskDueDate(getTodayString()); setNewSubtaskEndDate(''); setAssignTo(''); setShowInCalendar(false);
         setNewSubtaskBulkUsers([]);
         onSubtaskUpdate();
         refreshTasks();
@@ -236,12 +239,16 @@ const UnifiedTimeline = ({
         CreatedBy: actingUserId,
         ActedBy: actingUserId,
         DueDate: newSubtaskDueDate || null,
+        EndDate: newSubtaskEndDate || null,
         AssignedTo: assignTo || actingUserId,
-        ShowInCalendar: showInCalendar
+        ShowInCalendar: showInCalendar,
+        UserID: actingUserId,
+        isAdmin: currentUser.IsAdmin
       }),
     });
     setNewSubtaskTitle('');
     setNewSubtaskDueDate(getTodayString());
+    setNewSubtaskEndDate('');
     setAssignTo('');
     setShowInCalendar(false);
     onSubtaskUpdate();
@@ -348,7 +355,7 @@ const UnifiedTimeline = ({
   };
 
   // حفظ تفاصيل المهمة الفرعية (العنوان / تاريخ الاستحقاق)
-  const saveSubtaskDetails = async (subtaskId: number, payload: Partial<Pick<Subtask, 'Title' | 'DueDate'>>) => {
+  const saveSubtaskDetails = async (subtaskId: number, payload: Partial<Pick<Subtask, 'Title' | 'DueDate' | 'EndDate'>>) => {
     try {
       const resp = await fetch(`/api/subtasks/${subtaskId}/details`, {
         method: 'PATCH',
@@ -679,6 +686,53 @@ const UnifiedTimeline = ({
                       الاستحقاق: {subtask.DueDate ? new Date(subtask.DueDate).toLocaleDateString('ar-EG') : '—'}
                     </span>
                   )}
+                  {editingEndSubtaskId === subtask.SubtaskID ? (
+                    <input
+                      type="date"
+                      autoFocus
+                      value={editingEndValue}
+                      onChange={(e) => setEditingEndValue(e.target.value)}
+                      onBlur={async () => {
+                        const next = editingEndValue || '';
+                        const original = subtask.EndDate ? new Date(subtask.EndDate).toISOString().slice(0, 10) : '';
+                        if (next !== original) {
+                          await saveSubtaskDetails(subtask.SubtaskID, { EndDate: (next || null) as any });
+                        }
+                        setEditingEndSubtaskId(null);
+                      }}
+                      onKeyDown={async (e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          const next = editingEndValue || '';
+                          const original = subtask.EndDate ? new Date(subtask.EndDate).toISOString().slice(0, 10) : '';
+                          if (next !== original) {
+                            await saveSubtaskDetails(subtask.SubtaskID, { EndDate: (next || null) as any });
+                          }
+                          setEditingEndSubtaskId(null);
+                        } else if (e.key === 'Escape') {
+                          setEditingEndSubtaskId(null);
+                        }
+                      }}
+                      className="text-xs bg-bkg border border-content/20 rounded px-2 py-1 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                    />
+                  ) : (
+                    <span
+                      className={`cursor-text ${subtask.EndDate ? '' : 'opacity-40'}`}
+                      onClick={() => {
+                        setEditingEndSubtaskId(subtask.SubtaskID);
+                        setEditingEndValue(subtask.EndDate ? new Date(subtask.EndDate).toISOString().slice(0, 10) : '');
+                      }}
+                      onDoubleClick={() => {
+                        setEditingEndSubtaskId(subtask.SubtaskID);
+                        setEditingEndValue(subtask.EndDate ? new Date(subtask.EndDate).toISOString().slice(0, 10) : '');
+                      }}
+                      title="انقر لتعديل تاريخ الانتهاء"
+                    >
+                      {subtask.EndDate
+                        ? `— نهاية: ${new Date(subtask.EndDate).toLocaleDateString('ar-EG')}`
+                        : '— (انتهاء)'}
+                    </span>
+                  )}
                 </div>
                 <label className="flex items-center gap-2">
                   <input
@@ -925,7 +979,7 @@ const UnifiedTimeline = ({
           
           {showSubtaskForm && (
           <form onSubmit={handleAddSubtask} className="grid grid-cols-1 md:grid-cols-12 gap-2">
-            <div className="md:col-span-5">
+            <div className="md:col-span-4">
               <input
                 type="text"
                 value={newSubtaskTitle}
@@ -935,12 +989,20 @@ const UnifiedTimeline = ({
                 className="w-full p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
               />
             </div>
-            <div className="md:col-span-2">
+            <div className="md:col-span-4 flex gap-1">
               <input
                 type="date"
                 value={newSubtaskDueDate}
                 onChange={(e) => setNewSubtaskDueDate(e.target.value)}
-                className="w-full p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                title="تاريخ الاستحقاق"
+                className="flex-1 p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm"
+              />
+              <input
+                type="date"
+                value={newSubtaskEndDate}
+                onChange={(e) => setNewSubtaskEndDate(e.target.value)}
+                title="تاريخ الانتهاء (اختياري)"
+                className="flex-1 p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm opacity-70"
               />
             </div>
             <div className="md:col-span-3 flex items-center gap-1">

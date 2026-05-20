@@ -28,7 +28,7 @@ const config = {
     user: process.env.DB_USER, // من ملف .env
     password: process.env.DB_PASSWORD, // من ملف .env
     server: process.env.DB_SERVER, // من ملف .env
-    database: process.env.DB_DATABASE || 'AlBaharTaskManagement2',
+    database: process.env.DB_DATABASE || 'AlBaharTaskManagement',
     port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : undefined,
     options: {
       encrypt: process.env.DB_ENCRYPT === 'true',

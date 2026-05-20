@@ -283,6 +283,7 @@ exports.createComment = async (req, res) => {
                     ? String(newComment[commentActorCol]).trim()
                     : actorIdForStorage;
 
+                // إشعار منشئ المهمة
                 await pool.request()
                     .input('CommentID', sql.Int, newComment.CommentID)
                     .input('TaskID', sql.Int, newComment.TaskID)
@@ -299,6 +300,33 @@ exports.createComment = async (req, res) => {
                               SELECT 1 FROM CommentNotifications cn
                               WHERE cn.CommentID = @CommentID
                                 AND LTRIM(RTRIM(CAST(cn.${notifNotifyCol} AS NVARCHAR(255)))) = LTRIM(RTRIM(CAST(t.${taskCreatorCol} AS NVARCHAR(255))))
+                          );
+                    `);
+
+                // إشعار جميع المسندة إليهم مهام فرعية في هذه المهمة
+                const subtaskAssigneeCol = schema.HasNotifyVacancy
+                    ? (await pool.request().query(`SELECT CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasV`)).recordset[0]?.HasV
+                        ? 'AssignedToVacancyID' : 'AssignedTo'
+                    : 'AssignedTo';
+
+                await pool.request()
+                    .input('CommentID2', sql.Int, newComment.CommentID)
+                    .input('TaskID2', sql.Int, newComment.TaskID)
+                    .input('CommentedByActorID2', sql.NVarChar, commentedByActorId)
+                    .input('CreatedAt2', sql.DateTime, newComment.CreatedAt)
+                    .query(`
+                        INSERT INTO CommentNotifications (CommentID, TaskID, ${notifCommentedByCol}, ${notifNotifyCol}, NotificationType, IsRead, CreatedAt)
+                        SELECT DISTINCT @CommentID2, @TaskID2, @CommentedByActorID2,
+                               CAST(s.${subtaskAssigneeCol} AS NVARCHAR(255)),
+                               'subtask_assignee', 0, @CreatedAt2
+                        FROM Subtasks s
+                        WHERE s.TaskID = @TaskID2
+                          AND s.${subtaskAssigneeCol} IS NOT NULL
+                          AND LTRIM(RTRIM(CAST(s.${subtaskAssigneeCol} AS NVARCHAR(255)))) <> @CommentedByActorID2
+                          AND NOT EXISTS (
+                              SELECT 1 FROM CommentNotifications cn
+                              WHERE cn.CommentID = @CommentID2
+                                AND LTRIM(RTRIM(CAST(cn.${notifNotifyCol} AS NVARCHAR(255)))) = LTRIM(RTRIM(CAST(s.${subtaskAssigneeCol} AS NVARCHAR(255))))
                           );
                     `);
             }

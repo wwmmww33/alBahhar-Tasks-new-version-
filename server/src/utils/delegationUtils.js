@@ -34,7 +34,8 @@ async function resolveAccessActorId(pool, rawUserId, schema) {
       CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
       CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID,
       CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
-      CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable
+      CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
+      CASE WHEN OBJECT_ID('dbo.JobVacancies', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasJobVacancies
   `);
 
   const p = probe.recordset[0] || {};
@@ -52,6 +53,17 @@ async function resolveAccessActorId(pool, rawUserId, schema) {
         WHERE ${whereClause}
       `);
     return String(mapped.recordset[0]?.UserID || loginId).trim();
+  }
+
+  // If loginId is numeric, check if it is already a valid VacancyID — return it directly.
+  // This prevents treating a VacancyID as a UserID and resolving to the wrong vacancy.
+  if (schema?.isVacancy && p.HasJobVacancies && /^\d+$/.test(loginId)) {
+    const vacancyCheck = await pool.request()
+      .input('VacancyID', sql.Int, parseInt(loginId, 10))
+      .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+    if (vacancyCheck.recordset.length > 0) {
+      return loginId;
+    }
   }
 
   if (p.HasProfileView) {
@@ -91,6 +103,25 @@ async function resolveAccessActorId(pool, rawUserId, schema) {
     }
 
     return String(row.UserID || loginId).trim();
+  }
+
+  // Fallback: profile view unavailable — resolve UserID → VacancyID via Assignments table directly.
+  if (p.HasAssignmentsTable && schema?.isVacancy) {
+    const assignRes = await pool.request()
+      .input('LoginID', sql.NVarChar, loginId)
+      .query(`
+        SELECT TOP 1 a.VacancyID
+        FROM dbo.Users u
+        INNER JOIN dbo.Assignments a ON a.UserID = u.UserID
+        WHERE (${whereClause})
+          AND a.VacancyID IS NOT NULL
+        ORDER BY
+          CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,
+          ISNULL(a.StartDate, '1900-01-01') DESC,
+          a.AssignmentID DESC
+      `);
+    const vid = assignRes.recordset[0]?.VacancyID;
+    if (vid != null && String(vid).trim() !== '') return String(vid).trim();
   }
 
   return loginId;
@@ -532,11 +563,25 @@ async function checkTaskAccess(pool, taskId, userId, isAdmin, requiredPermission
     subtaskRequest.input('taskId', sql.Int, taskId);
     subtaskRequest.input('userId', sql.NVarChar(50), effectiveActorId);
     
-    const subtaskResult = await subtaskRequest.query(`
-      SELECT COUNT(*) as AssignedSubtasks
-      FROM Subtasks
-      WHERE TaskID = @taskId AND ${schema.subtaskAssignedCol} = @userId
-    `);
+    const subtaskResult = await subtaskRequest.query(
+      schema.isVacancy
+        ? `SELECT COUNT(*) as AssignedSubtasks
+           FROM Subtasks s
+           WHERE s.TaskID = @taskId
+             AND (
+               (TRY_CAST(@userId AS INT) IS NOT NULL
+                AND s.AssignedToVacancyID = TRY_CAST(@userId AS INT))
+               OR EXISTS (
+                 SELECT 1 FROM dbo.Assignments a
+                 INNER JOIN dbo.Users u ON u.UserID = a.UserID
+                 WHERE a.VacancyID = s.AssignedToVacancyID
+                   AND LTRIM(RTRIM(u.UserID)) = @userId
+               )
+             )`
+        : `SELECT COUNT(*) as AssignedSubtasks
+           FROM Subtasks
+           WHERE TaskID = @taskId AND ${schema.subtaskAssignedCol} = @userId`
+    );
     
     if (subtaskResult.recordset[0].AssignedSubtasks > 0) {
       // المستخدم مُسند إليه مهام فرعية

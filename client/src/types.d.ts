@@ -15,6 +15,7 @@ export type Subtask = {
   LastActedByVacancyID?: number | string | null;
   ActedByName?: string;
   DueDate?: string;
+  EndDate?: string | null;
   CreatedAt: string;
   UpdatedAt: string;
   ShowInCalendar?: boolean;
@@ -98,7 +99,9 @@ export type CurrentUser = {
   FullName: string;
   DepartmentID: number | null;
   DepartmentName: string | null;
+  VacancyName?: string | null;
   IsAdmin: boolean;
+  Role?: number;
 };
 
 export type CategoryInformation = {

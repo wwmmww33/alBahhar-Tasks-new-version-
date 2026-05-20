@@ -2,6 +2,7 @@
 const sql = require('mssql');
 const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission, hasActiveDelegation } = require('../utils/delegationUtils');
 const encryptionConfig = require('../config/encryption.config');
+const { detectSchema, resolveVacancyId, ensureVacancyId } = require('../utils/vacancyResolver');
 
 async function resolveEffectiveActorId(pool, rawUserId) {
     const loginId = String(rawUserId || '').trim();
@@ -11,13 +12,28 @@ async function resolveEffectiveActorId(pool, rawUserId) {
         SELECT
           CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS UsesVacancySchema,
           CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
-            CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
+          CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
+          CASE WHEN OBJECT_ID('dbo.JobVacancies', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasJobVacancies,
           CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
           CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
     `);
 
     const p = probe.recordset[0] || {};
     const usesVacancySchema = !!p.UsesVacancySchema;
+
+    // إذا كان المخطط يستخدم VacancyID والقيمة الواردة رقم صحيح،
+    // نتحقق أولاً هل هي VacancyID مباشر (يحدث عندما يُرسل العميل VacancyID بدل UserID).
+    // هذا يمنع الخطأ: البحث عن UserID="3" قد يجد مستخدماً آخر له VacancyID مختلف.
+    if (usesVacancySchema && p.HasJobVacancies && /^\d+$/.test(loginId)) {
+        try {
+            const vacancyCheck = await pool.request()
+                .input('VacancyID', sql.Int, parseInt(loginId, 10))
+                .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+            if (vacancyCheck.recordset.length > 0) {
+                return loginId; // القيمة VacancyID صالح — نُعيدها مباشرةً
+            }
+        } catch (_) { /* تجاهل الخطأ ومتابعة المسار الاعتيادي */ }
+    }
 
     const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
     if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
@@ -230,7 +246,8 @@ async function canUserViewTaskByListRules(pool, rawUserId, isAdmin, taskId) {
           CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskVacancy,
           CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubVacancy,
           CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
-                 AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasDelegationVacancy
+                 AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasDelegationVacancy,
+          CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentVacancy
     `);
 
     const s = schema.recordset[0] || {};
@@ -240,10 +257,12 @@ async function canUserViewTaskByListRules(pool, rawUserId, isAdmin, taskId) {
     const subAssignedCol = isVacancy ? 'AssignedToVacancyID' : 'AssignedTo';
     const delegatorCol = isVacancy ? 'DelegatorVacancyID' : 'DelegatorUserID';
     const delegateCol = isVacancy ? 'DelegateVacancyID' : 'DelegateUserID';
+    const commentAuthorCol = s.HasCommentVacancy ? 'CommentedByVacancyID' : 'UserID';
 
     const accessParts = [
         `t.${taskCreatorCol} = @UserID`,
         `EXISTS (SELECT 1 FROM Subtasks s_inner WHERE s_inner.TaskID = t.TaskID AND s_inner.${subAssignedCol} = @UserID)`,
+        `EXISTS (SELECT 1 FROM Comments cm_inner WHERE cm_inner.TaskID = t.TaskID AND cm_inner.${commentAuthorCol} = @UserID)`,
         `EXISTS (
             SELECT 1
             FROM TaskDelegations d
@@ -636,52 +655,147 @@ exports.assignTask = async (req, res) => {
 };
 
 exports.createTask = async (req, res) => {
-  // --- createTask المصحح (بدون AssignedTo) ---
+  // createTask المصحح — يدعم مخطط VacancyID الجديد ومخطط UserID القديم
   const { Title, Description, DepartmentID, Priority, DueDate, subtasks, CreatedBy, ActedBy, CategoryID } = req.body;
-  // تشفير الوصف إن وُجد
   const encryptedDescription = Description ? encryptionConfig.encrypt(Description) : null;
   const encryptedTitle = encryptionConfig.encrypt(Title);
+
   if (!Title || !DepartmentID || !DueDate || !CreatedBy) {
     return res.status(400).json({ message: 'Title, DepartmentID, DueDate, and CreatedBy are required.' });
   }
+
   const pool = req.app.locals.db;
+  if (!pool) {
+    return res.status(503).send({ message: 'Database connection is not available.' });
+  }
+
   const transaction = new sql.Transaction(pool);
   try {
     await transaction.begin();
+
+    // تحديد الفاعل (actor) إذا كان مفوَّضاً
     let actorUserId = null;
     if (ActedBy && ActedBy !== CreatedBy) {
       try {
         const active = await hasActiveDelegation(pool, CreatedBy, ActedBy);
-        if (active) {
-          actorUserId = ActedBy;
-        }
-      } catch (_) {
-        actorUserId = null;
-      }
+        if (active) actorUserId = ActedBy;
+      } catch (_) { actorUserId = null; }
     }
-    const taskResult = await new sql.Request(transaction)
-      .input('Title', sql.NVarChar, encryptedTitle).input('Description', sql.NVarChar, encryptedDescription)
-      .input('CreatedBy', sql.NVarChar, CreatedBy).input('ActedBy', sql.NVarChar, actorUserId)
+
+    // فحص المخطط لاختيار أسماء الأعمدة الصحيحة
+    const schema = await detectSchema(pool);
+
+    // حل VacancyID للمنشئ والفاعل (إن وُجد المخطط الجديد)
+    let createdByVacancyId = null;
+    let actedByVacancyId = null;
+    if (schema.hasTasksCreatedByVacancy || schema.hasTasksLastActedByVacancy) {
+      createdByVacancyId = await resolveVacancyId(pool, CreatedBy);
+      if (actorUserId) actedByVacancyId = await resolveVacancyId(pool, actorUserId);
+    }
+
+    // بناء INSERT لجدول Tasks ديناميكياً
+    const taskCols = ['Title', 'Description', 'DepartmentID', 'Priority', 'DueDate', 'Status', 'CategoryID'];
+    const taskVals = ['@Title', '@Description', '@DepartmentID', '@Priority', '@DueDate', '\'open\'', '@CategoryID'];
+
+    const taskRequest = new sql.Request(transaction)
+      .input('Title', sql.NVarChar, encryptedTitle)
+      .input('Description', sql.NVarChar, encryptedDescription)
       .input('DepartmentID', sql.Int, DepartmentID)
-      .input('Priority', sql.NVarChar, Priority || 'normal').input('DueDate', sql.DateTime, new Date(DueDate))
-      .input('CategoryID', sql.Int, CategoryID || null)
-      .query(`INSERT INTO Tasks (Title, Description, CreatedBy, ActedBy, DepartmentID, Priority, DueDate, Status, CategoryID) OUTPUT INSERTED.TaskID VALUES (@Title, @Description, @CreatedBy, @ActedBy, @DepartmentID, @Priority, @DueDate, 'open', @CategoryID);`);
+      .input('Priority', sql.NVarChar, Priority || 'normal')
+      .input('DueDate', sql.DateTime, new Date(DueDate))
+      .input('CategoryID', sql.Int, CategoryID || null);
+
+    // CreatedBy — VacancyID إن توفر، وإلا UserID نصي
+    if (schema.hasTasksCreatedByVacancy) {
+      if (createdByVacancyId == null) {
+        await transaction.rollback();
+        return res.status(400).json({ message: 'تعذّر تحديد المنصب (VacancyID) للمنشئ. تأكد من وجود إسناد (Assignment) نشط.' });
+      }
+      taskCols.push('CreatedByVacancyID');
+      taskVals.push('@CreatedByVacancyID');
+      taskRequest.input('CreatedByVacancyID', sql.Int, createdByVacancyId);
+    } else {
+      taskCols.push('CreatedBy');
+      taskVals.push('@CreatedBy');
+      taskRequest.input('CreatedBy', sql.NVarChar, CreatedBy);
+    }
+
+    // ActedBy / LastActedByVacancyID — اختياري (عند وجود تفويض)
+    if (schema.hasTasksLastActedByVacancy) {
+      taskCols.push('LastActedByVacancyID');
+      taskVals.push('@LastActedByVacancyID');
+      taskRequest.input('LastActedByVacancyID', sql.Int, actedByVacancyId);
+    }
+    // عمود ActedBy النصي يبقى للتسجيل التاريخي (UserID الفعلي للفاعل)
+    taskCols.push('ActedBy');
+    taskVals.push('@ActedBy');
+    taskRequest.input('ActedBy', sql.NVarChar, actorUserId);
+
+    const taskInsertSql = `
+      INSERT INTO Tasks (${taskCols.join(', ')})
+      OUTPUT INSERTED.TaskID
+      VALUES (${taskVals.join(', ')});
+    `;
+    const taskResult = await taskRequest.query(taskInsertSql);
     const newTaskId = taskResult.recordset[0].TaskID;
+
+    // المهام الفرعية
     if (subtasks && subtasks.length > 0) {
       for (const subtaskTitle of subtasks) {
         const encSubtaskTitle = encryptionConfig.encrypt(subtaskTitle);
-        await new sql.Request(transaction)
-          .input('TaskID', sql.Int, newTaskId).input('Title', sql.NVarChar, encSubtaskTitle)
-          .input('CreatedBy', sql.NVarChar, CreatedBy)
-          .input('ActedBy', sql.NVarChar, actorUserId)
-          .input('AssignedTo', sql.NVarChar, CreatedBy)
-          .query('INSERT INTO Subtasks (TaskID, Title, CreatedBy, ActedBy, AssignedTo, IsCompleted, CreatedAt) VALUES (@TaskID, @Title, @CreatedBy, @ActedBy, @AssignedTo, 0, GETDATE())');
+
+        const subCols = ['TaskID', 'Title', 'IsCompleted', 'CreatedAt'];
+        const subVals = ['@TaskID', '@Title', '0', 'GETDATE()'];
+
+        const subRequest = new sql.Request(transaction)
+          .input('TaskID', sql.Int, newTaskId)
+          .input('Title', sql.NVarChar, encSubtaskTitle);
+
+        // CreatedBy
+        if (schema.hasSubtasksCreatedByVacancy) {
+          subCols.push('CreatedByVacancyID');
+          subVals.push('@CreatedByVacancyID');
+          subRequest.input('CreatedByVacancyID', sql.Int, createdByVacancyId);
+        } else {
+          subCols.push('CreatedBy');
+          subVals.push('@CreatedBy');
+          subRequest.input('CreatedBy', sql.NVarChar, CreatedBy);
+        }
+
+        // AssignedTo — افتراضياً للمنشئ نفسه
+        if (schema.hasSubtasksAssignedToVacancy) {
+          subCols.push('AssignedToVacancyID');
+          subVals.push('@AssignedToVacancyID');
+          subRequest.input('AssignedToVacancyID', sql.Int, createdByVacancyId);
+        } else {
+          subCols.push('AssignedTo');
+          subVals.push('@AssignedTo');
+          subRequest.input('AssignedTo', sql.NVarChar, CreatedBy);
+        }
+
+        // ActedBy / LastActedByVacancyID
+        if (schema.hasSubtasksLastActedByVacancy) {
+          subCols.push('LastActedByVacancyID');
+          subVals.push('@LastActedByVacancyID');
+          subRequest.input('LastActedByVacancyID', sql.Int, actedByVacancyId);
+        }
+        subCols.push('ActedBy');
+        subVals.push('@ActedBy');
+        subRequest.input('ActedBy', sql.NVarChar, actorUserId);
+
+        const subInsertSql = `
+          INSERT INTO Subtasks (${subCols.join(', ')})
+          VALUES (${subVals.join(', ')})
+        `;
+        await subRequest.query(subInsertSql);
       }
     }
+
     await transaction.commit();
-    res.status(201).json({ message: 'Task and subtasks created successfully!', newTaskId: newTaskId });
+    res.status(201).json({ message: 'Task and subtasks created successfully!', newTaskId });
   } catch (error) {
-    await transaction.rollback();
+    try { await transaction.rollback(); } catch (_) {}
+    console.error('CREATE TASK ERROR:', error);
     res.status(500).send({ message: 'Error creating task' });
   }
 };
@@ -890,13 +1004,34 @@ exports.getUsersByDepartment = async (req, res) => {
                 CASE WHEN COL_LENGTH('dbo.JobVacancies', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDepartmentID,
                 CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
                 CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID
+                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
+                CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDepartmentType
         `);
         const s = schema.recordset[0] || {};
 
         const parentCol = s.HasParentID ? 'ParentID' : (s.HasParentDepartmentID ? 'ParentDepartmentID' : null);
-        const deptScopeCte = parentCol ? `
-            WITH UpTree AS (
+        // القاعدة الوظيفية: الأقسام ذات Type=0 هي وحدات مستقلة ومنفصلة تمامًا.
+        // نصعد في الشجرة متوقفين عند أي قسم أب من نوع Type=0 (لا نعبر حدوده).
+        // أعلى سلف نصل إليه قبل الوصول لـ Type=0 أو لقمة الشجرة يكون هو الجذر.
+        // عند الهبوط، نستثني الأقسام Type=0 وجميع أبنائها.
+        const rootCte = (parentCol && s.HasDepartmentType) ? `
+            UpTree AS (
+                SELECT DepartmentID, ${parentCol} AS ParentDepartmentID, 0 AS Depth
+                FROM dbo.Departments
+                WHERE DepartmentID = @DepartmentID
+                UNION ALL
+                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
+                FROM dbo.Departments d
+                INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
+                WHERE CAST(d.[Type] AS INT) <> 0 OR d.[Type] IS NULL
+            ),
+            RootDept AS (
+                SELECT TOP 1 DepartmentID AS RootDepartmentID
+                FROM UpTree
+                ORDER BY Depth DESC
+            )
+        ` : (parentCol ? `
+            UpTree AS (
                 SELECT DepartmentID, ${parentCol} AS ParentDepartmentID
                 FROM dbo.Departments
                 WHERE DepartmentID = @DepartmentID
@@ -910,16 +1045,24 @@ exports.getUsersByDepartment = async (req, res) => {
                 FROM UpTree
                 WHERE ParentDepartmentID IS NULL
                 ORDER BY DepartmentID
+            )
+        ` : '');
+        // إن لم نجد جذرًا أثناء الصعود نستخدم DepartmentID نفسه كجذر (خطة أمان).
+        const deptScopeCte = parentCol ? `
+            WITH ${rootCte},
+            RootDeptFallback AS (
+                SELECT COALESCE((SELECT TOP 1 RootDepartmentID FROM RootDept), @DepartmentID) AS RootDepartmentID
             ),
             DeptTree AS (
                 SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
                 FROM dbo.Departments d
-                CROSS JOIN RootDept r
+                CROSS JOIN RootDeptFallback r
                 WHERE d.DepartmentID = r.RootDepartmentID
                 UNION ALL
                 SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
                 FROM dbo.Departments d
                 INNER JOIN DeptTree t ON d.${parentCol} = t.DepartmentID
+                ${s.HasDepartmentType ? 'WHERE CAST(d.[Type] AS INT) <> 0 OR d.[Type] IS NULL' : ''}
             )
         ` : '';
 
@@ -1466,7 +1609,8 @@ exports.getTasksWithNotifications = async (req, res) => {
                      AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasDelegationVacancy,
               CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignNotifVacancy,
               CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentNotifVacancy,
-              CASE WHEN COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskViewsVacancy
+              CASE WHEN COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskViewsVacancy,
+              CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentVacancy
         `);
 
         const s = schema.recordset[0] || {};
@@ -1483,12 +1627,14 @@ exports.getTasksWithNotifications = async (req, res) => {
         const identityTable = isVacancy ? 'JobVacancies' : 'Users';
         const identityKey = isVacancy ? 'VacancyID' : 'UserID';
         const identityName = isVacancy ? 'Name' : 'FullName';
+        const commentAuthorCol = s.HasCommentVacancy ? 'CommentedByVacancyID' : 'UserID';
 
         const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
 
         const accessParts = [
             `t.${taskCreatorCol} = @UserID`,
             `EXISTS (SELECT 1 FROM Subtasks s_inner WHERE s_inner.TaskID = t.TaskID AND s_inner.${subAssignedCol} = @UserID)`,
+            `EXISTS (SELECT 1 FROM Comments cm_inner WHERE cm_inner.TaskID = t.TaskID AND cm_inner.${commentAuthorCol} = @UserID)`,
             `EXISTS (
                 SELECT 1
                 FROM TaskDelegations d
@@ -1615,6 +1761,41 @@ exports.updateTaskCategory = async (req, res) => {
 };
 
 // الحصول على المهام المكتملة للمستخدم (عند الحاجة فقط، مع دعم التصفح على دفعات)
+// ===== أدوات مساعدة مشتركة للمهام المكتملة / البحث =====
+// تبني أسماء أعمدة وJOINات صحيحة حسب المخطط (VacancyID جديد / UserID قديم).
+async function buildCompletedTasksContext(pool) {
+    const schema = await detectSchema(pool);
+    const idTable = schema.isVacancy ? 'JobVacancies' : 'Users';
+    const idKey   = schema.isVacancy ? 'VacancyID'    : 'UserID';
+    const idName  = schema.isVacancy ? 'Name'         : 'FullName';
+
+    return {
+        schema,
+        // أعمدة Tasks
+        taskCreatedCol:   schema.tasksCreatedByCol,      // CreatedByVacancyID أو CreatedBy
+        taskActedCol:     schema.tasksLastActedByCol,    // LastActedByVacancyID أو ActedBy
+        // أعمدة Subtasks
+        subAssignedCol:   schema.subtasksAssignedToCol,  // AssignedToVacancyID أو AssignedTo
+        subCreatedCol:    schema.subtasksCreatedByCol,
+        // أعمدة Comments
+        commentAuthorCol: schema.isVacancy ? 'CommentedByVacancyID' : 'UserID',
+        // جدول الهوية والانضمام
+        idTable, idKey, idName,
+        // SQL type للمعرّف أثناء الربط
+        sqlIdType: schema.isVacancy ? sql.Int : sql.NVarChar,
+    };
+}
+
+// يُرجِع قيمة @UserID (إما VacancyID int أو UserID نصّي) المناسبة للاستعلامات.
+// في مخطط VacancyID نحتاج VacancyID الحالية للمستخدم؛ في المخطط القديم نستخدم UserID.
+async function resolvePrincipalForCompletedSearch(pool, rawUserId, ctx) {
+    if (ctx.schema.isVacancy) {
+        const vid = await resolveVacancyId(pool, rawUserId);
+        return vid; // قد تكون null — سيُعالَج من المستدعي
+    }
+    return String(rawUserId || '').trim();
+}
+
 exports.getCompletedTasks = async (req, res) => {
     const pool = req.app.locals.db;
     const { userId, isAdmin } = req.query;
@@ -1622,7 +1803,7 @@ exports.getCompletedTasks = async (req, res) => {
         return res.status(401).json({ message: 'User identification is required.' });
     }
 
-    // إعداد معلومات التصفح (الصفحة والحجم)
+    // إعداد معلومات التصفح
     let { page = 1, pageSize = 10 } = req.query;
     page = parseInt(page, 10) || 1;
     pageSize = parseInt(pageSize, 10) || 10;
@@ -1632,61 +1813,83 @@ exports.getCompletedTasks = async (req, res) => {
     const offset = (page - 1) * pageSize;
 
     try {
-        const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
-        const deptScopeClause = scopeDepartmentIds.length > 0
-            ? ` OR t.DepartmentID IN (${scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ')})`
-            : '';
-        let query;
+        const ctx = await buildCompletedTasksContext(pool);
+        const isAdminFlag = isAdmin === 'true' || isAdmin === true;
 
-        if (isAdmin === 'true') {
+        const scopeDepartmentIds = isAdminFlag ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
+        const deptScopeClause = scopeDepartmentIds.length > 0
+            ? ` OR t.DepartmentID IN (${scopeDepartmentIds.map((_, i) => `@ScopeDepartmentID${i}`).join(', ')})`
+            : '';
+
+        const principal = isAdminFlag ? null : await resolvePrincipalForCompletedSearch(pool, userId, ctx);
+        // إذا كان الموظف عادياً لكن لم نستطع تحويله إلى VacancyID وليس لديه نطاق قسم، أرجع قائمة فارغة
+        if (!isAdminFlag && principal == null && scopeDepartmentIds.length === 0) {
+            return res.status(200).json([]);
+        }
+
+        let query;
+        if (isAdminFlag) {
             // المدير يرى جميع المهام المكتملة/الملغاة
             query = `
-                SELECT t.*, creator.FullName as CreatedByName, acted.FullName as ActedByName, c.Name as CategoryName
+                SELECT t.*,
+                       creator.${ctx.idName} AS CreatedByName,
+                       acted.${ctx.idName}   AS ActedByName,
+                       cat.Name              AS CategoryName
                 FROM Tasks t
-                LEFT JOIN Users creator ON t.CreatedBy = creator.UserID
-                LEFT JOIN Users acted ON t.ActedBy = acted.UserID
-                LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
+                LEFT JOIN ${ctx.idTable} creator ON t.${ctx.taskCreatedCol} = creator.${ctx.idKey}
+                LEFT JOIN ${ctx.idTable} acted   ON t.${ctx.taskActedCol}   = acted.${ctx.idKey}
+                LEFT JOIN Categories cat         ON t.CategoryID            = cat.CategoryID
                 WHERE t.Status IN ('completed', 'cancelled')
                 ORDER BY t.CreatedAt DESC
                 OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             `;
         } else {
-            // المستخدم العادي: المهام المكتملة/الملغاة التي أنشأها أو لديه فيها مهام فرعية
+            // مستخدم عادي: يرى المهام التي أنشأها، أو أُسنِد له فيها مهمة فرعية،
+            // أو علّق عليها — مع توسيع النطاق عبر أقسام المديرية.
+            const principalClauses = [];
+            if (principal != null) {
+                principalClauses.push(`t.${ctx.taskCreatedCol} = @UserID`);
+                principalClauses.push(`EXISTS (SELECT 1 FROM Subtasks s WHERE s.TaskID = t.TaskID AND s.${ctx.subAssignedCol} = @UserID)`);
+                principalClauses.push(`EXISTS (SELECT 1 FROM Comments cm WHERE cm.TaskID = t.TaskID AND cm.${ctx.commentAuthorCol} = @UserID)`);
+            }
+            // إضافة نطاق القسم (إن وُجد) — يستخدم DepartmentID على Tasks (int في كلا المخططين)
+            if (scopeDepartmentIds.length > 0) {
+                principalClauses.push(`t.DepartmentID IN (${scopeDepartmentIds.map((_, i) => `@ScopeDepartmentID${i}`).join(', ')})`);
+            }
+            const accessWhere = principalClauses.length > 0
+                ? `(${principalClauses.join(' OR ')})`
+                : '1 = 0';
+
             query = `
-                SELECT DISTINCT t.*, creator.FullName as CreatedByName, acted.FullName as ActedByName, c.Name as CategoryName
+                SELECT DISTINCT t.*,
+                       creator.${ctx.idName} AS CreatedByName,
+                       acted.${ctx.idName}   AS ActedByName,
+                       cat.Name              AS CategoryName
                 FROM Tasks t
-                LEFT JOIN Users creator ON t.CreatedBy = creator.UserID
-                LEFT JOIN Users acted ON t.ActedBy = acted.UserID
-                LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
+                LEFT JOIN ${ctx.idTable} creator ON t.${ctx.taskCreatedCol} = creator.${ctx.idKey}
+                LEFT JOIN ${ctx.idTable} acted   ON t.${ctx.taskActedCol}   = acted.${ctx.idKey}
+                LEFT JOIN Categories cat         ON t.CategoryID            = cat.CategoryID
                 WHERE t.Status IN ('completed', 'cancelled')
-                  AND (
-                                        t.CreatedBy = @UserID
-                    OR EXISTS (
-                        SELECT 1 FROM Subtasks s 
-                                                WHERE s.TaskID = t.TaskID AND s.AssignedTo = @UserID
-                    )
-                                        ${deptScopeClause}
-                  )
+                  AND ${accessWhere}
                 ORDER BY t.CreatedAt DESC
-                                OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+                OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             `;
         }
 
-                const request = pool.request()
-                        .input('UserID', sql.NVarChar, userId)
-                        .input('Offset', sql.Int, offset)
-                        .input('PageSize', sql.Int, pageSize);
-                scopeDepartmentIds.forEach((departmentId, index) => {
-                    request.input(`ScopeDepartmentID${index}`, sql.NVarChar, departmentId);
-                });
+        const request = pool.request()
+            .input('Offset', sql.Int, offset)
+            .input('PageSize', sql.Int, pageSize);
+        if (!isAdminFlag && principal != null) {
+            request.input('UserID', ctx.sqlIdType, principal);
+        }
+        scopeDepartmentIds.forEach((departmentId, i) => {
+            request.input(`ScopeDepartmentID${i}`, sql.Int, parseInt(departmentId, 10));
+        });
+
         const result = await request.query(query);
         const tasks = result.recordset.map(t => {
-            if (t.Description) {
-                try { t.Description = encryptionConfig.decrypt(t.Description); } catch (e) {}
-            }
-            if (t.Title) {
-                try { t.Title = encryptionConfig.decrypt(t.Title); } catch (e) {}
-            }
+            if (t.Description) { try { t.Description = encryptionConfig.decrypt(t.Description); } catch (e) {} }
+            if (t.Title)       { try { t.Title       = encryptionConfig.decrypt(t.Title);       } catch (e) {} }
             return t;
         });
 
@@ -1701,6 +1904,11 @@ exports.getCompletedTasks = async (req, res) => {
 // exports.getTaskTransferHistory was here
 
 // البحث في المهام المكتملة في قاعدة البيانات (العنوان، التفاصيل، المهام الفرعية، التعليقات)
+// قواعد الوصول للمستخدم غير الإداري:
+//   1. أنشأ المهمة بنفسه (Tasks.CreatedBy* = principal)
+//   2. أُسنِد له مهمة فرعية فيها (Subtasks.AssignedTo* = principal)
+//   3. علّق عليها (Comments.Author* = principal)
+//   4. المهمة تتبع قسماً من أقسام مديريته (اختياري حسب resolveUserDirectorateDepartmentIds)
 exports.searchCompletedTasks = async (req, res) => {
     const pool = req.app.locals.db;
     const { userId, isAdmin, q, maxScan } = req.query;
@@ -1716,58 +1924,71 @@ exports.searchCompletedTasks = async (req, res) => {
     const maxTasksToScan = Math.min(Math.max(parseInt(maxScan, 10) || 600, 50), 3000);
 
     try {
-        const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
-        const deptScopeClause = scopeDepartmentIds.length > 0
-            ? ` OR t.DepartmentID IN (${scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ')})`
-            : '';
+        const ctx = await buildCompletedTasksContext(pool);
+        const isAdminFlag = isAdmin === 'true' || isAdmin === true;
+
+        const scopeDepartmentIds = isAdminFlag ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
+        const principal = isAdminFlag ? null : await resolvePrincipalForCompletedSearch(pool, userId, ctx);
+
+        // لو كان الموظف عادياً ولم نتمكن من تحديد هويته في المخطط الحالي
+        // ولا لديه نطاق أقسام يستطيع تصفّحه — أرجع قائمة فارغة بدل 500.
+        if (!isAdminFlag && principal == null && scopeDepartmentIds.length === 0) {
+            return res.status(200).json([]);
+        }
+
         let tasksQuery;
 
-        if (isAdmin === 'true') {
+        if (isAdminFlag) {
             tasksQuery = `
-                SELECT TOP (@MaxScan) t.*, 
-                       creator.FullName as CreatedByName, 
-                       acted.FullName as ActedByName, 
-                       assignee.FullName as AssignedToName,
-                       c.Name as CategoryName
+                SELECT TOP (@MaxScan) t.*,
+                       creator.${ctx.idName} AS CreatedByName,
+                       acted.${ctx.idName}   AS ActedByName,
+                       cat.Name              AS CategoryName
                 FROM Tasks t
-                LEFT JOIN Users creator ON t.CreatedBy = creator.UserID
-                LEFT JOIN Users acted ON t.ActedBy = acted.UserID
-                LEFT JOIN Users assignee ON t.AssignedTo = assignee.UserID
-                LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
+                LEFT JOIN ${ctx.idTable} creator ON t.${ctx.taskCreatedCol} = creator.${ctx.idKey}
+                LEFT JOIN ${ctx.idTable} acted   ON t.${ctx.taskActedCol}   = acted.${ctx.idKey}
+                LEFT JOIN Categories cat         ON t.CategoryID            = cat.CategoryID
                 WHERE t.Status IN ('completed', 'cancelled')
                 ORDER BY t.CreatedAt DESC
             `;
         } else {
+            // بناء شرط الوصول ديناميكياً
+            const principalClauses = [];
+            if (principal != null) {
+                principalClauses.push(`t.${ctx.taskCreatedCol} = @UserID`);
+                principalClauses.push(`EXISTS (SELECT 1 FROM Subtasks s WHERE s.TaskID = t.TaskID AND s.${ctx.subAssignedCol} = @UserID)`);
+                principalClauses.push(`EXISTS (SELECT 1 FROM Comments cm WHERE cm.TaskID = t.TaskID AND cm.${ctx.commentAuthorCol} = @UserID)`);
+            }
+            if (scopeDepartmentIds.length > 0) {
+                principalClauses.push(`t.DepartmentID IN (${scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ')})`);
+            }
+            const accessWhere = principalClauses.length > 0
+                ? `(${principalClauses.join(' OR ')})`
+                : '1 = 0';
+
             tasksQuery = `
-                SELECT DISTINCT TOP (@MaxScan) t.*, 
-                       creator.FullName as CreatedByName, 
-                       acted.FullName as ActedByName, 
-                       assignee.FullName as AssignedToName,
-                       c.Name as CategoryName
+                SELECT DISTINCT TOP (@MaxScan) t.*,
+                       creator.${ctx.idName} AS CreatedByName,
+                       acted.${ctx.idName}   AS ActedByName,
+                       cat.Name              AS CategoryName
                 FROM Tasks t
-                LEFT JOIN Users creator ON t.CreatedBy = creator.UserID
-                LEFT JOIN Users acted ON t.ActedBy = acted.UserID
-                LEFT JOIN Users assignee ON t.AssignedTo = assignee.UserID
-                LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
+                LEFT JOIN ${ctx.idTable} creator ON t.${ctx.taskCreatedCol} = creator.${ctx.idKey}
+                LEFT JOIN ${ctx.idTable} acted   ON t.${ctx.taskActedCol}   = acted.${ctx.idKey}
+                LEFT JOIN Categories cat         ON t.CategoryID            = cat.CategoryID
                 WHERE t.Status IN ('completed', 'cancelled')
-                  AND (
-                                        t.CreatedBy = @UserID
-                    OR EXISTS (
-                        SELECT 1 FROM Subtasks s 
-                                                WHERE s.TaskID = t.TaskID AND s.AssignedTo = @UserID
-                    )
-                    ${deptScopeClause}
-                  )
+                  AND ${accessWhere}
                 ORDER BY t.CreatedAt DESC
             `;
         }
 
-        const request = pool.request()
-            .input('UserID', sql.NVarChar, userId)
-            .input('MaxScan', sql.Int, maxTasksToScan);
+        const request = pool.request().input('MaxScan', sql.Int, maxTasksToScan);
+        if (!isAdminFlag && principal != null) {
+            request.input('UserID', ctx.sqlIdType, principal);
+        }
         scopeDepartmentIds.forEach((departmentId, index) => {
-            request.input(`ScopeDepartmentID${index}`, sql.NVarChar, departmentId);
+            request.input(`ScopeDepartmentID${index}`, sql.Int, parseInt(departmentId, 10));
         });
+
         const tasksResult = await request.query(tasksQuery);
         let tasks = tasksResult.recordset.map(t => {
             if (t.Description) {
@@ -1790,7 +2011,7 @@ exports.searchCompletedTasks = async (req, res) => {
                 (t.Title && t.Title.toLowerCase().includes(searchTerm)) ||
                 (t.Description && t.Description.toLowerCase().includes(searchTerm)) ||
                 (t.CreatedByName && t.CreatedByName.toLowerCase().includes(searchTerm)) ||
-                (t.AssignedToName && t.AssignedToName.toLowerCase().includes(searchTerm));
+                (t.ActedByName && t.ActedByName.toLowerCase().includes(searchTerm));
             if (matchesTaskFields) {
                 taskFieldMatches.add(t.TaskID);
             }
@@ -1810,12 +2031,12 @@ exports.searchCompletedTasks = async (req, res) => {
             const subtasksResult = await pool.request()
                 .input('TaskIDs', sql.NVarChar(sql.MAX), unresolvedIdsList)
                 .query(`
-                SELECT s.*, 
-                       u.FullName as AssignedToName,
-                       creator.FullName as CreatedByName
-                FROM Subtasks s 
-                LEFT JOIN Users u ON s.AssignedTo = u.UserID 
-                LEFT JOIN Users creator ON s.CreatedBy = creator.UserID
+                SELECT s.*,
+                       assignee.${ctx.idName} AS AssignedToName,
+                       creator.${ctx.idName}  AS CreatedByName
+                FROM Subtasks s
+                LEFT JOIN ${ctx.idTable} assignee ON s.${ctx.subAssignedCol} = assignee.${ctx.idKey}
+                LEFT JOIN ${ctx.idTable} creator  ON s.${ctx.subCreatedCol}  = creator.${ctx.idKey}
                 WHERE s.TaskID IN (
                     SELECT TRY_CAST(value AS INT)
                     FROM STRING_SPLIT(@TaskIDs, ',')
@@ -1835,9 +2056,9 @@ exports.searchCompletedTasks = async (req, res) => {
             const commentsResult = await pool.request()
                 .input('TaskIDs', sql.NVarChar(sql.MAX), unresolvedIdsList)
                 .query(`
-                SELECT c.*, u.FullName as UserName 
-                FROM Comments c 
-                LEFT JOIN Users u ON c.UserID = u.UserID 
+                SELECT c.*, author.${ctx.idName} AS UserName
+                FROM Comments c
+                LEFT JOIN ${ctx.idTable} author ON c.${ctx.commentAuthorCol} = author.${ctx.idKey}
                 WHERE c.TaskID IN (
                     SELECT TRY_CAST(value AS INT)
                     FROM STRING_SPLIT(@TaskIDs, ',')

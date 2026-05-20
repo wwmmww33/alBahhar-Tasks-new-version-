@@ -11,8 +11,12 @@ type CalendarItem = {
   SubtaskTitle: string;
   TaskTitle: string;
   DueDate: string;
+  EndDate?: string | null;
   AssignedToName?: string;
 };
+
+type SpanPos = 'single' | 'start' | 'middle' | 'end';
+type CalendarItemWithSpan = CalendarItem & { _spanPos: SpanPos };
 
 type CalendarCommentItem = {
   CommentID: number;
@@ -26,6 +30,12 @@ type CalendarCommentItem = {
 type SidebarCalendarProps = {
   currentUser: CurrentUser;
 };
+
+const SPAN_COLORS = [
+  '#3b82f6', '#22c55e', '#a855f7', '#f97316',
+  '#ec4899', '#14b8a6', '#ef4444', '#eab308',
+];
+const getSpanColor = (subtaskId: number) => SPAN_COLORS[subtaskId % SPAN_COLORS.length];
 
 const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   const actorId = resolveCurrentActorId(currentUser) || currentUser.UserID;
@@ -221,13 +231,35 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     };
   }, [actorId]);
 
+  const toLocalYMD = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
   const itemsByDay = useMemo(() => {
-    const map: Record<string, CalendarItem[]> = {};
+    const map: Record<string, CalendarItemWithSpan[]> = {};
     for (const it of items) {
-      const d = new Date(it.DueDate);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      if (!map[key]) map[key] = [];
-      map[key].push(it);
+      const due = new Date(it.DueDate);
+      const dueNorm = new Date(due.getFullYear(), due.getMonth(), due.getDate());
+      const endRaw = it.EndDate ? new Date(it.EndDate) : null;
+      const endNorm = endRaw ? new Date(endRaw.getFullYear(), endRaw.getMonth(), endRaw.getDate()) : null;
+
+      if (!endNorm) {
+        const key = toLocalYMD(dueNorm);
+        if (!map[key]) map[key] = [];
+        map[key].push({ ...it, _spanPos: 'single' });
+      } else {
+        const cur = new Date(dueNorm);
+        let safety = 0;
+        while (cur <= endNorm && safety < 366) {
+          const key = toLocalYMD(cur);
+          if (!map[key]) map[key] = [];
+          const isFirst = cur.getTime() === dueNorm.getTime();
+          const isLast  = cur.getTime() === endNorm.getTime();
+          const pos: SpanPos = isFirst && isLast ? 'single' : isFirst ? 'start' : isLast ? 'end' : 'middle';
+          map[key].push({ ...it, _spanPos: pos });
+          cur.setDate(cur.getDate() + 1);
+          safety++;
+        }
+      }
     }
     return map;
   }, [items]);
@@ -242,6 +274,18 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     }
     return map;
   }, [commentEvents]);
+
+  // حساب أقصى عدد من الأحداث الممتدة المتزامنة لتحديد عرض الشريط الجانبي
+  const stripWidth = useMemo(() => {
+    let max = 0;
+    for (const key of Object.keys(itemsByDay)) {
+      const uniqueIds = new Set(
+        (itemsByDay[key] || []).filter(it => it._spanPos !== 'single').map(it => it.SubtaskID)
+      );
+      max = Math.max(max, uniqueIds.size);
+    }
+    return max > 0 ? max * 7 + 1 : 0;
+  }, [itemsByDay]);
 
   return (
     <aside className="w-72 shrink-0 border-r border-content/10 bg-content/5 p-3">
@@ -347,7 +391,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
               </div>
             </div>
           )}
-          <ul className="space-y-2">
+          <div className="space-y-1">
             {dateRange.map((d) => {
               const dayItems = itemsByDay[d.key] || [];
               const dayPersonal = personalEvents.filter(pe => {
@@ -363,68 +407,109 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                 visibleShared.length > 0 ||
                 visiblePersonal.length > 0 ||
                 visibleComments.length > 0;
-              const isWeekend = d.date.getDay() === 5 || d.date.getDay() === 6; // الجمعة=5، السبت=6
+              const isWeekend = d.date.getDay() === 5 || d.date.getDay() === 6;
+
+              // حساب الأحداث الممتدة لهذا اليوم لرسم الخط الجانبي
+              const spanningItems = visibleShared.filter(it => it._spanPos !== 'single');
+              const spanLanes = [...new Map(
+                spanningItems.map(it => [it.SubtaskID, it])
+              ).values()].sort((a, b) => a.SubtaskID - b.SubtaskID);
+
               return (
-                <li
-                  key={d.key}
-                  className={
-                    `p-2 rounded border ` +
-                    (hasEvents
-                          ? (isWeekend
-                              ? 'bg-blue-200 dark:bg-blue-900/50 border-blue-400 dark:border-blue-600'
-                              : 'bg-blue-100 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700')
-                          : (isWeekend
-                              ? 'bg-gray-200 dark:bg-gray-900/70 border-content/30'
-                              : 'bg-white/60 dark:bg-gray-800/60 border-content/10')) +
-                    ''
-                  }
-                >
-                  <div className={`text-xs font-semibold mb-1 ${hasEvents ? 'text-black' : 'text-content'} text-right`}>{d.label}</div>
-                  {visibleShared.length > 0 && (
-                    <div className="space-y-1 text-right">
-                      {visibleShared.map((item) => (
-                        <div key={item.SubtaskID} className="text-xs">
+                <div key={d.key} className="flex items-stretch" dir="ltr">
+                  {/* شريط خطوط الامتداد خارج مربع اليوم */}
+                  {stripWidth > 0 && (
+                    <div className="relative flex-shrink-0" style={{ width: `${stripWidth}px` }}>
+                      {spanLanes.map((item, laneIdx) => {
+                        const pos = item._spanPos;
+                        const color = getSpanColor(item.SubtaskID);
+                        return (
+                          <div
+                            key={item.SubtaskID}
+                            className="absolute rounded-full"
+                            style={{
+                              left: `${laneIdx * 7 + 2}px`,
+                              width: '3px',
+                              backgroundColor: color,
+                              opacity: pos === 'end' ? 0.5 : 1,
+                              top: pos === 'start' ? '50%' : '-4px',
+                              bottom: pos === 'end' ? '50%' : '-4px',
+                              zIndex: 1,
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* مربع محتوى اليوم */}
+                  <div
+                    dir="rtl"
+                    className={
+                      `flex-1 p-2 rounded border min-w-0 ` +
+                      (hasEvents
+                        ? (isWeekend
+                            ? 'bg-blue-200 dark:bg-blue-900/50 border-blue-400 dark:border-blue-600'
+                            : 'bg-blue-100 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700')
+                        : (isWeekend
+                            ? 'bg-gray-200 dark:bg-gray-900/70 border-content/30'
+                            : 'bg-white/60 dark:bg-gray-800/60 border-content/10'))
+                    }
+                  >
+                    <div className={`text-xs font-semibold mb-1 ${hasEvents ? 'text-black dark:text-white' : 'text-content'} text-right`}>{d.label}</div>
+                    {visibleShared.length > 0 && (
+                      <div className="space-y-0.5 text-right">
+                        {visibleShared.map((item) => {
+                          const pos = item._spanPos;
+                          if (pos === 'middle' || pos === 'end') return null;
+                          const spanning = pos === 'start';
+                          const color = spanning ? getSpanColor(item.SubtaskID) : undefined;
+                          return (
+                            <div key={`${item.SubtaskID}-${pos}`} className="text-xs">
+                              <button
+                                type="button"
+                                style={{ color }}
+                                className="font-semibold hover:underline cursor-pointer text-right w-full truncate block"
+                                onClick={() => openTaskInNewTab(item.TaskID)}
+                              >
+                                {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                              </button>
+                              <div style={{ color }} className="opacity-70">ضمن: {item.TaskTitle}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {visiblePersonal.length > 0 && (
+                      <div className="space-y-1 text-right mt-1">
+                        {visiblePersonal.map((pe) => (
+                          <div key={pe.EventID} className="text-xs">
+                            <span className="font-semibold text-green-800 dark:text-green-200 text-right">{pe.Title}</span>
+                            <span className="ml-1 inline-block text-[10px] text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 px-1 py-[1px] rounded">(خاص)</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {visibleComments.length > 0 && (
+                      <div className="space-y-1 text-right mt-1">
+                        {visibleComments.map((comment) => (
                           <button
+                            key={comment.CommentID}
                             type="button"
-                            className="font-semibold text-blue-800 dark:text-blue-200 hover:underline cursor-pointer text-right"
-                            onClick={() => openTaskInNewTab(item.TaskID)}
+                            onClick={() => openTaskInNewTab(comment.TaskID)}
+                            className="text-xs font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
                           >
-                            {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                            {comment.Content}
+                            <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
                           </button>
-                          <div className="text-blue-600 dark:text-blue-300">ضمن: {item.TaskTitle}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {visiblePersonal.length > 0 && (
-                    <div className="space-y-1 text-right mt-1">
-                      {visiblePersonal.map((pe) => (
-                        <div key={pe.EventID} className="text-xs">
-                          <span className="font-semibold text-green-800 dark:text-green-200 text-right">{pe.Title}</span>
-                          <span className="ml-1 inline-block text-[10px] text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 px-1 py-[1px] rounded">(خاص)</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {visibleComments.length > 0 && (
-                    <div className="space-y-1 text-right mt-1">
-                      {visibleComments.map((comment) => (
-                        <button
-                          key={comment.CommentID}
-                          type="button"
-                          onClick={() => openTaskInNewTab(comment.TaskID)}
-                          className="text-xs font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
-                        >
-                          {comment.Content}
-                          <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </li>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
               );
             })}
-          </ul>
+          </div>
 
           {((viewFilter !== 'personal' && extraItems.length > 0) ||
             (viewFilter !== 'shared' && (extraPersonalEvents.length > 0 || extraCommentEvents.length > 0))) && (

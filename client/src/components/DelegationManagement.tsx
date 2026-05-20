@@ -1,12 +1,14 @@
 // src/components/DelegationManagement.tsx
 import React, { useState, useEffect, useCallback } from 'react';
 import { Edit, Trash2, Plus, CheckCircle, XCircle } from 'lucide-react';
-import { resolveCurrentActorId, resolveUserActorId } from '../utils/actorIdentity';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 
-type User = {
-  UserID: string;
-  FullName: string;
-  DepartmentName: string | null;
+type VacancyOption = {
+  UserID: string;               // VacancyID as string — used as DelegateID
+  FullName: string;             // "VacancyName (PersonName)"
+  VacancyID: number;
+  CurrentUserID: string | null;
+  CurrentUserFullName: string | null;
 };
 
 type Delegation = {
@@ -30,7 +32,7 @@ type NewDelegation = {
 
 const DelegationManagement = () => {
   const [delegations, setDelegations] = useState<Delegation[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
+  const [users, setUsers] = useState<VacancyOption[]>([]);
   const [editingDelegation, setEditingDelegation] = useState<Delegation | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newDelegation, setNewDelegation] = useState<NewDelegation>({
@@ -47,16 +49,17 @@ const DelegationManagement = () => {
     const storedUser = localStorage.getItem('albahar-user');
     const parsedUser = storedUser ? JSON.parse(storedUser) : null;
     const userId = resolveCurrentActorId(parsedUser) || parsedUser?.UserID || '';
-    const currentDept = parsedUser?.DepartmentName || null;
 
+    const deptId = parsedUser?.DepartmentID;
     try {
-      const usersRes = await fetch('/api/users');
-      if (usersRes.ok) {
-        const usersData = await usersRes.json();
-        const filtered = usersData
-          .filter((user: User) => resolveUserActorId(user) !== userId)
-          .filter((user: User) => !currentDept || user.DepartmentName === currentDept);
-        setUsers(filtered);
+      if (deptId) {
+        const scopeRes = await fetch(`/api/vacancies/department/${deptId}/scope`);
+        if (scopeRes.ok) {
+          const scopeData: VacancyOption[] = await scopeRes.json();
+          setUsers(scopeData);
+        } else {
+          setUsers([]);
+        }
       } else {
         setUsers([]);
       }
@@ -264,10 +267,10 @@ const DelegationManagement = () => {
                 required
                 className="w-full p-2 border rounded bg-bkg border-content/20 text-content"
               >
-                <option value="">-- اختر المستخدم --</option>
+                <option value="">-- اختر المفوض إليه --</option>
                 {users.map(user => (
-                  <option key={resolveUserActorId(user) || user.UserID} value={resolveUserActorId(user) || user.UserID}>
-                    {user.FullName} ({user.DepartmentName || 'بدون قسم'})
+                  <option key={user.UserID} value={user.UserID}>
+                    {user.FullName}
                   </option>
                 ))}
               </select>

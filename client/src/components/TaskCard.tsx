@@ -1,6 +1,5 @@
 // src/components/TaskCard.tsx
 import { User, Calendar, Flag, AlertTriangle, CheckSquare } from 'lucide-react';
-import { Link } from 'react-router-dom'; // استيراد Link
 // import { useNotification } from '../contexts/NotificationContext';
 import type { Subtask } from '../types';
 
@@ -42,14 +41,16 @@ interface TaskCardProps {
   isSelected?: boolean;
   onToggleSelection?: (taskId: number) => void;
   onPriorityChange?: (taskId: number, newPriority: 'normal' | 'urgent' | 'starred') => Promise<void>;
+  isMySubtask?: (subtask: Subtask) => boolean;
 }
 
-const TaskCard: React.FC<TaskCardProps> = ({ 
-  task, 
-  isSelectionMode = false, 
-  isSelected = false, 
+const TaskCard: React.FC<TaskCardProps> = ({
+  task,
+  isSelectionMode = false,
+  isSelected = false,
   onToggleSelection,
-  onPriorityChange
+  onPriorityChange,
+  isMySubtask
 }) => {
   const style = statusStyles[task.Status] || statusStyles.open;
   
@@ -58,12 +59,43 @@ const TaskCard: React.FC<TaskCardProps> = ({
     ? 'border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20 dark:border-red-400'
     : 'border-l-4 border-blue-500 bg-white dark:bg-gray-800 dark:border-blue-400';
 
-  // الحصول على المهام الفرعية غير المكتملة
-  const incompleteSubtasks = task.subtasks?.filter(subtask => !subtask.IsCompleted) || [];
+  // الحصول على المهام الفرعية غير المكتملة مع إظهار مهام المستخدم أولاً
+  const incompleteSubtasksRaw = task.subtasks?.filter(subtask => !subtask.IsCompleted) || [];
+  const incompleteSubtasks = isMySubtask
+    ? [
+        ...incompleteSubtasksRaw.filter(st => isMySubtask(st)),
+        ...incompleteSubtasksRaw.filter(st => !isMySubtask(st)),
+      ]
+    : incompleteSubtasksRaw;
   
   // تحديد ما إذا كانت البطاقة تحتوي على إشعارات إسناد أو تعليقات
   const hasAssignmentNotifications = (task.HasAssignmentNotifications || 0) > 0;
   const hasCommentNotifications = (task.HasCommentNotifications || 0) > 0;
+
+  const renderSubtaskRow = (subtask: Subtask) => {
+    const isMine = isMySubtask ? isMySubtask(subtask) : false;
+    if (isMine) {
+      return (
+        <div
+          key={subtask.SubtaskID}
+          className="flex items-center gap-2 text-xs rounded-md px-2 py-1 bg-blue-100 dark:bg-blue-900/40 border border-blue-300 dark:border-blue-600 text-blue-800 dark:text-blue-200 font-medium"
+        >
+          <div className="w-2 h-2 bg-blue-500 rounded-full flex-shrink-0 ring-2 ring-blue-300 dark:ring-blue-500"></div>
+          <span className="truncate flex-1">{subtask.Title}</span>
+          <span className="text-blue-500 dark:text-blue-400 font-bold whitespace-nowrap">← أنا</span>
+        </div>
+      );
+    }
+    return (
+      <div key={subtask.SubtaskID} className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-100">
+        <div className="w-2 h-2 bg-orange-400 rounded-full flex-shrink-0"></div>
+        <span className="truncate">{subtask.Title}</span>
+        {subtask.AssignedToName && (
+          <span className="text-gray-500 dark:text-gray-300">({subtask.AssignedToName})</span>
+        )}
+      </div>
+    );
+  };
 
   const handlePriorityClick = (e: React.MouseEvent, priority: 'normal' | 'urgent' | 'starred') => {
     e.preventDefault();
@@ -163,19 +195,11 @@ const TaskCard: React.FC<TaskCardProps> = ({
                   <CheckSquare size={14} className="text-blue-500" />
                   <span className="font-medium text-gray-700 dark:text-white">المهام الفرعية المتبقية ({incompleteSubtasks.length}):</span>
                 </div>
-                <div className="space-y-1 max-h-20 overflow-y-auto">
-                  {incompleteSubtasks.slice(0, 3).map(subtask => (
-                    <div key={subtask.SubtaskID} className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-100">
-                      <div className="w-2 h-2 bg-orange-400 rounded-full flex-shrink-0"></div>
-                      <span className="truncate">{subtask.Title}</span>
-                      {subtask.AssignedToName && (
-                        <span className="text-gray-500 dark:text-gray-300">({subtask.AssignedToName})</span>
-                      )}
-                    </div>
-                  ))}
-                  {incompleteSubtasks.length > 3 && (
+                <div className="space-y-1 max-h-28 overflow-y-auto">
+                  {incompleteSubtasks.slice(0, 4).map(subtask => renderSubtaskRow(subtask))}
+                  {incompleteSubtasks.length > 4 && (
                     <div className="text-xs text-gray-500 dark:text-gray-300 italic">
-                      و {incompleteSubtasks.length - 3} مهام فرعية أخرى...
+                      و {incompleteSubtasks.length - 4} مهام فرعية أخرى...
                     </div>
                   )}
                 </div>
@@ -198,7 +222,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
   }
 
   return (
-    <Link to={`/task/${task.TaskID}`} className={getCardClassName()}>
+    <a href={`/task/${task.TaskID}`} target="_blank" rel="noreferrer" className={getCardClassName()}>
       <div className="p-4">
         {/* العنوان وأزرار الأولوية */}
         <div className="flex justify-between items-start mb-3">
@@ -254,19 +278,11 @@ const TaskCard: React.FC<TaskCardProps> = ({
                 <CheckSquare size={14} className="text-blue-500" />
                 <span className="font-medium text-gray-700 dark:text-white">المهام الفرعية المتبقية ({incompleteSubtasks.length}):</span>
               </div>
-              <div className="space-y-1 max-h-20 overflow-y-auto">
-                {incompleteSubtasks.slice(0, 3).map(subtask => (
-                  <div key={subtask.SubtaskID} className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-100">
-                    <div className="w-2 h-2 bg-orange-400 rounded-full flex-shrink-0"></div>
-                    <span className="truncate">{subtask.Title}</span>
-                    {subtask.AssignedToName && (
-                      <span className="text-gray-500 dark:text-gray-300">({subtask.AssignedToName})</span>
-                    )}
-                  </div>
-                ))}
-                {incompleteSubtasks.length > 3 && (
+              <div className="space-y-1 max-h-28 overflow-y-auto">
+                {incompleteSubtasks.slice(0, 4).map(subtask => renderSubtaskRow(subtask))}
+                {incompleteSubtasks.length > 4 && (
                   <div className="text-xs text-gray-500 dark:text-gray-300 italic">
-                    و {incompleteSubtasks.length - 3} مهام فرعية أخرى...
+                    و {incompleteSubtasks.length - 4} مهام فرعية أخرى...
                   </div>
                 )}
               </div>
@@ -284,7 +300,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
 
         {/* تم إزالة مؤشر المهام الفرعية الجديدة لصالح نظام HasAssignmentNotifications الموحد */}
       </div>
-    </Link>
+    </a>
   );
 };
 

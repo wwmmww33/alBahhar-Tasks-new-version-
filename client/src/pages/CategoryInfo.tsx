@@ -261,9 +261,8 @@ const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
       setIsSubmitting(true);
       const response = await fetch(getApiUrl(`categories/information/${infoId}`), {
         method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`,
-        },
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ createdBy: actorId }),
       });
 
       if (response.ok) {
@@ -450,34 +449,39 @@ const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
                 {categoryInfo.map((info, index) => (
                   <div key={info.InformationID} className="info-item">
                     <div className="info-item-header">
-                      {currentUser && infoCreatorId(info) === actorId && (
-                        <div className="info-actions">
-                          <button 
+                      <div className="info-actions">
+                        {currentUser && (
+                          <button
                             onClick={() => startEditInfo(info)}
                             className="edit-button"
                             title="تعديل المعلومة"
                           >
                             ✏️ تعديل
                           </button>
-                          <button 
+                        )}
+                        {currentUser && infoCreatorId(info) === actorId && (
+                          <button
                             onClick={() => handleDeleteInformation(info.InformationID)}
                             className="delete-button"
                             title="حذف المعلومة"
                           >
                             🗑️ حذف
                           </button>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                     <div className="info-content" dangerouslySetInnerHTML={{ __html: info.Content.replace(/\n/g, '<br>') }} />
-                     <div className="info-meta info-meta-hover">
-                       <small className="font-semibold">
-                         تم الإنشاء في: {formatDate(info.CreatedAt)}
-                         {info.UpdatedAt !== info.CreatedAt && (
-                           <span> • آخر تحديث: {formatDate(info.UpdatedAt)}</span>
-                         )}
-                       </small>
-                     </div>
+                    <div className="info-meta info-meta-hover">
+                      <small className="font-semibold">
+                        {(info as any).CreatedByName && (
+                          <span>أضافه: {(info as any).CreatedByName} • </span>
+                        )}
+                        تم الإنشاء في: {formatDate(info.CreatedAt)}
+                        {info.UpdatedAt !== info.CreatedAt && (
+                          <span> • آخر تحديث: {formatDate(info.UpdatedAt)}</span>
+                        )}
+                      </small>
+                    </div>
                     {index < categoryInfo.length - 1 && <hr className="info-separator" />}
                   </div>
                 ))}
