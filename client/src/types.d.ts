@@ -25,7 +25,7 @@ export type Task = {
   TaskID: number;
   Title: string;
   Description: string;
-  Status: 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'external' | 'approved-in-progress' | 'open';
+  Status: 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'open';
   Priority: 'low' | 'medium' | 'high';
   AssignedTo: string;
   AssignedToVacancyID?: number | string | null;

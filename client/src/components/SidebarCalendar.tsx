@@ -275,17 +275,53 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     return map;
   }, [commentEvents]);
 
-  // حساب أقصى عدد من الأحداث الممتدة المتزامنة لتحديد عرض الشريط الجانبي
-  const stripWidth = useMemo(() => {
-    let max = 0;
-    for (const key of Object.keys(itemsByDay)) {
-      const uniqueIds = new Set(
-        (itemsByDay[key] || []).filter(it => it._spanPos !== 'single').map(it => it.SubtaskID)
-      );
-      max = Math.max(max, uniqueIds.size);
+  // تعيين lane ثابت لكل حدث ممتد بحيث لا تتداخل الخطوط أفقياً
+  const laneMap = useMemo(() => {
+    const spans = items
+      .filter(it => !!it.EndDate)
+      .map(it => {
+        const d = new Date(it.DueDate);
+        const e = new Date(it.EndDate!);
+        return {
+          id: it.SubtaskID,
+          start: toLocalYMD(new Date(d.getFullYear(), d.getMonth(), d.getDate())),
+          end: toLocalYMD(new Date(e.getFullYear(), e.getMonth(), e.getDate())),
+        };
+      })
+      .sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : a.id - b.id);
+
+    const map = new Map<number, number>();
+    const laneEnds: string[] = [];
+
+    for (const span of spans) {
+      let lane = 0;
+      while (lane < laneEnds.length && laneEnds[lane] >= span.start) lane++;
+      map.set(span.id, lane);
+      if (lane < laneEnds.length) laneEnds[lane] = span.end;
+      else laneEnds.push(span.end);
     }
-    return max > 0 ? max * 7 + 1 : 0;
-  }, [itemsByDay]);
+
+    return map;
+  }, [items]);
+
+  // أول يوم مرئي لكل حدث ممتد (لعرض عنوانه حتى لو بدأ قبل نطاق التقويم)
+  const firstVisibleDayMap = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const d of dateRange) {
+      for (const item of (itemsByDay[d.key] || [])) {
+        if (item._spanPos !== 'single' && !map.has(item.SubtaskID)) {
+          map.set(item.SubtaskID, d.key);
+        }
+      }
+    }
+    return map;
+  }, [itemsByDay, dateRange]);
+
+  const stripWidth = useMemo(() => {
+    if (laneMap.size === 0) return 0;
+    const maxLane = Math.max(...laneMap.values());
+    return (maxLane + 1) * 7 + 1;
+  }, [laneMap]);
 
   return (
     <aside className="w-72 shrink-0 border-r border-content/10 bg-content/5 p-3">
@@ -409,102 +445,159 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                 visibleComments.length > 0;
               const isWeekend = d.date.getDay() === 5 || d.date.getDay() === 6;
 
-              // حساب الأحداث الممتدة لهذا اليوم لرسم الخط الجانبي
+              // الأحداث الممتدة لهذا اليوم (بدون تكرار، مرتبة بثبات)
               const spanningItems = visibleShared.filter(it => it._spanPos !== 'single');
-              const spanLanes = [...new Map(
-                spanningItems.map(it => [it.SubtaskID, it])
-              ).values()].sort((a, b) => a.SubtaskID - b.SubtaskID);
+              const uniqueSpanItems = [...new Map(spanningItems.map(it => [it.SubtaskID, it])).values()];
+
+              // أحداث بدأت قبل هذا اليوم لكنه أول يوم مرئي لها في النطاق
+              const carryOverItems = visibleShared.filter(it => {
+                const isFirstVisible = firstVisibleDayMap.get(it.SubtaskID) === d.key;
+                return isFirstVisible && it._spanPos !== 'start' && it._spanPos !== 'single';
+              });
 
               return (
-                <div key={d.key} className="flex items-stretch" dir="ltr">
-                  {/* شريط خطوط الامتداد خارج مربع اليوم */}
-                  {stripWidth > 0 && (
-                    <div className="relative flex-shrink-0" style={{ width: `${stripWidth}px` }}>
-                      {spanLanes.map((item, laneIdx) => {
-                        const pos = item._spanPos;
-                        const color = getSpanColor(item.SubtaskID);
-                        return (
-                          <div
-                            key={item.SubtaskID}
-                            className="absolute rounded-full"
-                            style={{
-                              left: `${laneIdx * 7 + 2}px`,
-                              width: '3px',
-                              backgroundColor: color,
-                              opacity: pos === 'end' ? 0.5 : 1,
-                              top: pos === 'start' ? '50%' : '-4px',
-                              bottom: pos === 'end' ? '50%' : '-4px',
-                              zIndex: 1,
-                            }}
-                          />
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* مربع محتوى اليوم */}
-                  <div
-                    dir="rtl"
-                    className={
-                      `flex-1 p-2 rounded border min-w-0 ` +
-                      (hasEvents
-                        ? (isWeekend
-                            ? 'bg-blue-200 dark:bg-blue-900/50 border-blue-400 dark:border-blue-600'
-                            : 'bg-blue-100 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700')
-                        : (isWeekend
-                            ? 'bg-gray-200 dark:bg-gray-900/70 border-content/30'
-                            : 'bg-white/60 dark:bg-gray-800/60 border-content/10'))
-                    }
-                  >
-                    <div className={`text-xs font-semibold mb-1 ${hasEvents ? 'text-black dark:text-white' : 'text-content'} text-right`}>{d.label}</div>
-                    {visibleShared.length > 0 && (
-                      <div className="space-y-0.5 text-right">
-                        {visibleShared.map((item) => {
+                <div key={d.key}>
+                  {/* شريط الامتداد + [الأحداث المتجاوزة + مربع اليوم] في صف واحد */}
+                  <div className="flex items-stretch" dir="ltr">
+                    {/* شريط خطوط الامتداد — يمتد عبر صفوف الأحداث المتجاوزة والمربع معاً */}
+                    {stripWidth > 0 && (
+                      <div className="relative flex-shrink-0" style={{ width: `${stripWidth}px` }}>
+                        {uniqueSpanItems.map((item) => {
                           const pos = item._spanPos;
-                          if (pos === 'middle' || pos === 'end') return null;
-                          const spanning = pos === 'start';
-                          const color = spanning ? getSpanColor(item.SubtaskID) : undefined;
+                          const color = getSpanColor(item.SubtaskID);
+                          const lane = laneMap.get(item.SubtaskID) ?? 0;
+                          const isCarryOver = carryOverItems.some(c => c.SubtaskID === item.SubtaskID);
+                          const carryOverIndex = carryOverItems.findIndex(c => c.SubtaskID === item.SubtaskID);
+                          const ROW_HEIGHT = 20;
+
+                          let top: string;
+                          let bottom: string;
+
+                          if (isCarryOver) {
+                            // الخط ينطلق من منتصف سطر هذا الحدث في منطقة الأحداث المتجاوزة
+                            top = `${carryOverIndex * ROW_HEIGHT + ROW_HEIGHT / 2}px`;
+                            bottom = '-4px';
+                          } else if (pos === 'start') {
+                            // الخط ينطلق من أعلى مربع اليوم (بعد صفوف الأحداث المتجاوزة)
+                            top = `${carryOverItems.length * ROW_HEIGHT}px`;
+                            bottom = '-4px';
+                          } else if (pos === 'end') {
+                            top = '-4px';
+                            bottom = '0';
+                          } else {
+                            top = '-4px';
+                            bottom = '-4px';
+                          }
+
                           return (
-                            <div key={`${item.SubtaskID}-${pos}`} className="text-xs">
-                              <button
-                                type="button"
-                                style={{ color }}
-                                className="font-semibold hover:underline cursor-pointer text-right w-full truncate block"
-                                onClick={() => openTaskInNewTab(item.TaskID)}
-                              >
-                                {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
-                              </button>
-                              <div style={{ color }} className="opacity-70">ضمن: {item.TaskTitle}</div>
-                            </div>
+                            <div
+                              key={item.SubtaskID}
+                              className="absolute rounded-full"
+                              style={{
+                                left: `${lane * 7 + 2}px`,
+                                width: '3px',
+                                backgroundColor: color,
+                                top,
+                                bottom,
+                                zIndex: 1,
+                              }}
+                            />
                           );
                         })}
                       </div>
                     )}
-                    {visiblePersonal.length > 0 && (
-                      <div className="space-y-1 text-right mt-1">
-                        {visiblePersonal.map((pe) => (
-                          <div key={pe.EventID} className="text-xs">
-                            <span className="font-semibold text-green-800 dark:text-green-200 text-right">{pe.Title}</span>
-                            <span className="ml-1 inline-block text-[10px] text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 px-1 py-[1px] rounded">(خاص)</span>
+
+                    {/* العمود الأيمن: الأحداث المتجاوزة (يسار) + مربع اليوم */}
+                    <div className="flex-1 min-w-0">
+                      {/* أحداث بدأت قبل النطاق — محاذاة يسار، ارتفاع ثابت 20px لكل سطر */}
+                      {carryOverItems.map((item) => {
+                        const color = getSpanColor(item.SubtaskID);
+                        const startLabel = new Date(item.DueDate).toLocaleDateString('ar-EG', {
+                          day: 'numeric', month: 'short', year: 'numeric',
+                        });
+                        return (
+                          <div key={item.SubtaskID} className="flex items-center h-5 gap-1 text-xs overflow-hidden pl-1">
+                            <button
+                              type="button"
+                              style={{ color }}
+                              className="font-semibold hover:underline truncate text-left"
+                              onClick={() => openTaskInNewTab(item.TaskID)}
+                            >
+                              {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                            </button>
+                            <span className="text-[10px] text-content-secondary shrink-0 whitespace-nowrap">
+                              (بدأ: {startLabel})
+                            </span>
                           </div>
-                        ))}
+                        );
+                      })}
+
+                      {/* مربع محتوى اليوم */}
+                      <div
+                        dir="rtl"
+                        className={
+                          `p-2 rounded border min-w-0 ` +
+                          (hasEvents
+                            ? (isWeekend
+                                ? 'bg-blue-200 dark:bg-blue-900/50 border-blue-400 dark:border-blue-600'
+                                : 'bg-blue-100 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700')
+                            : (isWeekend
+                                ? 'bg-gray-200 dark:bg-gray-900/70 border-content/30'
+                                : 'bg-white/60 dark:bg-gray-800/60 border-content/10'))
+                        }
+                      >
+                        <div className={`text-xs font-semibold mb-1 ${hasEvents ? 'text-black dark:text-white' : 'text-content'} text-right`}>{d.label}</div>
+                        {visibleShared.length > 0 && (
+                          <div className="space-y-0.5 text-right">
+                            {visibleShared.map((item) => {
+                              const pos = item._spanPos;
+                              const isFirstVisible = firstVisibleDayMap.get(item.SubtaskID) === d.key;
+                              if (pos !== 'single' && !(isFirstVisible && pos === 'start')) return null;
+                              const spanning = pos === 'start';
+                              const color = spanning ? getSpanColor(item.SubtaskID) : undefined;
+                              return (
+                                <div key={`${item.SubtaskID}-${pos}`} className="text-xs">
+                                  <button
+                                    type="button"
+                                    style={{ color }}
+                                    className="font-semibold hover:underline cursor-pointer text-right w-full truncate block"
+                                    onClick={() => openTaskInNewTab(item.TaskID)}
+                                  >
+                                    {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                                  </button>
+                                  <div style={{ color }} className="opacity-70">ضمن: {item.TaskTitle}</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {visiblePersonal.length > 0 && (
+                          <div className="space-y-1 text-right mt-1">
+                            {visiblePersonal.map((pe) => (
+                              <div key={pe.EventID} className="text-xs">
+                                <span className="font-semibold text-green-800 dark:text-green-200 text-right">{pe.Title}</span>
+                                <span className="ml-1 inline-block text-[10px] text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 px-1 py-[1px] rounded">(خاص)</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {visibleComments.length > 0 && (
+                          <div className="space-y-1 text-right mt-1">
+                            {visibleComments.map((comment) => (
+                              <button
+                                key={comment.CommentID}
+                                type="button"
+                                onClick={() => openTaskInNewTab(comment.TaskID)}
+                                className="text-xs font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
+                              >
+                                {comment.Content}
+                                <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    )}
-                    {visibleComments.length > 0 && (
-                      <div className="space-y-1 text-right mt-1">
-                        {visibleComments.map((comment) => (
-                          <button
-                            key={comment.CommentID}
-                            type="button"
-                            onClick={() => openTaskInNewTab(comment.TaskID)}
-                            className="text-xs font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
-                          >
-                            {comment.Content}
-                            <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    </div>
                   </div>
                 </div>
               );

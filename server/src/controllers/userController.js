@@ -101,6 +101,41 @@ exports.getAllUsers = async (req, res) => {
     }
 };
 
+// تعيين أول مدير عام — يعمل فقط حين لا يوجد أي مدير عام في UserRoles
+exports.bootstrapAdmin = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'Database connection unavailable.' });
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ message: 'userId is required.' });
+    try {
+        const s = await probeUserRolesSchema(pool);
+        if (!s.HasTable) return res.status(400).json({ message: 'UserRoles table does not exist.' });
+
+        const adminCheck = await pool.request()
+            .query(`SELECT COUNT(*) AS cnt FROM dbo.UserRoles WHERE Role = 1`);
+        if (adminCheck.recordset[0].cnt > 0) {
+            return res.status(403).json({ message: 'يوجد مدير عام بالفعل. لا يمكن استخدام هذه الوظيفة.' });
+        }
+
+        const existing = await pool.request()
+            .input('UserID', sql.NVarChar, String(userId).trim())
+            .query(`SELECT TOP 1 UserID FROM dbo.UserRoles WHERE UserID = @UserID`);
+        if (existing.recordset[0]) {
+            await pool.request()
+                .input('UserID', sql.NVarChar, String(userId).trim())
+                .query(`UPDATE dbo.UserRoles SET Role = 1 WHERE UserID = @UserID`);
+        } else {
+            await pool.request()
+                .input('UserID', sql.NVarChar, String(userId).trim())
+                .query(`INSERT INTO dbo.UserRoles (UserID, Role) VALUES (@UserID, 1)`);
+        }
+        return res.status(200).json({ message: 'تم تعيين المدير العام بنجاح.' });
+    } catch (err) {
+        console.error('BOOTSTRAP ADMIN ERROR:', err);
+        return res.status(500).json({ message: 'Error setting admin', detail: err.message });
+    }
+};
+
 // تعيين دور مستخدم في UserRoles (0=عادي، 1=مدير عام، 2=مدير قسم)
 exports.setUserRole = async (req, res) => {
     const pool = req.app.locals.db;

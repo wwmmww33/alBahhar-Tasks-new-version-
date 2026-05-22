@@ -14,6 +14,31 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const isSystemAdmin = userRole === 1;
 
   const [activeTab, setActiveTab] = useState<AdminTab>('departments');
+  const [bootstrapMsg, setBootstrapMsg] = useState<string | null>(null);
+  const [bootstrapping, setBootstrapping] = useState(false);
+
+  const handleBootstrapAdmin = async () => {
+    if (!currentUser?.UserID) return;
+    setBootstrapping(true);
+    setBootstrapMsg(null);
+    try {
+      const res = await fetch('/api/users/bootstrap-admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser.UserID }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setBootstrapMsg('✅ ' + (data.message || 'تم التعيين.') + ' — يرجى تسجيل الخروج والدخول مجدداً لتفعيل الصلاحيات.');
+      } else {
+        setBootstrapMsg('❌ ' + (data.message || 'فشل التعيين.'));
+      }
+    } catch {
+      setBootstrapMsg('❌ خطأ في الاتصال بالخادم.');
+    } finally {
+      setBootstrapping(false);
+    }
+  };
 
   const getTabClassName = (tabName: AdminTab) => {
     const isActive = activeTab === tabName;
@@ -34,6 +59,29 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
           </span>
         )}
       </div>
+
+      {/* تنبيه تهيئة أول مدير عام — يظهر فقط لغير المديرين */}
+      {!isSystemAdmin && (
+        <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 rounded-lg text-right">
+          <p className="text-sm text-yellow-800 dark:text-yellow-200 mb-2 font-medium">
+            لم يتم تعيين مدير عام للنظام بعد.
+          </p>
+          <p className="text-xs text-yellow-700 dark:text-yellow-300 mb-3">
+            إذا كنت المسؤول عن هذا النظام، يمكنك تعيين نفسك مديراً عاماً. هذا الخيار يختفي تلقائياً بمجرد وجود مدير عام.
+          </p>
+          <button
+            type="button"
+            onClick={handleBootstrapAdmin}
+            disabled={bootstrapping}
+            className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded text-sm disabled:opacity-60"
+          >
+            {bootstrapping ? 'جارٍ التعيين...' : 'تعيين نفسي مديراً عاماً'}
+          </button>
+          {bootstrapMsg && (
+            <p className="mt-2 text-sm text-yellow-900 dark:text-yellow-100">{bootstrapMsg}</p>
+          )}
+        </div>
+      )}
 
       {/* شريط التبويبات — Role=2 يرى الأقسام فقط */}
       <div className="flex border-b border-content/10 mb-8">

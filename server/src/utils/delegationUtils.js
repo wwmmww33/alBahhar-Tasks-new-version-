@@ -155,20 +155,40 @@ async function checkDelegationPermission(pool, delegatorUserId, delegateUserId, 
 
 async function hasActiveDelegation(pool, delegatorUserId, delegateUserId) {
   try {
-    const delegatorId = delegatorUserId == null ? '' : String(delegatorUserId).trim();
-    const delegateId = delegateUserId == null ? '' : String(delegateUserId).trim();
-    if (!delegatorId || !delegateId) return false;
-    if (delegatorId === delegateId) return true;
+    const rawDelegator = delegatorUserId == null ? '' : String(delegatorUserId).trim();
+    const rawDelegate  = delegateUserId  == null ? '' : String(delegateUserId).trim();
+    if (!rawDelegator || !rawDelegate) return false;
 
     const schema = await detectIdentitySchema(pool);
+
+    // في مخطط VacancyID: حلّ كلا المعرّفين إلى VacancyID قبل المقارنة
+    // هذا يضمن عمل المطابقة سواء أُرسل UserID النصي أو VacancyID الرقمي
+    const resolvedDelegator = schema.isVacancy
+      ? await resolveAccessActorId(pool, rawDelegator, schema)
+      : rawDelegator;
+    const resolvedDelegate = schema.isVacancy
+      ? await resolveAccessActorId(pool, rawDelegate, schema)
+      : rawDelegate;
+
+    if (!resolvedDelegator || !resolvedDelegate) return false;
+    if (resolvedDelegator === resolvedDelegate) return true;
+
     const request = pool.request();
-    request.input('delegatorUserID', sql.NVarChar(50), delegatorId);
-    request.input('delegateUserID', sql.NVarChar(50), delegateId);
+    if (schema.isVacancy) {
+      const delegatorInt = parseInt(resolvedDelegator, 10);
+      const delegateInt  = parseInt(resolvedDelegate,  10);
+      if (!Number.isFinite(delegatorInt) || !Number.isFinite(delegateInt)) return false;
+      request.input('delegatorID', sql.Int, delegatorInt);
+      request.input('delegateID',  sql.Int, delegateInt);
+    } else {
+      request.input('delegatorID', sql.NVarChar(50), resolvedDelegator);
+      request.input('delegateID',  sql.NVarChar(50), resolvedDelegate);
+    }
     const result = await request.query(`
       SELECT COUNT(*) AS Cnt
       FROM dbo.TaskDelegations
-      WHERE ${schema.delegatorCol} = @delegatorUserID
-        AND ${schema.delegateCol} = @delegateUserID
+      WHERE ${schema.delegatorCol} = @delegatorID
+        AND ${schema.delegateCol}  = @delegateID
         AND IsActive = 1
         AND StartDate <= GETDATE()
         AND (EndDate IS NULL OR EndDate >= GETDATE())

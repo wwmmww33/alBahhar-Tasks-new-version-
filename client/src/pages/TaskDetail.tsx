@@ -6,7 +6,7 @@ import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, User, Category, Task, Comment } from '../types';
 import { Trash2, ExternalLink, Copy, Check } from 'lucide-react';
 import { getApiUrl } from '../config/api';
-import { getActiveUserId } from '../utils/activeAccount';
+import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
 
 type TaskDetailProps = { currentUser: CurrentUser; };
@@ -39,6 +39,12 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   const [isUpdatingTitle, setIsUpdatingTitle] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
+  // في وضع التفويض: actorId = معرّف المفوِّض؛ ActedBy يجب أن يحمل معرّف المفوَّض له
+  const _tdAccount = getActiveAccount();
+  // نُرسل VacancyID المفوَّض له إن وُجد، وإلا UserID — الخادم يحتاج لمطابقة التفويض
+  const _tdDelegateUserId = _tdAccount?.mode === 'delegation'
+    ? (resolveCurrentActorId(currentUser) || String(currentUser.UserID || '').trim())
+    : null;
 
   const taskCreatorId = (t: Task | null) => String((t as any)?.CreatedByVacancyID ?? t?.CreatedBy ?? '');
 
@@ -285,7 +291,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         const requestBody: any = {
             TaskID: taskId,
             UserID: actorId,
-          ActedBy: actorId,
+            ActedBy: _tdDelegateUserId ?? actorId,
             Content: content,
             ShowInCalendar: showInCalendar
         };
@@ -628,13 +634,6 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
           <p className="font-semibold text-content">إجراءات المهمة الرئيسية:</p>
           <div className="flex gap-2 flex-wrap">
               <button
-                onClick={() => handleUpdateTaskStatus('external')}
-                disabled={task.Status === 'external'}
-                className="text-sm bg-orange-500 text-white px-3 py-1 rounded disabled:bg-gray-400"
-              >
-                إسناد لجهة خارجية
-              </button>
-              <button
                 onClick={() => handleUpdateTaskStatus('completed')}
                 disabled={task.Status === 'completed'}
                 className="text-sm bg-green-500 text-white px-3 py-1 rounded disabled:bg-gray-400"
@@ -648,7 +647,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
               >
                 إلغاء المهمة
               </button>
-              {(task.Status === 'completed' || task.Status === 'cancelled' || task.Status === 'external' || task.Status === 'approved-in-progress') && (
+              {(task.Status === 'completed' || task.Status === 'cancelled') && (
                 <button
                   onClick={() => handleUpdateTaskStatus('open')}
                   className="text-sm bg-gray-500 text-white px-3 py-1 rounded"

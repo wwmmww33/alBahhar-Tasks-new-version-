@@ -611,11 +611,35 @@ exports.bulkAssignSubtask = async (req, res) => {
   }
 
   try {
-    // 1. Get original subtask details
+    // 0. فحص المخطط — نفس طريقة createSubtask
+    const schemaProbe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedByVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedBy')           IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedByUser,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedToVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedTo')          IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedToUser,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'ActedBy')             IS NOT NULL THEN 1 ELSE 0 END AS HasActedBy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'EndDate')             IS NOT NULL THEN 1 ELSE 0 END AS HasEndDate,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'ShowInCalendar')      IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar,
+        CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifToVacancy,
+        CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToUserID')    IS NOT NULL THEN 1 ELSE 0 END AS HasNotifToUser,
+        CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifByVacancy,
+        CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByUserID')    IS NOT NULL THEN 1 ELSE 0 END AS HasNotifByUser
+    `);
+    const schema = schemaProbe.recordset[0] || {};
+
+    const assignedToCol  = schema.HasAssignedToVacancy ? 'AssignedToVacancyID' : 'AssignedTo';
+    const createdByCol   = schema.HasCreatedByVacancy  ? 'CreatedByVacancyID'  : 'CreatedBy';
+    const prefersVacancy = !!schema.HasAssignedToVacancy;
+    const notifToCol     = schema.HasNotifToVacancy ? 'AssignedToVacancyID' : (schema.HasNotifToUser ? 'AssignedToUserID' : null);
+    const notifByCol     = schema.HasNotifByVacancy ? 'AssignedByVacancyID' : (schema.HasNotifByUser ? 'AssignedByUserID' : null);
+
+    // 1. جلب المهمة الفرعية الأصلية
     const subtaskResult = await pool.request()
       .input('SubtaskID', sql.Int, subtaskId)
       .query('SELECT * FROM Subtasks WHERE SubtaskID = @SubtaskID');
-    
+
     if (subtaskResult.recordset.length === 0) {
       return res.status(404).json({ message: 'Subtask not found' });
     }
@@ -627,74 +651,81 @@ exports.bulkAssignSubtask = async (req, res) => {
       return res.status(403).json({ message: 'فقط منشئ المهمة الفرعية يمكنه تغيير الإسناد.' });
     }
 
-    const firstUserId = assignedToUserIds[0];
+    // مساعد: إدراج إشعار (غير حرج — يتجاهل الأخطاء)
+    const assignedByResolved = assignedByUserId
+      ? await resolveActorId(pool, assignedByUserId, prefersVacancy)
+      : null;
+
+    const insertNotification = async (assignedToResolved) => {
+      if (!assignedToResolved || !assignedByResolved || !notifToCol || !notifByCol) return;
+      try {
+        await pool.request()
+          .input('TaskID',          sql.Int,     originalSubtask.TaskID)
+          .input('AssignedToActor', sql.NVarChar, assignedToResolved)
+          .input('AssignedByActor', sql.NVarChar, assignedByResolved)
+          .query(`INSERT INTO TaskAssignmentNotifications (TaskID, ${notifToCol}, ${notifByCol}) VALUES (@TaskID, @AssignedToActor, @AssignedByActor)`);
+      } catch (_) { /* الإشعارات غير حرجة */ }
+    };
+
+    const firstUserId  = assignedToUserIds[0];
     const otherUserIds = assignedToUserIds.slice(1);
 
-    // 2. Assign the original subtask to the first user
+    // 2. إسناد المهمة الأصلية للمستخدم الأول
+    const firstResolved = await resolveActorId(pool, firstUserId, prefersVacancy);
     await pool.request()
-      .input('SubtaskID', sql.Int, subtaskId)
-      .input('AssignedTo', sql.NVarChar, firstUserId)
-      .query('UPDATE Subtasks SET AssignedTo = @AssignedTo WHERE SubtaskID = @SubtaskID');
+      .input('SubtaskID',       sql.Int,     subtaskId)
+      .input('AssignedToActor', sql.NVarChar, firstResolved)
+      .query(`UPDATE Subtasks SET ${assignedToCol} = @AssignedToActor WHERE SubtaskID = @SubtaskID`);
+    await insertNotification(firstResolved);
 
-    // Notification for first user
-    if (firstUserId !== originalSubtask.AssignedTo && assignedByUserId) {
-       const userCheck = await pool.request()
-        .input('AssignedByUserID', sql.NVarChar, assignedByUserId)
-        .query('SELECT UserID FROM Users WHERE UserID = @AssignedByUserID');
-       
-       if (userCheck.recordset.length > 0) {
-         await pool.request()
-          .input('TaskID', sql.Int, originalSubtask.TaskID)
-          .input('AssignedToUserID', sql.NVarChar, firstUserId)
-          .input('AssignedByUserID', sql.NVarChar, assignedByUserId)
-          .query(`
-            INSERT INTO TaskAssignmentNotifications 
-            (TaskID, AssignedToUserID, AssignedByUserID)
-            VALUES (@TaskID, @AssignedToUserID, @AssignedByUserID)
-          `);
-       }
-    }
+    // 3. إنشاء نسخ للمستخدمين الآخرين (نفس أسلوب createSubtask)
+    const originalCreatedBy = schema.HasCreatedByVacancy
+      ? String(originalSubtask.CreatedByVacancyID ?? '').trim()
+      : String(originalSubtask.CreatedBy ?? '').trim();
 
-    // 3. Create copies for other users
     for (const userId of otherUserIds) {
-      await pool.request()
-        .input('TaskID', sql.Int, originalSubtask.TaskID)
-        .input('Title', sql.NVarChar, originalSubtask.Title) // Already encrypted
-        .input('CreatedBy', sql.NVarChar, originalSubtask.CreatedBy)
-        .input('ActedBy', sql.NVarChar, originalSubtask.ActedBy)
-        .input('AssignedTo', sql.NVarChar, userId)
-        .input('DueDate', sql.Date, originalSubtask.DueDate)
-        .input('ShowInCalendar', sql.Bit, originalSubtask.ShowInCalendar)
-        .query(`
-          INSERT INTO Subtasks (TaskID, Title, CreatedBy, ActedBy, AssignedTo, IsCompleted, DueDate, CreatedAt, ShowInCalendar)
-          VALUES (@TaskID, @Title, @CreatedBy, @ActedBy, @AssignedTo, 0, @DueDate, GETDATE(), @ShowInCalendar);
-        `);
-        
-       // Notification for new copies
-       if (userId && assignedByUserId) {
-         const userCheck = await pool.request()
-          .input('AssignedByUserID', sql.NVarChar, assignedByUserId)
-          .query('SELECT UserID FROM Users WHERE UserID = @AssignedByUserID');
+      const userResolved = await resolveActorId(pool, userId, prefersVacancy);
+      if (!userResolved) continue;
 
-         if (userCheck.recordset.length > 0) {
-           await pool.request()
-            .input('TaskID', sql.Int, originalSubtask.TaskID)
-            .input('AssignedToUserID', sql.NVarChar, userId)
-            .input('AssignedByUserID', sql.NVarChar, assignedByUserId)
-            .query(`
-              INSERT INTO TaskAssignmentNotifications 
-              (TaskID, AssignedToUserID, AssignedByUserID)
-              VALUES (@TaskID, @AssignedToUserID, @AssignedByUserID)
-            `);
-         }
-       }
+      const insertCols = ['TaskID', 'Title', createdByCol, assignedToCol, 'IsCompleted', 'CreatedAt'];
+      const insertVals = ['@cp_TaskID', '@cp_Title', '@cp_CreatedBy', '@cp_AssignedTo', '0', 'GETDATE()'];
+
+      const copyReq = pool.request()
+        .input('cp_TaskID',     sql.Int,     originalSubtask.TaskID)
+        .input('cp_Title',      sql.NVarChar, originalSubtask.Title)  // مشفَّر بالفعل
+        .input('cp_CreatedBy',  sql.NVarChar, originalCreatedBy)
+        .input('cp_AssignedTo', sql.NVarChar, userResolved);
+
+      if (schema.HasActedBy) {
+        copyReq.input('cp_ActedBy', sql.NVarChar, originalSubtask.ActedBy || null);
+        insertCols.push('ActedBy'); insertVals.push('@cp_ActedBy');
+      }
+      if (schema.HasLastActedByVacancy && originalSubtask.LastActedByVacancyID != null) {
+        copyReq.input('cp_LastActedBy', sql.NVarChar, String(originalSubtask.LastActedByVacancyID));
+        insertCols.push('LastActedByVacancyID'); insertVals.push('@cp_LastActedBy');
+      }
+      if (originalSubtask.DueDate) {
+        copyReq.input('cp_DueDate', sql.Date, originalSubtask.DueDate);
+        insertCols.push('DueDate'); insertVals.push('@cp_DueDate');
+      }
+      if (schema.HasEndDate && originalSubtask.EndDate) {
+        copyReq.input('cp_EndDate', sql.Date, originalSubtask.EndDate);
+        insertCols.push('EndDate'); insertVals.push('@cp_EndDate');
+      }
+      if (schema.HasShowInCalendar) {
+        copyReq.input('cp_ShowInCalendar', sql.Bit, originalSubtask.ShowInCalendar || 0);
+        insertCols.push('ShowInCalendar'); insertVals.push('@cp_ShowInCalendar');
+      }
+
+      await copyReq.query(`INSERT INTO Subtasks (${insertCols.join(', ')}) VALUES (${insertVals.join(', ')})`);
+      await insertNotification(userResolved);
     }
 
     res.status(200).json({ message: 'Subtasks assigned/duplicated successfully' });
 
   } catch (error) {
     console.error('Error in bulk assignment:', error);
-    res.status(500).send({ message: 'Error in bulk assignment' });
+    res.status(500).send({ message: 'Error in bulk assignment', detail: error.message });
   }
 };
 

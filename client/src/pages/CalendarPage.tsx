@@ -686,10 +686,8 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             {bars.map(bar => {
                               const barColor = getSpanColor(bar.item.SubtaskID);
                               return (
-                              <button
+                              <div
                                 key={bar.item.SubtaskID}
-                                type="button"
-                                onClick={() => openTaskInNewTab(bar.item.TaskID)}
                                 title={`${bar.item.SubtaskTitle} — ضمن: ${bar.item.TaskTitle}`}
                                 style={{
                                   position: 'absolute',
@@ -700,13 +698,11 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                                   backgroundColor: barColor,
                                 }}
                                 className={[
-                                  'text-white text-[9px] px-2 flex items-center overflow-hidden whitespace-nowrap z-10',
+                                  'z-10',
                                   bar.isFirst ? 'rounded-r-full' : '',
                                   bar.isLast  ? 'rounded-l-full' : '',
                                 ].join(' ')}
-                              >
-                                {bar.isFirst && bar.item.SubtaskTitle}
-                              </button>
+                              />
                               );
                             })}
                           </div>
@@ -724,6 +720,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             const personalForDay = viewFilter !== 'shared'   ? (personalByDay[key] || []) : [];
                             const commentsForDay = viewFilter !== 'shared'   ? (commentsByDay[key] || []) : [];
                             const hasBarOnDay    = bars.some(b => b.startCol <= colIdx && b.endCol >= colIdx);
+                            const spanStartBars  = bars.filter(b => b.startCol === colIdx && b.isFirst);
                             const hasEvents = sharedForDay.length > 0 || personalForDay.length > 0 || commentsForDay.length > 0 || hasBarOnDay;
 
                             return (
@@ -746,6 +743,18 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                                   )}
                                 </div>
                                 <div className="space-y-0.5 overflow-y-auto">
+                                  {spanStartBars.map((bar) => (
+                                    <button
+                                      key={`span-title-${bar.item.SubtaskID}`}
+                                      type="button"
+                                      onClick={() => openTaskInNewTab(bar.item.TaskID)}
+                                      style={{ color: getSpanColor(bar.item.SubtaskID) }}
+                                      className="text-[10px] text-right font-semibold hover:underline w-full truncate block"
+                                      title={`${bar.item.SubtaskTitle} — ضمن: ${bar.item.TaskTitle}`}
+                                    >
+                                      {bar.item.SubtaskTitle}{bar.item.AssignedToName ? ` (${bar.item.AssignedToName})` : ''}
+                                    </button>
+                                  ))}
                                   {sharedForDay.slice(0, 2).map((item) => (
                                     <button key={item.SubtaskID} type="button" onClick={() => openTaskInNewTab(item.TaskID)} className="text-[10px] text-right text-blue-800 dark:text-blue-200 hover:underline w-full">
                                       <div>{item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}</div>

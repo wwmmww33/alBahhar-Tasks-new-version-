@@ -405,5 +405,35 @@ module.exports = {
       console.error('❌ Failed ensuring EndDate column in Subtasks:', err);
       throw err;
     }
+  },
+
+  // إنشاء جدول UserRoles إذا لم يكن موجودًا (يخزّن أدوار 1=مدير عام، 2=مدير قسم)
+  ensureUserRolesTable: async function ensureUserRolesTable(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT COUNT(*) AS tableExists
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'UserRoles'
+      `);
+      if (check.recordset[0].tableExists > 0) {
+        console.log('ℹ️ UserRoles table already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        CREATE TABLE dbo.UserRoles (
+          UserID NVARCHAR(50) NOT NULL,
+          Role   INT          NOT NULL DEFAULT 0,
+          CONSTRAINT PK_UserRoles PRIMARY KEY (UserID),
+          CONSTRAINT FK_UserRoles_Users FOREIGN KEY (UserID)
+            REFERENCES dbo.Users(UserID) ON DELETE CASCADE ON UPDATE CASCADE,
+          CONSTRAINT CK_UserRoles_Role CHECK (Role IN (0, 1, 2))
+        );
+      `);
+      console.log('✅ Created UserRoles table.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring UserRoles table:', err);
+      throw err;
+    }
   }
 };

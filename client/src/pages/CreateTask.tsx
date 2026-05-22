@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { CurrentUser } from '../types';
-import { getActiveUserId } from '../utils/activeAccount';
+import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
 import { getApiUrl } from '../config/api';
 
@@ -30,6 +30,14 @@ type CreateTaskProps = {
 const CreateTask = ({ currentUser }: CreateTaskProps) => {
   const navigate = useNavigate();
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
+  // في وضع التفويض: actorId = معرّف المفوِّض (المالك الحقيقي للمهمة)
+  // ActedBy يجب أن يحمل معرّف المفوَّض له (currentUser هو User B المسجَّل فعلياً)
+  const _activeAccount = getActiveAccount();
+  const _isDelegationMode = _activeAccount?.mode === 'delegation';
+  // نُرسل VacancyID المفوَّض له إن وُجد، وإلا UserID — الخادم يحتاج لمطابقة التفويض
+  const delegateUserId = _isDelegationMode
+    ? (resolveCurrentActorId(currentUser) || String(currentUser.UserID || '').trim())
+    : null;
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const getTodayString = () => new Date().toISOString().split('T')[0];
@@ -112,7 +120,7 @@ const handleSubmit = async (e: React.FormEvent) => {
     AssignedTo: actingUserId,
     subtasks: subtasks,
     CreatedBy: actingUserId,
-    ActedBy: actingUserId,
+    ActedBy: _isDelegationMode ? delegateUserId : actingUserId,
     CategoryID: selectedCategory ? parseInt(selectedCategory) : null,
   };
 

@@ -5,7 +5,7 @@ import TaskCard from '../components/TaskCard';
 import SearchBar from '../components/SearchBar';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, Comment } from '../types';
-import { getActiveUserId } from '../utils/activeAccount';
+import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
 import { Loader2, ClipboardCopy, Filter, User, Users, ChevronDown, MessageCircle, CheckSquare, ClipboardList, CheckCircle, Clock } from 'lucide-react';
 
@@ -20,7 +20,7 @@ type Task = {
   AssignedToVacancyID?: number | string | null;
   AssignedToName: string | null;
   DueDate: string;
-  Status: 'open' | 'in-progress' | 'completed' | 'cancelled' | 'external' | 'approved-in-progress';
+  Status: 'open' | 'in-progress' | 'completed' | 'cancelled';
   Priority: 'normal' | 'urgent' | 'starred';
   subtasks?: Subtask[];
   comments?: Comment[];
@@ -85,7 +85,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   const [assigneeFilterUserId, setAssigneeFilterUserId] = useState<string | null>(null);
   
   // 4. حالة جديدة للتبويبات
-  const [activeTab, setActiveTab] = useState<'active' | 'external' | 'completed' | 'actioned' | 'updates'>('active');
+  const [activeTab, setActiveTab] = useState<'active' | 'completed' | 'actioned' | 'updates'>('active');
 
   const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
   const [isLoadingActivity, setIsLoadingActivity] = useState(false);
@@ -101,6 +101,14 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   const subtaskAssigneeId = (subtask: Subtask) => String((subtask as any).AssignedToVacancyID ?? (subtask as any).AssignedTo ?? '');
 
+  // في وضع التفويض: actorId = معرّف المفوِّض (User A)، currentUser = بيانات المفوَّض له (User B)
+  const _activeAccount = getActiveAccount();
+  const isDelegationMode = _activeAccount?.mode === 'delegation';
+  // معرّف المفوِّض (UserID النصي) من localStorage — يُستخدم في مطابقة UserID القديم
+  const delegatorUserIdFromAccount = isDelegationMode
+    ? String(_activeAccount?.userId || _activeAccount?.actorId || '').trim()
+    : '';
+
 
 
   // معرّف المنصب الحالي للمستخدم (VacancyID) من localStorage
@@ -111,19 +119,26 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     ''
   ).trim();
 
-  // UserID الصريح للمستخدم (بدون أرقام المناصب)
+  // UserID الصريح للمستخدم المسجَّل (User B في وضع التفويض)
   const currentUserIdStrict = String(currentUser.UserID ?? '').trim();
 
-  // VacancyID الفعلي: يفضّل قيمة localStorage، ويقع على effectiveActorIdFromApi كاحتياط
-  // effectiveActorIdFromApi هو المعرّف الذي حلّه الخادم ويُرسَل في ترويسة X-Effective-Actor-ID
-  const effectiveVacancyId = currentVacancyId || effectiveActorIdFromApi;
+  // في وضع التفويض: نستخدم معرّف المفوِّض (User A) للمطابقة
+  // في الوضع العادي: نستخدم UserID المستخدم الحالي
+  const actorUserIdStrict = isDelegationMode ? delegatorUserIdFromAccount : currentUserIdStrict;
+
+  // VacancyID الفعلي للفاعل:
+  // - وضع التفويض: effectiveActorIdFromApi (المُحلَّل من الخادم للمفوِّض) أو actorId من localStorage
+  // - الوضع العادي: currentVacancyId للمستخدم الحالي أو effectiveActorIdFromApi
+  const effectiveVacancyId = isDelegationMode
+    ? (effectiveActorIdFromApi || actorId)
+    : (currentVacancyId || effectiveActorIdFromApi);
 
   // مطابقة صارمة: VacancyID مع VacancyID، UserID مع UserID — لا خلط بينهما
   const isTaskCreatedByActor = (task: Task) => {
     const taskVacancyId = String((task as any).CreatedByVacancyID ?? '').trim();
     const taskCreatedBy = String(task.CreatedBy ?? '').trim();
     if (taskVacancyId && effectiveVacancyId && taskVacancyId === effectiveVacancyId) return true;
-    if (taskCreatedBy && currentUserIdStrict && taskCreatedBy === currentUserIdStrict) return true;
+    if (taskCreatedBy && actorUserIdStrict && taskCreatedBy === actorUserIdStrict) return true;
     return false;
   };
 
@@ -131,7 +146,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     const subVacancyId = String((subtask as any).AssignedToVacancyID ?? '').trim();
     const subAssignedTo = String((subtask as any).AssignedTo ?? '').trim();
     if (subVacancyId && effectiveVacancyId && subVacancyId === effectiveVacancyId) return true;
-    if (subAssignedTo && currentUserIdStrict && subAssignedTo === currentUserIdStrict) return true;
+    if (subAssignedTo && actorUserIdStrict && subAssignedTo === actorUserIdStrict) return true;
     return false;
   };
 
@@ -147,7 +162,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       const commentVacancyId = String((comment as any).CommentedByVacancyID ?? '').trim();
       const commentUserId = String((comment as any).UserID ?? '').trim();
       if (commentVacancyId && effectiveVacancyId && commentVacancyId === effectiveVacancyId) return true;
-      if (commentUserId && currentUserIdStrict && commentUserId === currentUserIdStrict) return true;
+      if (commentUserId && actorUserIdStrict && commentUserId === actorUserIdStrict) return true;
       return false;
     });
   };
@@ -690,7 +705,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   const getCurrentTabTasks = () => {
     switch (activeTab) {
       case 'active': return activeTasks;
-      case 'external': return externalTasks;
       case 'completed': return completedTasks;
       case 'actioned': return actionedTasks;
       case 'updates': return [];
@@ -767,9 +781,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
   const isOpenStatus = (task: Task) =>
     task.Status !== 'completed' &&
-    task.Status !== 'cancelled' &&
-    task.Status !== 'external' &&
-    task.Status !== 'approved-in-progress';
+    task.Status !== 'cancelled';
 
   const activeTasks = filteredTasks.filter(task => {
     if (!isOpenStatus(task)) return false;
@@ -780,7 +792,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   });
 
   const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
-  const externalTasks = filteredTasks.filter(task => task.Status === 'external');
 
   // المهام المتعلقة بي ولا يوجد فيها إجراء معلق (سواء أنشأتها أو أنهيت جميع مهامي الفرعية)
   // "أنجزت إجرائي فيها": مفتوحة + متعلقة بي + لا توجد مهام فرعية معلقة لي
@@ -834,7 +845,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   // حساب الإشعارات لكل تبويب
   const activeTabNotifications = getTabNotifications(activeTasks);
   const actionedTabNotifications = getTabNotifications(actionedTasks);
-  const externalTabNotifications = getTabNotifications(externalTasks);
   const completedTabNotifications = getTabNotifications(completedTasks);
 
   // حساب إجمالي الإشعارات لكل تبويب
@@ -856,7 +866,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   sortTasks(activeTasks);
   sortTasks(actionedTasks);
   sortTasks(completedTasks);
-  sortTasks(externalTasks);
 
   if (isLoading) return <div className="flex justify-center items-center p-8"><Loader2 className="animate-spin text-primary" size={48} /></div>;
   if (error) return <p className="text-center p-8 text-red-500">حدث خطأ: {error}</p>;
@@ -1154,28 +1163,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
             </div>
           </button>
           <button
-            onClick={() => setActiveTab('external')}
-            className={`px-6 py-3 font-medium transition-colors ${
-              activeTab === 'external'
-                ? 'text-primary border-b-2 border-primary bg-blue-50 dark:bg-blue-900/20'
-                : 'text-gray-600 dark:text-gray-400 hover:text-primary'
-            }`}
-          >
-            🏢 المهام الخارجية ({externalTasks.length})
-            <div className="flex items-center gap-1 ml-2">
-              {externalTabNotifications.assignment > 0 && (
-                <span className="inline-flex items-center justify-center w-5 h-5 text-xs font-bold text-white bg-red-500 rounded-full animate-pulse">
-                  {externalTabNotifications.assignment}
-                </span>
-              )}
-              {externalTabNotifications.comment > 0 && (
-                <span className="inline-flex items-center justify-center w-5 h-5 text-xs font-bold text-white bg-green-500 rounded-full animate-pulse">
-                  {externalTabNotifications.comment}
-                </span>
-              )}
-            </div>
-          </button>
-          <button
             onClick={() => setActiveTab('completed')}
             className={`px-6 py-3 font-medium transition-colors ${
               activeTab === 'completed'
@@ -1429,58 +1416,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
         </div>
       )}
 
-      {activeTab === 'external' && (
-        <div>
-          <div className="flex justify-between items-center mb-6">
-            <div>
-              <h1 className="text-3xl font-bold text-content border-b-2 border-orange-500 pb-2">المهام الخارجية</h1>
-              {searchTerm.trim() && (
-                <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">
-                  عُثر على {externalTasks.length} مهمة خارجية تطابق البحث
-                </p>
-              )}
-            </div>
-          </div>
-          {externalTasks.length > 0 ? (
-            layoutMode === 'grid' ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {externalTasks.map(task => (
-                  <TaskCard 
-                    key={task.TaskID} 
-                    task={task} 
-                    onPriorityChange={updateTaskPriority}
-                    isSelectionMode={isSelectionMode}
-                    isSelected={selectedTasks.has(task.TaskID)}
-                    onToggleSelection={toggleTaskSelection}
-                    isMySubtask={isMySubtaskByVacancyId}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="flex flex-col gap-4">
-                {externalTasks.map(task => (
-                  <TaskCard 
-                    key={task.TaskID} 
-                    task={task} 
-                    onPriorityChange={updateTaskPriority}
-                    isSelectionMode={isSelectionMode}
-                    isSelected={selectedTasks.has(task.TaskID)}
-                    onToggleSelection={toggleTaskSelection}
-                    isMySubtask={isMySubtaskByVacancyId}
-                  />
-                ))}
-              </div>
-            )
-          ) : (
-            <p className="text-content-secondary text-center py-4">
-              {searchTerm.trim() 
-                ? `لم يتم العثور على مهام خارجية تطابق البحث "${searchTerm}"`
-                : "لا توجد مهام مسندة لجهات خارجية حالياً."
-              }
-            </p>
-          )}
-        </div>
-      )}
 
       
 

@@ -1174,18 +1174,10 @@ exports.updateTaskStatus = async (req, res) => {
     let { Status } = req.body;
     
     // التحقق من صحة الحالة
-    const validStatuses = ['open', 'in-progress', 'completed', 'cancelled', 'external', 'approved-in-progress'];
+    const validStatuses = ['open', 'in-progress', 'completed', 'cancelled'];
     if (!Status || !validStatuses.includes(Status)) {
-        return res.status(400).json({ message: 'Valid status is required (open, in-progress, completed, cancelled, external, approved-in-progress)' });
+        return res.status(400).json({ message: 'Valid status is required (open, in-progress, completed, cancelled)' });
     }
-    
-    // تحويل القيم غير المدعومة في قاعدة البيانات إلى قيم مدعومة مؤقتاً
-    const statusMapping = {
-        'external': 'in-progress',
-        'approved-in-progress': 'in-progress'
-    };
-    
-    const dbStatus = statusMapping[Status] || Status;
     
     try {
         // تحديث الحالة بدون تحويل مؤقت - سنحفظ الحالة الأصلية

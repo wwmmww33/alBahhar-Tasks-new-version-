@@ -3,7 +3,7 @@ import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckS
 import React, { useState, useMemo } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
-import { getActiveUserId } from '../utils/activeAccount';
+import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId, resolveUserActorId } from '../utils/actorIdentity';
 
 type Comment = {
@@ -130,6 +130,16 @@ const UnifiedTimeline = ({
   const userActorId = (user: User) => String(resolveUserActorId(user) || user.UserID);
   const subtaskAssignedId = (subtask: Subtask) => String(subtask.AssignedToVacancyID ?? subtask.AssignedTo ?? '');
 
+  // في وضع التفويض: actingUserId = معرّف المفوِّض (مالك المهمة)
+  // ActedBy يجب أن يحمل معرّف المفوَّض له (currentUser = User B المسجَّل فعلياً)
+  const _delegationAccount = getActiveAccount();
+  const _isDelegationMode = _delegationAccount?.mode === 'delegation';
+  // نُرسل VacancyID المفوَّض له إن وُجد، وإلا UserID — الخادم يحتاج لمطابقة التفويض
+  const _delegateUserId = _isDelegationMode
+    ? (resolveCurrentActorId(currentUser) || String(currentUser.UserID || '').trim())
+    : null;
+  const actedByValue = _isDelegationMode ? _delegateUserId : actingUserId;
+
   const actorIdCandidates = useMemo(() => {
     const ids = new Set<string>();
     const add = (value: unknown) => {
@@ -209,24 +219,50 @@ const UnifiedTimeline = ({
             alert("الرجاء اختيار مستخدم واحد على الأقل");
             return;
         }
+
+        let successCount = 0;
+        const errors: string[] = [];
+
         for (const userId of newSubtaskBulkUsers) {
-             await fetch('/api/subtasks', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                TaskID: taskId, Title: newSubtaskTitle, CreatedBy: actingUserId, ActedBy: actingUserId,
-                DueDate: newSubtaskDueDate || null, EndDate: newSubtaskEndDate || null, AssignedTo: userId,
-                ShowInCalendar: showInCalendar,
-                UserID: actingUserId, isAdmin: currentUser.IsAdmin
-              }),
-            });
+            try {
+                const resp = await fetch('/api/subtasks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        TaskID: taskId, Title: newSubtaskTitle, CreatedBy: actingUserId, ActedBy: actedByValue,
+                        DueDate: newSubtaskDueDate || null, EndDate: newSubtaskEndDate || null, AssignedTo: userId,
+                        ShowInCalendar: showInCalendar,
+                        UserID: actingUserId, isAdmin: currentUser.IsAdmin
+                    }),
+                });
+                if (resp.ok) {
+                    successCount++;
+                } else {
+                    const text = await resp.text().catch(() => '');
+                    let errMsg = '';
+                    try { errMsg = JSON.parse(text)?.message || text; } catch { errMsg = text; }
+                    const userName = safeUsers.find(u => userActorId(u) === userId)?.FullName || userId;
+                    errors.push(`${userName}: خطأ ${resp.status} — ${errMsg}`);
+                }
+            } catch (err: any) {
+                const userName = safeUsers.find(u => userActorId(u) === userId)?.FullName || userId;
+                errors.push(`${userName}: خطأ في الاتصال — ${err?.message || err}`);
+            }
         }
-        window.dispatchEvent(new CustomEvent('calendar:subtask:created', { detail: { ShowInCalendar: showInCalendar, DueDate: newSubtaskDueDate } }));
-        
+
         setNewSubtaskTitle(''); setNewSubtaskDueDate(getTodayString()); setNewSubtaskEndDate(''); setAssignTo(''); setShowInCalendar(false);
         setNewSubtaskBulkUsers([]);
-        onSubtaskUpdate();
-        refreshTasks();
-        refreshNotifications();
+
+        if (successCount > 0) {
+            window.dispatchEvent(new CustomEvent('calendar:subtask:created', { detail: { ShowInCalendar: showInCalendar, DueDate: newSubtaskDueDate } }));
+            onSubtaskUpdate();
+            refreshTasks();
+            refreshNotifications();
+        }
+
+        if (errors.length > 0) {
+            alert(`تم إنشاء ${successCount} مهمة فرعية بنجاح.\nفشل إنشاء ${errors.length}:\n${errors.join('\n')}`);
+        }
         return;
     }
 
@@ -237,7 +273,7 @@ const UnifiedTimeline = ({
         TaskID: taskId,
         Title: newSubtaskTitle,
         CreatedBy: actingUserId,
-        ActedBy: actingUserId,
+        ActedBy: actedByValue,
         DueDate: newSubtaskDueDate || null,
         EndDate: newSubtaskEndDate || null,
         AssignedTo: assignTo || actingUserId,

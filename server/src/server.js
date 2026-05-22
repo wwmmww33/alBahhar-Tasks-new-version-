@@ -66,7 +66,8 @@ const {
   ensureCheckTaskDelegationPermissionFunction,
   ensureTaskUrlColumn,
   ensureTaskQueryPerformanceIndexes,
-  ensureSubtaskEndDateColumn
+  ensureSubtaskEndDateColumn,
+  ensureUserRolesTable
 } = require('./utils/dbMigrations');
 
 
@@ -153,6 +154,13 @@ const startServer = async () => {
       await ensureSubtaskEndDateColumn(pool);
     } catch (endDateErr) {
       console.error('⚠️ Database migration (Subtasks.EndDate) failed. Server continues running.', endDateErr);
+    }
+
+    // --- جدول أدوار المستخدمين ---
+    try {
+      await ensureUserRolesTable(pool);
+    } catch (userRolesErr) {
+      console.error('⚠️ Database migration (UserRoles) failed. Server continues running.', userRolesErr);
     }
     
     app.listen(port, '0.0.0.0', () => {
