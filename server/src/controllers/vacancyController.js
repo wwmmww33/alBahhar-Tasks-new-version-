@@ -92,15 +92,15 @@ exports.listByDepartmentScope = async (req, res) => {
                 // 4) عند الهبوط نستثني الفروع ذات Type=0 (وحدات منفصلة مستقلة).
                 withCte = `
                     WITH UpTree AS (
-                        SELECT DepartmentID, ${parentCol} AS PID, 0 AS Lvl,
+                        SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, 0 AS Lvl,
                                TRY_CAST([Type] AS INT) AS DType
                         FROM dbo.Departments
                         WHERE DepartmentID = @DepartmentID
                         UNION ALL
-                        SELECT d.DepartmentID, d.${parentCol} AS PID, u.Lvl + 1,
+                        SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS PID, u.Lvl + 1,
                                TRY_CAST(d.[Type] AS INT) AS DType
                         FROM dbo.Departments d
-                        INNER JOIN UpTree u ON d.DepartmentID = u.PID
+                        INNER JOIN UpTree u ON u.PID IS NOT NULL AND d.DepartmentID = u.PID
                     ),
                     RootID AS (
                         SELECT COALESCE(
@@ -116,7 +116,8 @@ exports.listByDepartmentScope = async (req, res) => {
                         UNION ALL
                         SELECT d.DepartmentID
                         FROM dbo.Departments d
-                        INNER JOIN DeptScope t ON d.${parentCol} = t.DepartmentID
+                        INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                               AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
                         ${downWhere}
                     )
                 `;
@@ -125,7 +126,7 @@ exports.listByDepartmentScope = async (req, res) => {
                 withCte = `
                     WITH ParentID AS (
                         SELECT COALESCE(
-                            (SELECT TOP 1 ${parentCol} FROM dbo.Departments WHERE DepartmentID = @DepartmentID AND ${parentCol} IS NOT NULL),
+                            TRY_CAST((SELECT TOP 1 ${parentCol} FROM dbo.Departments WHERE DepartmentID = @DepartmentID AND ${parentCol} IS NOT NULL) AS INT),
                             @DepartmentID
                         ) AS RootDeptID
                     ),
@@ -134,7 +135,8 @@ exports.listByDepartmentScope = async (req, res) => {
                         UNION ALL
                         SELECT d.DepartmentID
                         FROM dbo.Departments d
-                        INNER JOIN DeptScope t ON d.${parentCol} = t.DepartmentID
+                        INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                               AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
                     )
                 `;
             }
@@ -250,6 +252,309 @@ exports.listByDepartment = async (req, res) => {
     } catch (err) {
         console.error('LIST VACANCIES BY DEPARTMENT ERROR:', err);
         res.status(500).send({ message: 'Error fetching vacancies', detail: err.message });
+    }
+};
+
+// ---- GET /api/vacancies/department/:departmentId/independent-scope ----
+// يصعد الهرمية حتى أقرب قسم Type=1 (مستقل) ثم يُعيد جميع مناصبه وأقسامه الفرعية.
+exports.listByIndependentDepartment = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).send({ message: 'Database connection is not available.' });
+
+    const departmentId = parseInt(req.params.departmentId, 10);
+    if (!Number.isInteger(departmentId)) {
+        return res.status(400).json({ message: 'departmentId must be an integer.' });
+    }
+
+    let builtQuery = '';
+    try {
+        const s = await probeVacancySchema(pool);
+        if (!s.HasVacancies) return res.status(200).json([]);
+
+        // فحص وجود أعمدة الهرمية
+        const deptProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+                CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
+        `);
+        const dp = deptProbe.recordset[0] || {};
+        const parentCol = dp.HasParentID ? 'ParentID' : (dp.HasParentDeptID ? 'ParentDepartmentID' : null);
+
+        const nameCol     = s.HasVacName   ? 'jv.Name'    : 'CAST(jv.VacancyID AS NVARCHAR(50))';
+        const isActiveCol = s.HasVacIsActive ? 'jv.IsActive' : 'CAST(1 AS BIT)';
+        const isActiveFilter = s.HasVacIsActive ? 'AND (jv.IsActive = 1 OR jv.IsActive IS NULL)' : '';
+
+        const assignJoin = s.HasAssignments ? `
+            OUTER APPLY (
+                SELECT TOP 1 a.UserID, a.VacancyID
+                FROM dbo.Assignments a
+                WHERE a.VacancyID = jv.VacancyID
+                  ${s.HasAssIsCurrent ? 'AND a.IsCurrent = 1' : ''}
+                ORDER BY
+                  ${s.HasAssIsCurrent ? 'CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,' : ''}
+                  ${s.HasAssStartDate ? `ISNULL(a.StartDate, '1900-01-01') DESC,` : ''}
+                  a.AssignmentID DESC
+            ) ca
+            LEFT JOIN dbo.Users u ON u.UserID = ca.UserID
+        ` : '';
+
+        const selectUser = s.HasAssignments ? `,
+                ca.UserID AS CurrentUserID,
+                ${s.HasUserFullName ? 'u.FullName' : 'CAST(NULL AS NVARCHAR(200))'} AS CurrentUserFullName,
+                ${s.HasUserIsActive ? 'u.IsActive' : 'CAST(1 AS BIT)'} AS CurrentUserIsActive
+        ` : '';
+
+        let withCte = '';
+        let deptFilter = '';
+
+        if (parentCol && dp.HasDeptType) {
+            // صعود حتى أقرب قسم Type=1، ثم هبوط منه شاملاً كل الأقسام الفرعية
+            withCte = `
+                WITH UpTree AS (
+                    SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, 0 AS Lvl,
+                           TRY_CAST([Type] AS INT) AS DType
+                    FROM dbo.Departments
+                    WHERE DepartmentID = @DepartmentID
+                    UNION ALL
+                    SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS PID, u.Lvl + 1,
+                           TRY_CAST(d.[Type] AS INT) AS DType
+                    FROM dbo.Departments d
+                    INNER JOIN UpTree u ON u.PID IS NOT NULL AND d.DepartmentID = u.PID
+                    WHERE u.DType <> 1 OR u.DType IS NULL
+                ),
+                RootID AS (
+                    SELECT COALESCE(
+                        (SELECT TOP 1 DepartmentID FROM UpTree WHERE DType = 1 ORDER BY Lvl ASC),
+                        @DepartmentID
+                    ) AS RootDeptID
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d CROSS JOIN RootID r
+                    WHERE d.DepartmentID = r.RootDeptID
+                    UNION ALL
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d
+                    INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                           AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                    WHERE TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1
+                )
+            `;
+            deptFilter = 'EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)';
+        } else if (parentCol) {
+            // لا يوجد عمود Type — نأخذ القسم الأب وجميع أحفاده
+            withCte = `
+                WITH ParentRoot AS (
+                    SELECT COALESCE(
+                        TRY_CAST((SELECT TOP 1 ${parentCol} FROM dbo.Departments WHERE DepartmentID = @DepartmentID AND ${parentCol} IS NOT NULL) AS INT),
+                        @DepartmentID
+                    ) AS RootDeptID
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID FROM dbo.Departments d CROSS JOIN ParentRoot p WHERE d.DepartmentID = p.RootDeptID
+                    UNION ALL
+                    SELECT d.DepartmentID FROM dbo.Departments d
+                    INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                           AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                )
+            `;
+            deptFilter = 'EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)';
+        } else {
+            deptFilter = s.HasVacDept ? 'jv.DepartmentID = @DepartmentID' : '1 = 0';
+        }
+
+        const mainSql = `
+            SELECT
+                jv.VacancyID,
+                ${nameCol}     AS Name,
+                ${isActiveCol} AS IsActive,
+                ${s.HasVacDept ? 'jv.DepartmentID' : 'CAST(NULL AS INT) AS DepartmentID'}
+                ${selectUser}
+            FROM dbo.JobVacancies jv
+            ${assignJoin}
+            WHERE ${deptFilter}
+            ${isActiveFilter}
+            ORDER BY ${s.HasVacName ? 'jv.Name' : 'jv.VacancyID'}
+            OPTION (MAXRECURSION 100)
+        `;
+
+        builtQuery = withCte ? `${withCte}\n${mainSql}` : mainSql;
+
+        const result = await pool.request()
+            .input('DepartmentID', sql.Int, departmentId)
+            .query(builtQuery);
+
+        res.status(200).json(result.recordset || []);
+    } catch (err) {
+        console.error('LIST INDEPENDENT SCOPE ERROR:', err.message);
+        console.error('SQL used:\n', builtQuery);
+        res.status(500).send({ message: 'Error fetching independent scope vacancies', detail: err.message });
+    }
+};
+
+// ---- GET /api/vacancies/user-scope/:userId ----
+// قائمة المناصب المتاحة لنقل مهام المستخدم إليها.
+// يُحدَّد النطاق من خلال قسم المنصب الحالي للمستخدم (من جدول Assignments)،
+// ثم يُوسَّع حتى القسم المستقل (Type=1) ويُستثنى منصبه الحالي تلقائياً.
+exports.listByUserTransferScope = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).send({ message: 'Database connection is not available.' });
+
+    const userId = String(req.params.userId || '').trim();
+    if (!userId) return res.status(400).json({ message: 'userId is required.' });
+
+    let builtQuery = '';
+    try {
+        const s = await probeVacancySchema(pool);
+        if (!s.HasVacancies) return res.status(200).json([]);
+        if (!s.HasAssignments) return res.status(200).json([]);
+
+        // جلب المنصب الحالي للمستخدم مع قسمه
+        const assRes = await pool.request()
+            .input('UID', sql.NVarChar(50), userId)
+            .query(`
+                SELECT TOP 1
+                    a.VacancyID,
+                    jv.DepartmentID AS VacancyDeptID
+                FROM dbo.Assignments a
+                INNER JOIN dbo.JobVacancies jv ON jv.VacancyID = a.VacancyID
+                WHERE a.UserID = @UID
+                  AND jv.VacancyID IS NOT NULL
+                ORDER BY
+                    ${s.HasAssIsCurrent ? 'CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,' : ''}
+                    ${s.HasAssStartDate ? `ISNULL(a.StartDate, '1900-01-01') DESC,` : ''}
+                    a.AssignmentID DESC
+            `);
+
+        const assRow = assRes.recordset[0];
+        if (!assRow || assRow.VacancyDeptID == null) {
+            // المستخدم ليس لديه منصب مُسنَد — لا توجد خيارات للنقل
+            return res.status(200).json([]);
+        }
+
+        const departmentId = parseInt(assRow.VacancyDeptID, 10);
+        const currentVacancyId = parseInt(assRow.VacancyID, 10);
+
+        // فحص وجود أعمدة الهرمية
+        const deptProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+                CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
+        `);
+        const dp = deptProbe.recordset[0] || {};
+        const parentCol = dp.HasParentID ? 'ParentID' : (dp.HasParentDeptID ? 'ParentDepartmentID' : null);
+
+        const nameCol     = s.HasVacName    ? 'jv.Name'    : 'CAST(jv.VacancyID AS NVARCHAR(50))';
+        const isActiveCol = s.HasVacIsActive ? 'jv.IsActive' : 'CAST(1 AS BIT)';
+        const isActiveFilter = s.HasVacIsActive ? 'AND (jv.IsActive = 1 OR jv.IsActive IS NULL)' : '';
+
+        const assignJoin = s.HasAssignments ? `
+            OUTER APPLY (
+                SELECT TOP 1 a.UserID, a.VacancyID
+                FROM dbo.Assignments a
+                WHERE a.VacancyID = jv.VacancyID
+                  ${s.HasAssIsCurrent ? 'AND a.IsCurrent = 1' : ''}
+                ORDER BY
+                  ${s.HasAssIsCurrent ? 'CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,' : ''}
+                  ${s.HasAssStartDate ? `ISNULL(a.StartDate, '1900-01-01') DESC,` : ''}
+                  a.AssignmentID DESC
+            ) ca
+            LEFT JOIN dbo.Users u ON u.UserID = ca.UserID
+        ` : '';
+
+        const selectUser = s.HasAssignments ? `,
+                ca.UserID AS CurrentUserID,
+                ${s.HasUserFullName ? 'u.FullName' : 'CAST(NULL AS NVARCHAR(200))'} AS CurrentUserFullName,
+                ${s.HasUserIsActive ? 'u.IsActive' : 'CAST(1 AS BIT)'} AS CurrentUserIsActive
+        ` : '';
+
+        let withCte = '';
+        let deptFilter = '';
+
+        if (parentCol && dp.HasDeptType) {
+            withCte = `
+                WITH UpTree AS (
+                    SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, 0 AS Lvl,
+                           TRY_CAST([Type] AS INT) AS DType
+                    FROM dbo.Departments
+                    WHERE DepartmentID = @DepartmentID
+                    UNION ALL
+                    SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS PID, u.Lvl + 1,
+                           TRY_CAST(d.[Type] AS INT) AS DType
+                    FROM dbo.Departments d
+                    INNER JOIN UpTree u ON u.PID IS NOT NULL AND d.DepartmentID = u.PID
+                    WHERE u.DType <> 1 OR u.DType IS NULL
+                ),
+                RootID AS (
+                    SELECT COALESCE(
+                        (SELECT TOP 1 DepartmentID FROM UpTree WHERE DType = 1 ORDER BY Lvl ASC),
+                        @DepartmentID
+                    ) AS RootDeptID
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d CROSS JOIN RootID r
+                    WHERE d.DepartmentID = r.RootDeptID
+                    UNION ALL
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d
+                    INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                           AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                    WHERE TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1
+                )
+            `;
+            deptFilter = 'EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)';
+        } else if (parentCol) {
+            withCte = `
+                WITH ParentRoot AS (
+                    SELECT COALESCE(
+                        TRY_CAST((SELECT TOP 1 ${parentCol} FROM dbo.Departments WHERE DepartmentID = @DepartmentID AND ${parentCol} IS NOT NULL) AS INT),
+                        @DepartmentID
+                    ) AS RootDeptID
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID FROM dbo.Departments d CROSS JOIN ParentRoot p WHERE d.DepartmentID = p.RootDeptID
+                    UNION ALL
+                    SELECT d.DepartmentID FROM dbo.Departments d
+                    INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                           AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                )
+            `;
+            deptFilter = 'EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)';
+        } else {
+            deptFilter = s.HasVacDept ? 'jv.DepartmentID = @DepartmentID' : '1 = 0';
+        }
+
+        const mainSql = `
+            SELECT
+                jv.VacancyID,
+                ${nameCol}     AS Name,
+                ${isActiveCol} AS IsActive,
+                ${s.HasVacDept ? 'jv.DepartmentID' : 'CAST(NULL AS INT) AS DepartmentID'}
+                ${selectUser}
+            FROM dbo.JobVacancies jv
+            ${assignJoin}
+            WHERE ${deptFilter}
+              AND jv.VacancyID <> @CurrentVacancyID
+            ${isActiveFilter}
+            ORDER BY ${s.HasVacName ? 'jv.Name' : 'jv.VacancyID'}
+            OPTION (MAXRECURSION 100)
+        `;
+
+        builtQuery = withCte ? `${withCte}\n${mainSql}` : mainSql;
+
+        const result = await pool.request()
+            .input('DepartmentID',     sql.Int,        departmentId)
+            .input('CurrentVacancyID', sql.Int,        currentVacancyId)
+            .query(builtQuery);
+
+        res.status(200).json(result.recordset || []);
+    } catch (err) {
+        console.error('LIST USER TRANSFER SCOPE ERROR:', err.message);
+        console.error('SQL used:\n', builtQuery);
+        res.status(500).send({ message: 'Error fetching user transfer scope', detail: err.message });
     }
 };
 

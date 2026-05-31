@@ -191,18 +191,19 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
             .input('DepartmentID', sql.NVarChar, baseDepartmentId)
             .query(`
                 ;WITH UpTree AS (
-                    SELECT DepartmentID, ${parentCol} AS ParentDepartmentID, 0 AS Depth
+                    SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS ParentDepartmentID, 0 AS Depth
                     FROM dbo.Departments
                     WHERE DepartmentID = @DepartmentID
                     UNION ALL
-                    SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
+                    SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS ParentDepartmentID, u.Depth + 1
                     FROM dbo.Departments d
-                    INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
+                    INNER JOIN UpTree u ON u.ParentDepartmentID IS NOT NULL
+                                       AND d.DepartmentID = u.ParentDepartmentID
                 )
                 SELECT TOP 1 u.DepartmentID
                 FROM UpTree u
                 INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
-                WHERE d.[Type] = 1
+                WHERE TRY_CAST(d.[Type] AS INT) = 1
                 ORDER BY u.Depth ASC
                 OPTION (MAXRECURSION 100)
             `);
@@ -217,13 +218,14 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
         .input('RootDepartmentID', sql.NVarChar, rootDepartmentId)
         .query(`
             ;WITH DeptTree AS (
-                SELECT DepartmentID, ${parentCol} AS ParentDepartmentID
+                SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS ParentDepartmentID
                 FROM dbo.Departments
                 WHERE DepartmentID = @RootDepartmentID
                 UNION ALL
-                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
+                SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS ParentDepartmentID
                 FROM dbo.Departments d
-                INNER JOIN DeptTree dt ON d.${parentCol} = dt.DepartmentID
+                INNER JOIN DeptTree dt ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                       AND TRY_CAST(d.${parentCol} AS INT) = dt.DepartmentID
             )
             SELECT DISTINCT DepartmentID
             FROM DeptTree
@@ -1602,7 +1604,9 @@ exports.getTasksWithNotifications = async (req, res) => {
               CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignNotifVacancy,
               CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentNotifVacancy,
               CASE WHEN COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskViewsVacancy,
-              CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentVacancy
+              CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentVacancy,
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasActedBy,
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy
         `);
 
         const s = schema.recordset[0] || {};
@@ -1620,6 +1624,20 @@ exports.getTasksWithNotifications = async (req, res) => {
         const identityKey = isVacancy ? 'VacancyID' : 'UserID';
         const identityName = isVacancy ? 'Name' : 'FullName';
         const commentAuthorCol = s.HasCommentVacancy ? 'CommentedByVacancyID' : 'UserID';
+        // بناء عمود "آخر من تصرف" — لا نخلط أعمدة INT مع NVARCHAR في COALESCE
+        const actedByCoalesce = (() => {
+            if (isVacancy) {
+                // المخطط الجديد: أعمدة INT فقط
+                return s.HasLastActedByVacancy
+                    ? `COALESCE(t.LastActedByVacancyID, t.${taskCreatorCol})`
+                    : `t.${taskCreatorCol}`;
+            } else {
+                // المخطط القديم: أعمدة NVARCHAR فقط
+                return s.HasActedBy
+                    ? `COALESCE(t.ActedBy, t.${taskCreatorCol})`
+                    : `t.${taskCreatorCol}`;
+            }
+        })();
 
         const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
 
@@ -1687,7 +1705,7 @@ exports.getTasksWithNotifications = async (req, res) => {
                 ) as HasCommentNotifications
             FROM Tasks t
             LEFT JOIN ${identityTable} creator ON t.${taskCreatorCol} = creator.${identityKey}
-            LEFT JOIN ${identityTable} acted ON COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${taskCreatorCol}) = acted.${identityKey}
+            LEFT JOIN ${identityTable} acted ON ${actedByCoalesce} = acted.${identityKey}
             ${assigneeJoin}
             LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
             LEFT JOIN TaskViews tv ON tv.TaskID = t.TaskID AND tv.${taskViewCol} = @UserID

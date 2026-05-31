@@ -12,8 +12,14 @@ router.get('/candidates', vacancyController.listCandidates);
 // GET /api/vacancies/unassigned-users — قائمة المستخدمين بلا إسناد حالي
 router.get('/unassigned-users', vacancyController.listUnassignedUsers);
 
+// GET /api/vacancies/user-scope/:userId — مناصب نطاق نقل المهام للمستخدم (مُحدَّد من منصبه الحالي)
+router.get('/user-scope/:userId', vacancyController.listByUserTransferScope);
+
 // GET /api/vacancies/department/:departmentId/scope — مناصب هرمية القسم للإسناد (يحترم حدود Type=0)
 router.get('/department/:departmentId/scope', vacancyController.listByDepartmentScope);
+
+// GET /api/vacancies/department/:departmentId/independent-scope — كل مناصب القسم المستقل (Type=1)
+router.get('/department/:departmentId/independent-scope', vacancyController.listByIndependentDepartment);
 
 // GET /api/vacancies/department/:departmentId — مناصب قسم مع الحامل الحالي
 router.get('/department/:departmentId', vacancyController.listByDepartment);
