@@ -23,11 +23,16 @@ exports.getAllUsers = async (req, res) => {
         // Assignments → JobVacancies، أو نحاول vw_UserCurrentProfile.
         const schema = await detectSchema(pool);
 
+        const svcCol = schema.hasServiceID
+            ? 'u.ServiceID,'
+            : "CAST(NULL AS NVARCHAR(100)) AS ServiceID,";
+
         let query;
         if (schema.hasUsersDepartmentID) {
             query = `
                 SELECT
                     u.UserID,
+                    ${svcCol}
                     u.FullName,
                     u.DepartmentID,
                     d.Name AS DepartmentName,
@@ -40,6 +45,7 @@ exports.getAllUsers = async (req, res) => {
             query = `
                 SELECT
                     u.UserID,
+                    ${svcCol}
                     u.FullName,
                     v.DepartmentID,
                     d.Name AS DepartmentName,
@@ -54,6 +60,7 @@ exports.getAllUsers = async (req, res) => {
             query = `
                 SELECT
                     u.UserID,
+                    ${svcCol}
                     u.FullName,
                     p.DepartmentID,
                     d.Name AS DepartmentName,
@@ -67,6 +74,7 @@ exports.getAllUsers = async (req, res) => {
             query = `
                 SELECT
                     u.UserID,
+                    ${svcCol}
                     u.FullName,
                     CAST(NULL AS INT) AS DepartmentID,
                     CAST(NULL AS NVARCHAR(200)) AS DepartmentName,
@@ -411,7 +419,7 @@ exports.updateUser = async (req, res) => {
         return res.status(503).send({ message: 'Database connection is not available.' });
     }
     const { id } = req.params; // UserID
-    const { FullName, DepartmentID, PasswordHash, IsActive } = req.body;
+    const { FullName, DepartmentID, PasswordHash, IsActive, ServiceID } = req.body;
 
     if (typeof IsActive !== 'boolean') {
         return res.status(400).json({ message: 'IsActive must be a boolean.' });
@@ -438,6 +446,11 @@ exports.updateUser = async (req, res) => {
             const hashed = encryptionConfig.hashPassword(PasswordHash).combined;
             setParts.push('PasswordHash = @PasswordHash');
             userReq.input('PasswordHash', sql.NVarChar, hashed);
+        }
+
+        if (schema.hasServiceID && ServiceID != null && String(ServiceID).trim() !== '') {
+            setParts.push('ServiceID = @ServiceID');
+            userReq.input('ServiceID', sql.NVarChar, String(ServiceID).trim());
         }
 
         await userReq.query(`UPDATE Users SET ${setParts.join(', ')} WHERE UserID = @UserID`);
@@ -549,8 +562,7 @@ exports.deleteRegistrationRequest = async (req, res) => {
 };
 
 // الموافقة على طلب تسجيل
-// ملاحظة: في المخطط الجديد جدول Users لا يحتوي على DepartmentID، ولذلك لا نُدخله.
-// القسم يُربَط لاحقاً بإنشاء إسناد (Assignment) بشكل منفصل.
+// UserID يُولَّد تسلسلياً (رقم)، واسم المستخدم يُخزَّن في ServiceID.
 exports.approveRegistrationRequest = async (req, res) => {
     const pool = req.app.locals.db;
     if (!pool) {
@@ -564,18 +576,29 @@ exports.approveRegistrationRequest = async (req, res) => {
 
         const requestResult = await new sql.Request(transaction)
             .input('RequestID', sql.Int, id)
-            .query('SELECT * FROM RegistrationRequests WHERE RequestID = @RequestID AND Status = \'Pending\'');
+            .query("SELECT * FROM RegistrationRequests WHERE RequestID = @RequestID AND Status = 'Pending'");
         const requestData = requestResult.recordset[0];
         if (!requestData) {
             await transaction.rollback();
             return res.status(404).json({ message: 'Request not found or already processed.' });
         }
 
-        // بناء INSERT لجدول Users حسب المخطط
+        // اسم المستخدم المدخل في طلب التسجيل (سيُخزَّن في ServiceID)
+        const username = String(requestData.UserID || '').trim();
+
+        // توليد UserID تسلسلي عددي: MAX(الأرقام الموجودة) + 1، يبدأ من 1000
+        const maxIdRes = await new sql.Request(transaction).query(`
+            SELECT ISNULL(MAX(TRY_CAST(UserID AS INT)), 999) + 1 AS NextID
+            FROM dbo.Users
+            WHERE TRY_CAST(UserID AS INT) IS NOT NULL
+        `);
+        const newUserId = String(maxIdRes.recordset[0]?.NextID ?? 1000);
+
+        // بناء INSERT لجدول Users
         const userCols = ['UserID', 'PasswordHash', 'FullName', 'IsActive'];
-        const userVals = ['@UserID', '@PasswordHash', '@FullName', '1'];
+        const userVals = ['@NewUserID', '@PasswordHash', '@FullName', '1'];
         const insertReq = new sql.Request(transaction)
-            .input('UserID', sql.NVarChar, requestData.UserID)
+            .input('NewUserID', sql.NVarChar, newUserId)
             .input('PasswordHash', sql.NVarChar, requestData.PasswordHash)
             .input('FullName', sql.NVarChar, requestData.FullName);
 
@@ -585,48 +608,60 @@ exports.approveRegistrationRequest = async (req, res) => {
             insertReq.input('DepartmentID', sql.Int, requestData.DepartmentID);
         }
 
+        // تخزين اسم المستخدم في ServiceID ليُستخدَم للدخول
+        if (schema.hasServiceID && username) {
+            userCols.push('ServiceID');
+            userVals.push('@ServiceID');
+            insertReq.input('ServiceID', sql.NVarChar, username);
+        }
+
         await insertReq.query(`INSERT INTO Users (${userCols.join(', ')}) VALUES (${userVals.join(', ')})`);
 
-        // في المخطط الجديد ننشئ إسناداً (Assignment) للمستخدم بحيث يحصل على VacancyID في القسم المطلوب.
-        if (!schema.hasUsersDepartmentID
-            && schema.hasAssignments
-            && schema.hasJobVacancies
-            && schema.hasVacancyDepartmentID
-            && requestData.DepartmentID != null) {
+        // إسناد المستخدم للمنصب المختار (إن وُجد)
+        if (schema.hasAssignments && requestData.VacancyID) {
             try {
-                const vacancyName = requestData.VacancyName || null;
-                const rankVal    = requestData.Rank ? String(requestData.Rank).trim() : null;
-                const assignInfo = await moveUserToDepartmentViaAssignmentsWithName(
-                    transaction, pool,
-                    requestData.UserID,
-                    parseInt(requestData.DepartmentID, 10),
-                    vacancyName
+                const probe = await new sql.Request(transaction).query(`
+                    SELECT
+                        CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')  IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent,
+                        CASE WHEN COL_LENGTH('dbo.Assignments','StartDate')  IS NOT NULL THEN 1 ELSE 0 END AS HasStartDate,
+                        CASE WHEN COL_LENGTH('dbo.Assignments','UpdatedAt')  IS NOT NULL THEN 1 ELSE 0 END AS HasAssUpdatedAt
+                `);
+                const p = probe.recordset[0] || {};
+
+                const insertCols = ['UserID', 'VacancyID', 'CreatedAt'];
+                const insertVals = ['@UserID', '@VacancyID', 'GETDATE()'];
+                const assignReq = new sql.Request(transaction)
+                    .input('UserID', sql.NVarChar(50), newUserId)
+                    .input('VacancyID', sql.Int, parseInt(requestData.VacancyID, 10));
+                if (p.HasIsCurrent) { insertCols.push('IsCurrent'); insertVals.push('1'); }
+                if (p.HasStartDate) { insertCols.push('StartDate'); insertVals.push('GETDATE()'); }
+                if (p.HasAssUpdatedAt) { insertCols.push('UpdatedAt'); insertVals.push('GETDATE()'); }
+
+                await assignReq.query(
+                    `INSERT INTO dbo.Assignments (${insertCols.join(', ')}) VALUES (${insertVals.join(', ')})`
                 );
-                // خزّن الرتبة في VacancyRanks إن وُجدت
-                if (rankVal && assignInfo.newVacancyId) {
-                    await saveVacancyRank(pool, assignInfo.newVacancyId, rankVal);
-                }
             } catch (assignErr) {
                 console.error('APPROVE REGISTRATION ASSIGNMENT ERROR:', assignErr);
                 await transaction.rollback();
                 return res.status(500).send({
-                    message: 'User account was staged but assignment creation failed.',
+                    message: 'تم إنشاء الحساب لكن فشل الإسناد للمنصب.',
                     detail: assignErr.message,
                 });
             }
         }
+        // إذا لم يُختر منصب → يُترك بدون إسناد ليُعيَّن لاحقاً من المدير
 
         await new sql.Request(transaction)
             .input('RequestID', sql.Int, id)
             .query("UPDATE RegistrationRequests SET Status = 'Approved' WHERE RequestID = @RequestID");
 
         await transaction.commit();
-        res.status(200).json({ message: 'User approved and created successfully.' });
+        res.status(200).json({ message: 'User approved and created successfully.', newUserId });
     } catch (error) {
         try { await transaction.rollback(); } catch (_) {}
         console.error('APPROVE REGISTRATION ERROR:', error);
         if (error.number === 2627) {
-            return res.status(409).send({ message: 'User with this ID already exists.' });
+            return res.status(409).send({ message: 'يوجد مستخدم بنفس الرقم التسلسلي، أعد المحاولة.' });
         }
         res.status(500).send({ message: 'Failed to approve request.' });
     }

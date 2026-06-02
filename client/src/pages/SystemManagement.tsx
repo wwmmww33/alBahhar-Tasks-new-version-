@@ -60,8 +60,8 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
         )}
       </div>
 
-      {/* تنبيه تهيئة أول مدير عام — يظهر فقط لغير المديرين */}
-      {!isSystemAdmin && (
+      {/* تنبيه تهيئة أول مدير عام — يظهر فقط للمستخدمين بدون دور (Role=0) */}
+      {userRole === 0 && (
         <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 rounded-lg text-right">
           <p className="text-sm text-yellow-800 dark:text-yellow-200 mb-2 font-medium">
             لم يتم تعيين مدير عام للنظام بعد.

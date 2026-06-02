@@ -43,8 +43,8 @@ exports.listByDepartmentScope = async (req, res) => {
         return res.status(400).json({ message: 'departmentId must be an integer.' });
     }
 
-    let builtQuery = '';
     try {
+        // فحص وجود الجداول والأعمدة
         const sr = await pool.request().query(`
             SELECT
                 CASE WHEN OBJECT_ID('dbo.JobVacancies','U') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancies,
@@ -52,105 +52,95 @@ exports.listByDepartmentScope = async (req, res) => {
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacDept,
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','Name')         IS NOT NULL THEN 1 ELSE 0 END AS HasVacName,
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','IsActive')     IS NOT NULL THEN 1 ELSE 0 END AS HasVacIsActive,
-                CASE WHEN COL_LENGTH('dbo.Assignments', 'IsCurrent')    IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
+                CASE WHEN COL_LENGTH('dbo.Assignments', 'IsCurrent')    IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent
         `);
         const s = sr.recordset[0] || {};
+        if (!s.HasVacancies || !s.HasVacDept) return res.status(200).json([]);
 
-        if (!s.HasVacancies || !s.HasVacDept) {
-            return res.status(200).json([]);
+        // جلب كل الأقسام لحساب النطاق في JavaScript
+        const deptsRes = await pool.request().query('SELECT * FROM dbo.Departments');
+        const allDepts = deptsRes.recordset;
+
+        // اكتشاف أسماء الأعمدة من السجل الأول
+        const sampleDept = allDepts[0] || {};
+        const sampleKeys = Object.keys(sampleDept);
+        const parentColJS = sampleKeys.find(k => k === 'ParentID')
+                          || sampleKeys.find(k => k === 'ParentDepartmentID')
+                          || null;
+        const typeColJS   = sampleKeys.find(k => k === 'Type') || null;
+        const deptIdCol   = sampleKeys.find(k => k === 'DepartmentID') || 'DepartmentID';
+
+        console.log(`[SCOPE] deptId=${departmentId} depts=${allDepts.length} parentCol=${parentColJS} typeCol=${typeColJS} deptIdCol=${deptIdCol}`);
+
+        // تحويل آمن إلى integer
+        function toInt(val) {
+            const n = Number(val);
+            return Number.isFinite(n) ? Math.round(n) : null;
         }
 
-        const parentCol = s.HasParentID ? 'ParentID' : (s.HasParentDeptID ? 'ParentDepartmentID' : null);
+        // التحقق من أن القسم هو Type=1 (مستقل) — يتعامل مع INT و BIT و string
+        function isIndependent(dept) {
+            if (!typeColJS) return false;
+            const v = dept[typeColJS];
+            return v === 1 || v === true || v === '1';
+        }
+
+        // دالة الصعود حتى القسم المستقل (Type=1)
+        function findIndependentRoot(startId) {
+            const map = new Map(allDepts.map(d => [toInt(d[deptIdCol]), d]));
+            let cur = map.get(startId);
+            const visited = new Set();
+            while (cur && !visited.has(toInt(cur[deptIdCol]))) {
+                const curId = toInt(cur[deptIdCol]);
+                visited.add(curId);
+                if (isIndependent(cur)) {
+                    console.log(`[SCOPE] independentRoot=${curId}`);
+                    return curId;
+                }
+                const pid = parentColJS ? toInt(cur[parentColJS]) : null;
+                if (!pid) break;
+                cur = map.get(pid);
+            }
+            console.log(`[SCOPE] noIndependentRootFound, fallback to startId=${startId}`);
+            return startId;
+        }
+
+        // دالة الحصول على كل الأقسام الفرعية (BFS)
+        function getSubtreeIds(rootId) {
+            const result = new Set();
+            const queue = [rootId];
+            while (queue.length > 0) {
+                const cur = queue.shift();
+                result.add(cur);
+                if (parentColJS) {
+                    allDepts.forEach(d => {
+                        const pid = toInt(d[parentColJS]);
+                        const did = toInt(d[deptIdCol]);
+                        if (pid === cur && did != null && !result.has(did)) {
+                            queue.push(did);
+                        }
+                    });
+                }
+            }
+            return result;
+        }
+
+        const rootId = findIndependentRoot(departmentId);
+        const scopeIds = [...getSubtreeIds(rootId)].filter(id => id != null && Number.isFinite(id));
+
+        console.log(`[SCOPE] rootId=${rootId} scopeIds=[${scopeIds.join(',')}]`);
+
+        if (scopeIds.length === 0) return res.status(200).json([]);
+
+        // أعداد صحيحة مُتحقَّق منها — آمنة من SQL injection
+        const inClause = scopeIds.join(',');
+
         const nameExpr = s.HasVacName ? 'jv.Name' : 'CAST(jv.VacancyID AS NVARCHAR(50))';
         const isActiveFilter = s.HasVacIsActive ? 'AND (jv.IsActive = 1 OR jv.IsActive IS NULL)' : '';
-
-        // TRY_CAST يعمل بأمان مع INT و NVARCHAR — يُرجع NULL إذا فشل التحويل (يُعامَل كـ non-zero)
-        const typeNotZero = s.HasDeptType
-            ? `(d.[Type] IS NULL OR TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 0)`
-            : null;
-
-        // CTE لهرمية الأقسام
-        // المنطق: نصعد وندرج حتى أقرب قسم Type=0 (نتوقف بعد إضافته)،
-        //          ثم نهبط من ذلك الجذر مستثنين أقسام Type=0 الفرعية.
-        let withCte = '';
-        let deptFilter = '';
-
-        if (parentCol) {
-            // فلتر الهبوط: يستثني أقسام Type=0 عند النزول (هي وحدات منفصلة مستقلة)
-            const downWhere = `WHERE d.[Type] IS NULL OR TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 0`;
-
-            if (s.HasDeptType) {
-                // المنطق:
-                // 1) نصعد بلا قيود حتى قمة الشجرة لنجمع كل الأسلاف.
-                // 2) الجذر = أقرب قسم Type=0 في السلسلة (بما فيه القسم نفسه إن كان Type=0).
-                //    → إن وُجد Type=0 فوق القسم يصبح هو حدّ الوحدة الفاصل.
-                // 3) إن لم يُوجد أي Type=0 نصعد مستوى واحداً فقط (الأب المباشر)
-                //    لنضمن ظهور الأقسام المجاورة في نفس الوحدة.
-                // 4) عند الهبوط نستثني الفروع ذات Type=0 (وحدات منفصلة مستقلة).
-                withCte = `
-                    WITH UpTree AS (
-                        SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, 0 AS Lvl,
-                               TRY_CAST([Type] AS INT) AS DType
-                        FROM dbo.Departments
-                        WHERE DepartmentID = @DepartmentID
-                        UNION ALL
-                        SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS PID, u.Lvl + 1,
-                               TRY_CAST(d.[Type] AS INT) AS DType
-                        FROM dbo.Departments d
-                        INNER JOIN UpTree u ON u.PID IS NOT NULL AND d.DepartmentID = u.PID
-                    ),
-                    RootID AS (
-                        SELECT COALESCE(
-                            (SELECT TOP 1 DepartmentID FROM UpTree WHERE DType = 0 ORDER BY Lvl ASC),
-                            (SELECT TOP 1 DepartmentID FROM UpTree WHERE Lvl = 1),
-                            @DepartmentID
-                        ) AS RootDeptID
-                    ),
-                    DeptScope AS (
-                        SELECT d.DepartmentID
-                        FROM dbo.Departments d CROSS JOIN RootID r
-                        WHERE d.DepartmentID = r.RootDeptID
-                        UNION ALL
-                        SELECT d.DepartmentID
-                        FROM dbo.Departments d
-                        INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
-                                               AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
-                        ${downWhere}
-                    )
-                `;
-            } else {
-                // لا يوجد عمود Type — نشمل القسم الأب وجميع أقسامه الفرعية
-                withCte = `
-                    WITH ParentID AS (
-                        SELECT COALESCE(
-                            TRY_CAST((SELECT TOP 1 ${parentCol} FROM dbo.Departments WHERE DepartmentID = @DepartmentID AND ${parentCol} IS NOT NULL) AS INT),
-                            @DepartmentID
-                        ) AS RootDeptID
-                    ),
-                    DeptScope AS (
-                        SELECT d.DepartmentID FROM dbo.Departments d CROSS JOIN ParentID p WHERE d.DepartmentID = p.RootDeptID
-                        UNION ALL
-                        SELECT d.DepartmentID
-                        FROM dbo.Departments d
-                        INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
-                                               AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
-                    )
-                `;
-            }
-            deptFilter = 'EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)';
-        } else {
-            deptFilter = 'jv.DepartmentID = @DepartmentID';
-        }
-
-        // جلب الحامل الحالي بـ LEFT JOIN بسيط (بدون OUTER APPLY)
         const assJoin = s.HasAssignments
             ? `LEFT JOIN dbo.Assignments ca ON ca.VacancyID = jv.VacancyID ${s.HasAssIsCurrent ? 'AND ca.IsCurrent = 1' : ''}
                LEFT JOIN dbo.Users u ON u.UserID = ca.UserID`
             : '';
-
         const personName = s.HasAssignments ? 'u.FullName' : 'CAST(NULL AS NVARCHAR(200))';
         const personId   = s.HasAssignments ? 'ca.UserID'  : 'CAST(NULL AS NVARCHAR(50))';
 
@@ -168,22 +158,15 @@ exports.listByDepartmentScope = async (req, res) => {
                 ${personName} AS CurrentUserFullName
             FROM dbo.JobVacancies jv
             ${assJoin}
-            WHERE ${deptFilter}
+            WHERE jv.DepartmentID IN (${inClause})
             ${isActiveFilter}
             ORDER BY FullName
-            OPTION (MAXRECURSION 100)
         `;
 
-        builtQuery = withCte ? `${withCte}\n${mainSql}` : mainSql;
-
-        const result = await pool.request()
-            .input('DepartmentID', sql.Int, departmentId)
-            .query(builtQuery);
-
+        const result = await pool.request().query(mainSql);
         res.status(200).json(result.recordset || []);
     } catch (err) {
         console.error('LIST VACANCIES BY DEPT SCOPE ERROR:', err.message);
-        console.error('SQL used:\n', builtQuery);
         res.status(500).send({ message: 'Error fetching assignable users', detail: err.message });
     }
 };
@@ -208,6 +191,25 @@ exports.listByDepartment = async (req, res) => {
         const nameCol     = s.HasVacName ? 'jv.Name' : `CAST(jv.VacancyID AS NVARCHAR(50))`;
         const isActiveCol = s.HasVacIsActive ? 'jv.IsActive' : 'CAST(1 AS BIT)';
         const deptFilter  = s.HasVacDept ? 'jv.DepartmentID = @DepartmentID' : '1 = 0';
+
+        // فحص وجود جدول Ranks وعمود Name فيه
+        const ranksProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN OBJECT_ID('dbo.Ranks','U')           IS NOT NULL THEN 1 ELSE 0 END AS HasRanks,
+                CASE WHEN COL_LENGTH('dbo.Ranks','Name')        IS NOT NULL THEN 1 ELSE 0 END AS HasRankName,
+                CASE WHEN COL_LENGTH('dbo.Ranks','RankName')    IS NOT NULL THEN 1 ELSE 0 END AS HasRankRankName
+        `);
+        const rp = ranksProbe.recordset[0] || {};
+        const rankNameCol = rp.HasRankName ? 'rk.Name' : (rp.HasRankRankName ? 'rk.RankName' : null);
+
+        const rankJoin = (s.HasVacRank && rp.HasRanks && rankNameCol)
+            ? `LEFT JOIN dbo.Ranks rk ON rk.RankID = jv.Rank`
+            : '';
+        const rankSelect = (s.HasVacRank && rp.HasRanks && rankNameCol)
+            ? `, jv.Rank AS RankID, ${rankNameCol} AS RankName`
+            : s.HasVacRank
+                ? `, jv.Rank AS RankID, CAST(NULL AS NVARCHAR(200)) AS RankName`
+                : `, CAST(NULL AS INT) AS RankID, CAST(NULL AS NVARCHAR(200)) AS RankName`;
 
         const assignJoin = s.HasAssignments ? `
             OUTER APPLY (
@@ -241,8 +243,10 @@ exports.listByDepartment = async (req, res) => {
                     ${nameCol}     AS Name,
                     ${isActiveCol} AS IsActive,
                     ${s.HasVacDept ? 'jv.DepartmentID' : 'CAST(NULL AS INT) AS DepartmentID'}
+                    ${rankSelect}
                     ${selectUser}
                 FROM dbo.JobVacancies jv
+                ${rankJoin}
                 ${assignJoin}
                 WHERE ${deptFilter}
                 ORDER BY ${s.HasVacName ? 'jv.Name' : 'jv.VacancyID'}
@@ -256,6 +260,29 @@ exports.listByDepartment = async (req, res) => {
 };
 
 // ---- GET /api/vacancies/department/:departmentId/independent-scope ----
+// ---- GET /api/vacancies/all ----
+// يُرجع كل المناصب النشطة مع DepartmentID لبناء المسار في الواجهة
+exports.listAllVacancies = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'DB not available' });
+    try {
+        const s = await probeVacancySchema(pool);
+        if (!s.HasVacancies) return res.status(200).json([]);
+        const nameCol = s.HasVacName ? 'jv.Name' : `CAST(jv.VacancyID AS NVARCHAR(50))`;
+        const activeFilter = s.HasVacIsActive ? 'WHERE (jv.IsActive = 1 OR jv.IsActive IS NULL)' : '';
+        const deptCol = s.HasVacDept ? 'jv.DepartmentID' : 'CAST(NULL AS INT) AS DepartmentID';
+        const result = await pool.request().query(`
+            SELECT jv.VacancyID, ${nameCol} AS Name, ${deptCol}
+            FROM dbo.JobVacancies jv
+            ${activeFilter}
+            ORDER BY ${s.HasVacName ? 'jv.Name' : 'jv.VacancyID'}
+        `);
+        res.status(200).json(result.recordset || []);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching vacancies', detail: err.message });
+    }
+};
+
 // يصعد الهرمية حتى أقرب قسم Type=1 (مستقل) ثم يُعيد جميع مناصبه وأقسامه الفرعية.
 exports.listByIndependentDepartment = async (req, res) => {
     const pool = req.app.locals.db;
@@ -698,19 +725,31 @@ exports.deleteVacancy = async (req, res) => {
         return res.status(400).json({ message: 'id must be an integer.' });
     }
 
+    const transaction = new sql.Transaction(pool);
     try {
-        await pool.request()
-            .input('VacancyID', sql.Int, vacancyId)
-            .query(`DELETE FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+        const probe = await pool.request().query(`
+            SELECT
+                CASE WHEN OBJECT_ID('dbo.Assignments','U')  IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+                CASE WHEN OBJECT_ID('dbo.VacancyRanks','U') IS NOT NULL THEN 1 ELSE 0 END AS HasVacRanks
+        `);
+        const p = probe.recordset[0] || {};
+
+        await transaction.begin();
+        if (p.HasVacRanks) {
+            await new sql.Request(transaction).input('VID', sql.Int, vacancyId)
+                .query(`DELETE FROM dbo.VacancyRanks WHERE VacancyID = @VID`);
+        }
+        if (p.HasAssignments) {
+            await new sql.Request(transaction).input('VID', sql.Int, vacancyId)
+                .query(`DELETE FROM dbo.Assignments WHERE VacancyID = @VID`);
+        }
+        await new sql.Request(transaction).input('VID', sql.Int, vacancyId)
+            .query(`DELETE FROM dbo.JobVacancies WHERE VacancyID = @VID`);
+        await transaction.commit();
         res.status(200).json({ message: 'Vacancy deleted successfully' });
     } catch (err) {
+        try { await transaction.rollback(); } catch (_) {}
         console.error('DELETE VACANCY ERROR:', err);
-        if (err.number === 547) {
-            return res.status(400).send({
-                message: 'لا يمكن حذف المنصب لأنه مرتبط بإسنادات أو مهام.',
-                detail: err.message,
-            });
-        }
         res.status(500).send({ message: 'Error deleting vacancy', detail: err.message });
     }
 };
@@ -1094,5 +1133,108 @@ exports.listUnassignedUsers = async (req, res) => {
     } catch (err) {
         console.error('LIST UNASSIGNED USERS ERROR:', err);
         res.status(500).send({ message: 'Error fetching unassigned users', detail: err.message });
+    }
+};
+
+// ---- GET /api/vacancies/:id/usage ----
+// يُرجع عدد المهام/المهام الفرعية/الإسنادات المرتبطة بهذا المنصب
+exports.checkVacancyUsage = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'DB unavailable' });
+    const vacancyId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(vacancyId)) return res.status(400).json({ message: 'id must be integer' });
+    try {
+        const probe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Tasks','AssignedToVacancyID')    IS NOT NULL THEN 1 ELSE 0 END AS HasTasksVacID,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubsVacID,
+                CASE WHEN OBJECT_ID('dbo.Assignments','U')                 IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+                CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')        IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent
+        `);
+        const p = probe.recordset[0] || {};
+        let tasks = 0, subtasks = 0, assignments = 0;
+
+        if (p.HasTasksVacID) {
+            const r = await pool.request().input('VID', sql.Int, vacancyId)
+                .query(`SELECT COUNT(*) AS cnt FROM dbo.Tasks WHERE AssignedToVacancyID = @VID`);
+            tasks = r.recordset[0]?.cnt || 0;
+        }
+        if (p.HasSubsVacID) {
+            const r = await pool.request().input('VID', sql.Int, vacancyId)
+                .query(`SELECT COUNT(*) AS cnt FROM dbo.Subtasks WHERE AssignedToVacancyID = @VID`);
+            subtasks = r.recordset[0]?.cnt || 0;
+        }
+        if (p.HasAssignments) {
+            const activeWhere = p.HasAssIsCurrent ? 'AND IsCurrent = 1' : '';
+            const r = await pool.request().input('VID', sql.Int, vacancyId)
+                .query(`SELECT COUNT(*) AS cnt FROM dbo.Assignments WHERE VacancyID = @VID ${activeWhere}`);
+            assignments = r.recordset[0]?.cnt || 0;
+        }
+
+        const total = tasks + subtasks + assignments;
+        // الإسنادات وحدها لا تمنع الحذف — يتم تنظيفها تلقائياً عند الحذف المباشر
+        res.status(200).json({ tasks, subtasks, assignments, total, canDelete: tasks === 0 && subtasks === 0 });
+    } catch (err) {
+        console.error('CHECK VACANCY USAGE ERROR:', err);
+        res.status(500).json({ message: 'Error checking usage', detail: err.message });
+    }
+};
+
+// ---- POST /api/vacancies/:id/transfer-and-delete ----
+// Body: { targetVacancyId: number }
+// ينقل جميع مراجع المنصب المصدر إلى المنصب الهدف ثم يحذفه
+exports.transferAndDeleteVacancy = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'DB unavailable' });
+    const vacancyId = parseInt(req.params.id, 10);
+    const targetId  = parseInt(req.body?.targetVacancyId, 10);
+    if (!Number.isInteger(vacancyId) || !Number.isInteger(targetId))
+        return res.status(400).json({ message: 'vacancyId and targetVacancyId must be integers' });
+    if (vacancyId === targetId)
+        return res.status(400).json({ message: 'Source and target must be different' });
+
+    const transaction = new sql.Transaction(pool);
+    try {
+        const probe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Tasks','AssignedToVacancyID')    IS NOT NULL THEN 1 ELSE 0 END AS HasTasksVacID,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubsVacID,
+                CASE WHEN OBJECT_ID('dbo.Assignments','U')                 IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+                CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')        IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent,
+                CASE WHEN OBJECT_ID('dbo.VacancyRanks','U')                IS NOT NULL THEN 1 ELSE 0 END AS HasVacRanks
+        `);
+        const p = probe.recordset[0] || {};
+
+        await transaction.begin();
+
+        if (p.HasTasksVacID) {
+            await new sql.Request(transaction)
+                .input('SRC', sql.Int, vacancyId).input('TGT', sql.Int, targetId)
+                .query(`UPDATE dbo.Tasks SET AssignedToVacancyID = @TGT WHERE AssignedToVacancyID = @SRC`);
+        }
+        if (p.HasSubsVacID) {
+            await new sql.Request(transaction)
+                .input('SRC', sql.Int, vacancyId).input('TGT', sql.Int, targetId)
+                .query(`UPDATE dbo.Subtasks SET AssignedToVacancyID = @TGT WHERE AssignedToVacancyID = @SRC`);
+        }
+        if (p.HasAssignments) {
+            const closeWhere = p.HasAssIsCurrent ? 'AND IsCurrent = 1' : '';
+            await new sql.Request(transaction).input('SRC', sql.Int, vacancyId)
+                .query(`UPDATE dbo.Assignments SET IsCurrent = 0 WHERE VacancyID = @SRC ${closeWhere}`);
+        }
+        if (p.HasVacRanks) {
+            await new sql.Request(transaction).input('SRC', sql.Int, vacancyId)
+                .query(`DELETE FROM dbo.VacancyRanks WHERE VacancyID = @SRC`);
+        }
+
+        await new sql.Request(transaction).input('SRC', sql.Int, vacancyId)
+            .query(`DELETE FROM dbo.JobVacancies WHERE VacancyID = @SRC`);
+
+        await transaction.commit();
+        res.status(200).json({ message: 'Vacancy transferred and deleted successfully' });
+    } catch (err) {
+        try { await transaction.rollback(); } catch (_) {}
+        console.error('TRANSFER AND DELETE VACANCY ERROR:', err);
+        res.status(500).json({ message: 'Error during transfer', detail: err.message });
     }
 };

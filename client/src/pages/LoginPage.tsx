@@ -88,8 +88,7 @@ const LoginPage = ({ onLoginSuccess }: LoginPageProps) => {
 
     } catch (err: any) {
       setError(err.message);
-    } finally {
-      // يتم ضبط isLoading حسب التدفق أعلاه
+      setIsLoading(false);
     }
   };
 

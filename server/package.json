@@ -37,7 +37,8 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "mssql": "^10.0.2",
-    "path": "^0.12.7"
+    "path": "^0.12.7",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@yao-pkg/pkg": "^6.19.0",

@@ -1,6 +1,7 @@
 // src/components/DepartmentManagement.tsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { Trash2, Edit, Plus, ChevronDown, ChevronRight, Briefcase, UserPlus, UserMinus, X, Check } from 'lucide-react';
+import { Trash2, Edit, Plus, ChevronDown, ChevronRight, Briefcase, UserPlus, UserMinus, X, Check, Upload, FileSpreadsheet } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import type { CurrentUser } from '../types';
 
 type Department = {
@@ -20,6 +21,8 @@ type Vacancy = {
   Name: string;
   IsActive?: boolean | number | null;
   DepartmentID: number | null;
+  RankID?: number | null;
+  RankName?: string | null;
   CurrentAssignmentID?: number | null;
   CurrentUserID?: string | null;
   CurrentUserFullName?: string | null;
@@ -40,6 +43,14 @@ type UserOption = {
   CurrentVacancyName?: string | null;
   CurrentDepartmentID?: number | null;
   CurrentDepartmentName?: string | null;
+};
+
+type UsageInfo = { tasks: number; subtasks: number; assignments: number; total: number };
+type TransferMode = {
+  kind: 'vacancy' | 'department';
+  sourceId: number;
+  sourceName: string;
+  usage: UsageInfo;
 };
 
 // يصعد في تسلسل الأقسام من startId حتى يجد قسماً مستقلاً (Type=1)
@@ -100,6 +111,20 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
   const [candidatesLoading, setCandidatesLoading] = useState<boolean>(false);
   const [candidateSearch, setCandidateSearch] = useState<string>('');
   const [selectedUserIdToAssign, setSelectedUserIdToAssign] = useState<string>('');
+
+  // ---- حالة النقل قبل الحذف ----
+  const [transferMode, setTransferMode] = useState<TransferMode | null>(null);
+  const [transferVacancies, setTransferVacancies] = useState<Vacancy[]>([]);
+  const [transferTargetId, setTransferTargetId] = useState<number | ''>('');
+  const [transferSearch, setTransferSearch] = useState('');
+  const [transferLoading, setTransferLoading] = useState(false);
+  const [transferDeptIdForPanel, setTransferDeptIdForPanel] = useState<number | ''>('');
+
+  // ---- استيراد من إكسل ----
+  const [showImportPanel, setShowImportPanel] = useState(false);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importResult, setImportResult] = useState<{ deptCount: number; vacCount: number } | null>(null);
+  const importFileRef = React.useRef<HTMLInputElement>(null);
 
   // حساب نطاق مدير القسم (Role=2):
   // يصعد من قسم المستخدم حتى يجد القسم المستقل (Type=1) ثم يأخذ كامل شجرته
@@ -248,19 +273,33 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
     fetchDepartments();
   };
 
-  const handleDelete = async (id: number) => {
-    if (window.confirm('هل أنت متأكد؟ قد لا تتمكن من حذف قسم مرتبط بمستخدمين.')) {
-      try {
+  const handleDelete = async (id: number, name: string) => {
+    try {
+      const usageRes = await fetch(`/api/departments/${id}/usage`);
+      if (!usageRes.ok) { alert('تعذّر التحقق من استخدام القسم'); return; }
+      const usage = await usageRes.json();
+
+      if (usage.childDepts > 0) {
+        alert('لا يمكن حذف القسم لأنه يحتوي على أقسام فرعية. احذفها أولاً.');
+        return;
+      }
+
+      if (usage.canDelete) {
+        if (!window.confirm(`هل أنت متأكد من حذف قسم «${name}»؟`)) return;
         const response = await fetch(`/api/departments/${id}`, { method: 'DELETE' });
-        if (!response.ok) {
-            const errorData = await response.json();
-            alert(errorData.message);
-        }
+        if (!response.ok) { const e = await response.json(); alert(e.message); return; }
         if (selectedDepartmentId === id) setSelectedDepartmentId(null);
         fetchDepartments();
-      } catch (error) {
-        alert("An unexpected error occurred.");
+      } else {
+        // يوجد مهام — افتح لوحة النقل (المستخدم يختار القسم والمنصب في اللوحة)
+        setTransferVacancies([]);
+        setTransferTargetId('');
+        setTransferSearch('');
+        setTransferDeptIdForPanel('');
+        setTransferMode({ kind: 'department', sourceId: id, sourceName: name, usage });
       }
+    } catch (error) {
+      alert('حدث خطأ غير متوقع.');
     }
   };
 
@@ -403,20 +442,77 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
     }
   };
 
-  const handleDeleteVacancy = async (vacancyId: number) => {
-    if (!window.confirm('سيتم حذف المنصب نهائياً. هل تريد المتابعة؟')) return;
+  const handleDeleteVacancy = async (vacancyId: number, vacancyName: string) => {
     try {
-      const res = await fetch(`/api/vacancies/${vacancyId}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        const detail = err.detail ? `\n\nالتفاصيل: ${err.detail}` : '';
-        alert(`${err.message || 'تعذّر حذف المنصب'}${detail}`);
-        return;
+      const usageRes = await fetch(`/api/vacancies/${vacancyId}/usage`);
+      if (!usageRes.ok) { alert('تعذّر التحقق من استخدام المنصب'); return; }
+      const usage = await usageRes.json();
+
+      if (usage.canDelete) {
+        if (!window.confirm(`هل أنت متأكد من حذف منصب «${vacancyName}»؟`)) return;
+        const res = await fetch(`/api/vacancies/${vacancyId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          const detail = err.detail ? `\n\nالتفاصيل: ${err.detail}` : '';
+          alert(`${err.message || 'تعذّر حذف المنصب'}${detail}`);
+          return;
+        }
+        if (selectedDepartmentId != null) fetchVacancies(selectedDepartmentId);
+      } else {
+        // يوجد مهام — افتح لوحة النقل
+        setTransferVacancies([]);
+        setTransferTargetId('');
+        setTransferSearch('');
+        setTransferDeptIdForPanel('');
+        setTransferMode({
+          kind: 'vacancy',
+          sourceId: vacancyId,
+          sourceName: vacancyName,
+          usage: { tasks: usage.tasks, subtasks: usage.subtasks, assignments: usage.assignments, total: usage.total ?? (usage.tasks + usage.subtasks + usage.assignments) },
+        });
       }
-      if (selectedDepartmentId != null) fetchVacancies(selectedDepartmentId);
     } catch (err) {
       console.error(err);
       alert('حدث خطأ أثناء حذف المنصب');
+    }
+  };
+
+  const handleTransferAndDelete = async () => {
+    if (!transferMode || !transferTargetId) return;
+    if (!window.confirm('سيتم نقل المهام والإسنادات إلى المنصب المحدد ثم الحذف نهائياً. هل أنت متأكد؟')) return;
+    setTransferLoading(true);
+    try {
+      const endpoint = transferMode.kind === 'vacancy'
+        ? `/api/vacancies/${transferMode.sourceId}/transfer-and-delete`
+        : `/api/departments/${transferMode.sourceId}/transfer-and-delete`;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetVacancyId: transferTargetId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const detail = err.detail ? `\n\nالتفاصيل: ${err.detail}` : '';
+        alert(`${err.message || 'تعذّر إتمام العملية'}${detail}`);
+        return;
+      }
+      const wasKind = transferMode.kind;
+      const wasSourceId = transferMode.sourceId;
+      setTransferMode(null);
+      setTransferVacancies([]);
+      setTransferTargetId('');
+      setTransferDeptIdForPanel('');
+      if (wasKind === 'vacancy') {
+        if (selectedDepartmentId != null) fetchVacancies(selectedDepartmentId);
+      } else {
+        if (selectedDepartmentId === wasSourceId) setSelectedDepartmentId(null);
+        fetchDepartments();
+      }
+    } catch (err) {
+      console.error(err);
+      alert('حدث خطأ أثناء العملية.');
+    } finally {
+      setTransferLoading(false);
     }
   };
 
@@ -488,6 +584,46 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
     }
   };
 
+  const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || selectedDepartmentId == null) return;
+    e.target.value = '';
+    setImportLoading(true);
+    setImportResult(null);
+    try {
+      // قراءة وتحليل ملف الإكسل في المتصفح مباشرة
+      const arrayBuffer = await file.arrayBuffer();
+      const wb = XLSX.read(arrayBuffer, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows: Record<string, string>[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+      if (!rows.length) {
+        alert('الملف فارغ أو لا يحتوي على بيانات.');
+        return;
+      }
+
+      // إرسال البيانات كـ JSON (صغير الحجم مقارنةً بالملف)
+      const res = await fetch(`/api/departments/${selectedDepartmentId}/import-excel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(`فشل الاستيراد: ${data.message || ''}${data.detail ? '\n' + data.detail : ''}`);
+        return;
+      }
+      setImportResult({ deptCount: data.deptCount, vacCount: data.vacCount });
+      fetchDepartments();
+      fetchVacancies(selectedDepartmentId);
+    } catch (err) {
+      console.error(err);
+      alert('حدث خطأ أثناء قراءة الملف أو إرساله.');
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
   const renderNode = (node: TreeNode, depth: number = 0) => {
     const hasChildren = node.children.length > 0;
     const isExpanded = expanded.has(node.DepartmentID);
@@ -530,7 +666,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
               <Briefcase size={16}/>
             </button>
             <button onClick={() => setEditingDepartment(node)} className="text-blue-500 hover:text-blue-700" title="تعديل القسم"><Edit size={16}/></button>
-            {isSystemAdmin && <button onClick={() => handleDelete(node.DepartmentID)} className="text-red-500 hover:text-red-700" title="حذف القسم"><Trash2 size={16}/></button>}
+            {isSystemAdmin && <button onClick={() => handleDelete(node.DepartmentID, node.Name)} className="text-red-500 hover:text-red-700" title="حذف القسم"><Trash2 size={16}/></button>}
             <button onClick={() => handleQuickAddChild(node.DepartmentID)} className="text-green-600 hover:text-green-800" title="إضافة قسم فرعي"><Plus size={16}/></button>
           </div>
         </div>
@@ -641,6 +777,110 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
         </div>
       </div>
 
+      {/* لوحة النقل قبل الحذف */}
+      {transferMode && (
+        <div className="bg-white p-6 rounded-lg shadow border-2 border-red-300 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold text-red-700">نقل البيانات قبل الحذف</h2>
+            <button onClick={() => { setTransferMode(null); setTransferVacancies([]); setTransferTargetId(''); setTransferDeptIdForPanel(''); }} className="text-gray-500 hover:text-gray-700"><X size={18}/></button>
+          </div>
+
+          <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-800">
+            {transferMode.kind === 'vacancy' ? `المنصب «${transferMode.sourceName}»` : `القسم «${transferMode.sourceName}»`}
+            {' '}مرتبط بـ{' '}
+            {[
+              transferMode.usage.tasks > 0 ? `${transferMode.usage.tasks} مهمة` : null,
+              transferMode.usage.subtasks > 0 ? `${transferMode.usage.subtasks} مهمة فرعية` : null,
+              transferMode.usage.assignments > 0 ? `${transferMode.usage.assignments} إسناد` : null,
+            ].filter(Boolean).join(' و ')}.
+            {' '}يجب تحديد منصب آخر لنقل هذه البيانات إليه قبل الحذف.
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">القسم الهدف</label>
+              <select
+                className="w-full p-2 border rounded"
+                value={transferDeptIdForPanel}
+                onChange={(e) => {
+                  const val = e.target.value === '' ? '' : Number(e.target.value);
+                  setTransferDeptIdForPanel(val as number | '');
+                  setTransferTargetId('');
+                  setTransferVacancies([]);
+                  if (val) {
+                    fetch(`/api/vacancies/department/${val}`)
+                      .then(r => r.ok ? r.json() : [])
+                      .then(data => setTransferVacancies(Array.isArray(data) ? data : []))
+                      .catch(() => setTransferVacancies([]));
+                  }
+                }}
+              >
+                <option value="">-- اختر قسماً --</option>
+                {departments
+                  .filter(d => transferMode.kind === 'department' ? d.DepartmentID !== transferMode.sourceId : true)
+                  .map(d => <option key={d.DepartmentID} value={d.DepartmentID}>{d.Name}</option>)}
+              </select>
+            </div>
+
+            {transferDeptIdForPanel !== '' && transferVacancies.length === 0 && (
+              <p className="text-sm text-gray-500">لا توجد مناصب في هذا القسم.</p>
+            )}
+
+            {transferVacancies.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">المنصب الهدف</label>
+                <input
+                  type="text"
+                  placeholder="ابحث في المناصب..."
+                  value={transferSearch}
+                  onChange={(e) => setTransferSearch(e.target.value)}
+                  className="w-full p-2 border rounded mb-2"
+                />
+                <div className="max-h-52 overflow-y-auto border rounded bg-white">
+                  <ul className="divide-y">
+                    {transferVacancies
+                      .filter(v => {
+                        if (transferMode.kind === 'vacancy' && v.VacancyID === transferMode.sourceId) return false;
+                        if (!transferSearch) return true;
+                        return v.Name.toLowerCase().includes(transferSearch.toLowerCase());
+                      })
+                      .map(v => (
+                        <li
+                          key={v.VacancyID}
+                          onClick={() => setTransferTargetId(v.VacancyID)}
+                          className={`cursor-pointer p-2 hover:bg-primary/10 ${transferTargetId === v.VacancyID ? 'bg-primary/15 border-r-4 border-primary' : ''}`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium">{v.Name}</span>
+                            {v.CurrentUserFullName && <span className="text-xs text-gray-500">{v.CurrentUserFullName}</span>}
+                            {transferTargetId === v.VacancyID && <Check size={16} className="text-primary shrink-0"/>}
+                          </div>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              onClick={handleTransferAndDelete}
+              disabled={!transferTargetId || transferLoading}
+              className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+            >
+              {transferLoading ? 'جارٍ النقل والحذف...' : <><Trash2 size={16}/> نقل وحذف</>}
+            </button>
+            <button
+              onClick={() => { setTransferMode(null); setTransferVacancies([]); setTransferTargetId(''); setTransferDeptIdForPanel(''); }}
+              className="text-gray-600 hover:text-gray-800 px-4 py-2 border rounded"
+            >
+              إلغاء
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* لوحة إدارة المناصب للقسم المحدد */}
       {selectedDepartment && (
         <div className="bg-white p-6 rounded-lg shadow border-2 border-primary/30">
@@ -648,13 +888,70 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
             <h2 className="text-2xl font-semibold flex items-center gap-2">
               <Briefcase size={22} /> مناصب قسم: <span className="text-primary">{selectedDepartment.Name}</span>
             </h2>
-            <button
-              onClick={() => setSelectedDepartmentId(null)}
-              className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1"
-            >
-              <X size={16}/> إغلاق
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => { setShowImportPanel(p => !p); setImportResult(null); }}
+                className="text-sm text-emerald-600 hover:text-emerald-800 border border-emerald-300 rounded px-3 py-1 flex items-center gap-1"
+                title="استيراد أقسام من ملف إكسل"
+              >
+                <FileSpreadsheet size={15}/> استيراد إكسل
+              </button>
+              <button
+                onClick={() => setSelectedDepartmentId(null)}
+                className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1"
+              >
+                <X size={16}/> إغلاق
+              </button>
+            </div>
           </div>
+
+          {/* لوحة استيراد إكسل */}
+          {showImportPanel && (
+            <div className="mb-5 p-4 border-2 border-emerald-200 rounded-lg bg-emerald-50 space-y-3">
+              <h3 className="font-semibold text-emerald-800 flex items-center gap-2">
+                <FileSpreadsheet size={18}/> استيراد أقسام من ملف إكسل
+              </h3>
+              <p className="text-xs text-gray-600">
+                الأعمدة المتوقعة في الملف: <strong>PositionID · Parent_PositionID · Department_Ar · Type · Position_Ar · Postion_Rnk</strong>
+              </p>
+              <p className="text-xs text-gray-500">
+                الأقسام التي أبوها غير موجود في الملف ستُلحق مباشرةً بـ «{selectedDepartment.Name}».
+              </p>
+
+              <input
+                ref={importFileRef}
+                type="file"
+                accept=".xlsx,.xls"
+                className="hidden"
+                onChange={handleImportExcel}
+              />
+
+              {importLoading ? (
+                <p className="text-sm text-emerald-700 flex items-center gap-2">
+                  <span className="animate-spin">⏳</span> جارٍ المعالجة...
+                </p>
+              ) : importResult ? (
+                <div className="bg-white border border-emerald-300 rounded p-3 text-sm text-emerald-800 space-y-1">
+                  <p className="font-semibold">✅ تم الاستيراد بنجاح</p>
+                  <p>الأقسام المضافة: <strong>{importResult.deptCount}</strong></p>
+                  <p>المناصب المضافة: <strong>{importResult.vacCount}</strong></p>
+                  <button
+                    onClick={() => { setImportResult(null); }}
+                    className="mt-2 text-xs text-emerald-600 hover:underline"
+                  >
+                    استيراد ملف آخر
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => importFileRef.current?.click()}
+                  className="bg-emerald-600 text-white px-4 py-2 rounded hover:bg-emerald-700 flex items-center gap-2 text-sm"
+                >
+                  <Upload size={15}/> اختر ملف إكسل
+                </button>
+              )}
+            </div>
+          )}
 
           {/* نموذج إضافة منصب جديد */}
           <form onSubmit={handleCreateVacancy} className="mb-4 space-y-2">
@@ -749,7 +1046,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                               )
                             ) : (
                               <span className="text-sm text-content-secondary">
-                                {ranksMap.get(v.VacancyID) || <span className="text-gray-300">—</span>}
+                                {ranksMap.get(v.VacancyID) || v.RankName || <span className="text-gray-300">—</span>}
                               </span>
                             )}
                           </td>
@@ -789,7 +1086,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                   <button onClick={() => handleUnassign(v.VacancyID)} className="text-orange-600 hover:text-orange-800" title="تفريغ المنصب"><UserMinus size={16}/></button>
                                 )}
                                 <button onClick={() => { setEditingVacancy(v); setEditingVacancyRank(ranksMap.get(v.VacancyID) || ''); }} className="text-blue-500 hover:text-blue-700" title="تعديل"><Edit size={16}/></button>
-                                {isSystemAdmin && <button onClick={() => handleDeleteVacancy(v.VacancyID)} className="text-red-500 hover:text-red-700" title="حذف"><Trash2 size={16}/></button>}
+                                {isSystemAdmin && <button onClick={() => handleDeleteVacancy(v.VacancyID, v.Name)} className="text-red-500 hover:text-red-700" title="حذف"><Trash2 size={16}/></button>}
                               </>
                             )}
                           </td>

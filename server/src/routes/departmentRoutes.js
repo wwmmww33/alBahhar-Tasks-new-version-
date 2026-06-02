@@ -5,4 +5,7 @@ router.get('/', departmentController.getAllDepartments);
 router.post('/', departmentController.createDepartment);
 router.put('/:id', departmentController.updateDepartment);
 router.delete('/:id', departmentController.deleteDepartment);
+router.get('/:id/usage', departmentController.checkDepartmentUsage);
+router.post('/:id/transfer-and-delete', departmentController.transferAndDeleteDepartment);
+router.post('/:id/import-excel', departmentController.importDepartmentsFromExcel);
 module.exports = router;

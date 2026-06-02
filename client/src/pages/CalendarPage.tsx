@@ -795,8 +795,10 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                 const visibleShared = viewFilter !== 'personal' ? sharedForDay : [];
                 const visiblePersonal = viewFilter !== 'shared' ? personalForDay : [];
                 const visibleComments = viewFilter !== 'shared' ? commentsForDay : [];
+                // hasEvents = true فقط للأيام التى تحتوى على محتوى حقيقي
+                // (أيام الامتداد middle/end لا تُلوَّن — يكفيها الخط)
                 const hasEvents =
-                  visibleShared.length > 0 ||
+                  visibleShared.some(it => it._spanPos === 'single' || it._spanPos === 'start') ||
                   visiblePersonal.length > 0 ||
                   visibleComments.length > 0;
                 const todayKey = toLocalYMD(new Date());

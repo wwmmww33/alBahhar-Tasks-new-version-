@@ -134,62 +134,56 @@ exports.login = async (req, res) => {
 };
 exports.registerRequest = async (req, res) => {
     const pool = req.app.locals.db;
-    const { userId, password, fullName, departmentId, vacancyName, rank } = req.body;
+    const { userId, password, fullName, vacancyId } = req.body;
+    if (!userId || !password || !fullName)
+        return res.status(400).json({ message: 'userId و password و fullName مطلوبة.' });
     try {
         const hashed = encryptionConfig.hashPassword(password).combined;
 
         const probe = await pool.request().query(`
             SELECT
-                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','VacancyName') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyName,
-                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','Rank')        IS NOT NULL THEN 1 ELSE 0 END AS HasRank,
-                ISNULL(
-                    (SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
-                     WHERE TABLE_NAME='RegistrationRequests' AND COLUMN_NAME='Rank'),
-                    ''
-                ) AS RankDataType
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','VacancyID')   IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyID,
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasDeptID,
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','VacancyName') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyName
         `);
         const s = probe.recordset[0] || {};
-        const rankColIsNumeric = ['int','bigint','smallint','tinyint','numeric','decimal'].includes(
-            (s.RankDataType || '').toLowerCase()
-        );
 
-        const cols = ['UserID', 'PasswordHash', 'FullName', 'DepartmentID'];
-        const vals = ['@UserID', '@PasswordHash', '@FullName', '@DepartmentID'];
+        // استخراج DepartmentID من المنصب إذا اختار المستخدم منصباً
+        let deptId = null;
+        let vacancyName = null;
+        if (vacancyId) {
+            const vacRes = await pool.request()
+                .input('VID', sql.Int, parseInt(vacancyId, 10))
+                .query(`SELECT TOP 1 DepartmentID, Name FROM dbo.JobVacancies WHERE VacancyID = @VID`)
+                .catch(() => null);
+            deptId = vacRes?.recordset[0]?.DepartmentID ?? null;
+            vacancyName = vacRes?.recordset[0]?.Name ?? null;
+        }
+
+        const cols = ['UserID', 'PasswordHash', 'FullName'];
+        const vals = ['@UserID', '@PasswordHash', '@FullName'];
         const reqq = pool.request()
             .input('UserID', sql.NVarChar, userId)
             .input('PasswordHash', sql.NVarChar, hashed)
-            .input('FullName', sql.NVarChar, fullName)
-            .input('DepartmentID', sql.Int, departmentId);
+            .input('FullName', sql.NVarChar, fullName);
 
-        if (s.HasVacancyName && vacancyName && String(vacancyName).trim()) {
-            cols.push('VacancyName');
-            vals.push('@VacancyName');
-            reqq.input('VacancyName', sql.NVarChar, String(vacancyName).trim());
+        if (s.HasDeptID) {
+            cols.push('DepartmentID'); vals.push('@DepartmentID');
+            reqq.input('DepartmentID', sql.Int, deptId);
         }
-        if (s.HasRank && rank && String(rank).trim()) {
-            if (rankColIsNumeric) {
-                // نبحث عن RankID من جدول Ranks بالاسم
-                const rankLookup = await pool.request()
-                    .input('RankLabel', sql.NVarChar, String(rank).trim())
-                    .query(`SELECT TOP 1 RankID FROM dbo.Ranks
-                            WHERE Name = @RankLabel OR RankName = @RankLabel`).catch(() => null);
-                const rankId = rankLookup?.recordset[0]?.RankID ?? null;
-                if (rankId != null) {
-                    cols.push('Rank');
-                    vals.push('@Rank');
-                    reqq.input('Rank', sql.Int, rankId);
-                }
-            } else {
-                cols.push('Rank');
-                vals.push('@Rank');
-                reqq.input('Rank', sql.NVarChar, String(rank).trim());
-            }
+        if (s.HasVacancyID && vacancyId) {
+            cols.push('VacancyID'); vals.push('@VacancyID');
+            reqq.input('VacancyID', sql.Int, parseInt(vacancyId, 10));
+        }
+        if (s.HasVacancyName && vacancyName) {
+            cols.push('VacancyName'); vals.push('@VacancyName');
+            reqq.input('VacancyName', sql.NVarChar, vacancyName);
         }
 
         await reqq.query(`INSERT INTO RegistrationRequests (${cols.join(',')}) VALUES (${vals.join(',')})`);
-        res.status(201).json({ message: 'Registration request submitted successfully. Waiting for admin approval.' });
+        res.status(201).json({ message: 'تم إرسال طلب التسجيل بنجاح. في انتظار موافقة المدير.' });
     } catch (error) {
         console.error('REGISTER ERROR:', error);
-        res.status(500).send({ message: 'Failed to submit registration request' });
+        res.status(500).send({ message: 'فشل إرسال طلب التسجيل' });
     }
 };

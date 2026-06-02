@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(node -e \"require\\('./src/controllers/userController'\\)\")",
-      "Bash(node -e \"require\\('./src/routes/userRoutes'\\)\")"
+      "Bash(node -e \"require\\('./src/routes/userRoutes'\\)\")",
+      "Bash(node build.mjs)",
+      "Bash(npx @yao-pkg/pkg bundle.js --targets node18-win-x64 --output release/bahar.exe)",
+      "Bash(dir \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\server\\\\release\\\\bahar.exe\")",
+      "Bash(Test-Path \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\server\\\\release\\\\bahar.exe\")",
+      "Bash(cmd /c build.bat)",
+      "Bash(Get-Item \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\server\\\\release\\\\bahar.exe\")",
+      "Bash(Select-Object Name, Length, LastWriteTime)",
+      "Bash(node -e \"require\\('xlsx'\\); console.log\\('ok'\\)\")"
     ]
   }
 }

@@ -10,7 +10,17 @@ const port = process.env.PORT || 5001;
 
 // --- Middlewares ---
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
+// معالجة فشل تحليل الـ body (مثل تجاوز الحجم أو JSON مشوّه)
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ message: 'حجم الطلب كبير جداً' });
+  }
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ message: 'تنسيق البيانات غير صحيح' });
+  }
+  next(err);
+});
 
 // تهيئة خدمة الملفات الثابتة للواجهة الأمامية (dist) بمسارات احتياطية مرنة
 const exeDir = process.pkg ? path.dirname(process.execPath) : null;
@@ -67,7 +77,8 @@ const {
   ensureTaskUrlColumn,
   ensureTaskQueryPerformanceIndexes,
   ensureSubtaskEndDateColumn,
-  ensureUserRolesTable
+  ensureUserRolesTable,
+  ensureRegistrationRequestsVacancyID,
 } = require('./utils/dbMigrations');
 
 
@@ -89,10 +100,20 @@ app.use('/api/vacancies', vacancyRoutes);
 app.use('/api/ranks', ranksRoutes);
 
 
-// --- 3. المسار الشامل (Catch-all) يجب أن يكون هو الأخير دائماً ---
-// إعادة تفعيل مسار SPA لإرجاع index.html لأي طلب غير API
+// --- 3. 404 لمسارات الـ API غير الموجودة ---
+app.all('/api/*', (req, res) => {
+  res.status(404).json({ message: `المسار ${req.method} ${req.path} غير موجود` });
+});
+
+// --- 4. المسار الشامل للـ SPA ---
 app.get('*', (req, res) => {
   res.sendFile(path.join(distDir, 'index.html'));
+});
+
+// --- معالج الأخطاء العام ---
+app.use((err, req, res, next) => {
+  console.error('SERVER ERROR:', err);
+  res.status(500).json({ message: 'خطأ في الخادم', detail: err.message });
 });
 
 
@@ -161,6 +182,13 @@ const startServer = async () => {
       await ensureUserRolesTable(pool);
     } catch (userRolesErr) {
       console.error('⚠️ Database migration (UserRoles) failed. Server continues running.', userRolesErr);
+    }
+
+    // --- عمود VacancyID في طلبات التسجيل ---
+    try {
+      await ensureRegistrationRequestsVacancyID(pool);
+    } catch (regVacErr) {
+      console.error('⚠️ Database migration (RegistrationRequests.VacancyID) failed. Server continues running.', regVacErr);
     }
     
     app.listen(port, '0.0.0.0', () => {

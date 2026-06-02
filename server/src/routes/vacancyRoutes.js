@@ -6,6 +6,9 @@ const vacancyController = require('../controllers/vacancyController');
 // GET /api/vacancies/ranks — قائمة الرتب من جدول VacancyRanks
 router.get('/ranks', vacancyController.listRanks);
 
+// GET /api/vacancies/all — كل المناصب النشطة (للتسجيل)
+router.get('/all', vacancyController.listAllVacancies);
+
 // GET /api/vacancies/candidates — كل المستخدمين النشطين (مع سياق القسم/المنصب الحالي)
 router.get('/candidates', vacancyController.listCandidates);
 
@@ -38,6 +41,12 @@ router.put('/:id/rank', vacancyController.setVacancyRank);
 
 // DELETE /api/vacancies/:id/rank — حذف رتبة منصب
 router.delete('/:id/rank', vacancyController.deleteVacancyRank);
+
+// GET /api/vacancies/:id/usage — فحص الاستخدام قبل الحذف
+router.get('/:id/usage', vacancyController.checkVacancyUsage);
+
+// POST /api/vacancies/:id/transfer-and-delete — نقل المراجع ثم الحذف
+router.post('/:id/transfer-and-delete', vacancyController.transferAndDeleteVacancy);
 
 // DELETE /api/vacancies/:id — حذف منصب
 router.delete('/:id', vacancyController.deleteVacancy);

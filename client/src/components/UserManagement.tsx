@@ -5,6 +5,7 @@ import type { CurrentUser } from '../types';
 
 type User = {
   UserID: string;
+  ServiceID?: string | null;
   FullName: string;
   DepartmentID: number | null;
   DepartmentName: string | null;
@@ -25,6 +26,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
+  const [editingServiceId, setEditingServiceId] = useState('');
   const [encryptingPasswords, setEncryptingPasswords] = useState(false);
   const [encryptResult, setEncryptResult] = useState<string | null>(null);
 
@@ -56,6 +58,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
         DepartmentID: editingUser.DepartmentID,
         IsActive: editingUser.IsActive,
         PasswordHash: newPassword,
+        ServiceID: editingServiceId.trim() || undefined,
     };
 
     await fetch(`/api/users/${editingUser.UserID}`, {
@@ -65,6 +68,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
     });
     setEditingUser(null);
     setNewPassword('');
+    setEditingServiceId('');
     fetchData();
   };
   
@@ -131,6 +135,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
             <thead className="border-b border-content/10">
               <tr>
                 <th className="p-2 font-semibold">الحالة</th>
+                <th className="p-2 font-semibold">اسم المستخدم</th>
                 <th className="p-2 font-semibold">الاسم الكامل</th>
                 <th className="p-2 font-semibold">القسم</th>
                 <th className="p-2 font-semibold">الدور</th>
@@ -149,6 +154,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
                         {user.IsActive ? <Power size={18} className="text-green-500"/> : <PowerOff size={18} className="text-red-500"/>}
                       </button>
                     </td>
+                    <td className="p-2 font-mono text-sm text-content-secondary">{user.ServiceID || <span className="text-gray-300 text-xs">—</span>}</td>
                     <td className="p-2">{user.FullName}</td>
                     <td className="p-2">{user.DepartmentName || <span className="text-xs text-gray-400">غير محدد</span>}</td>
                     <td className="p-2">
@@ -169,7 +175,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
                       )}
                     </td>
                     <td className="p-2">
-                      <button onClick={() => { setEditingUser(user); setNewPassword(''); }} className="text-primary hover:text-primary-dark">
+                      <button onClick={() => { setEditingUser(user); setNewPassword(''); setEditingServiceId(user.ServiceID || ''); }} className="text-primary hover:text-primary-dark">
                         <Edit size={16}/>
                       </button>
                     </td>
@@ -186,6 +192,16 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
         <h2 className="text-2xl font-semibold mb-4 text-content">{editingUser ? `تعديل: ${editingUser.FullName}` : 'اختر مستخدماً لتعديله'}</h2>
         {editingUser && (
           <form onSubmit={handleUpdate} className="space-y-4">
+            <div>
+              <label className="text-sm font-medium">اسم المستخدم (ServiceID)</label>
+              <input
+                type="text"
+                value={editingServiceId}
+                onChange={e => setEditingServiceId(e.target.value)}
+                placeholder="اتركه فارغاً لعدم التغيير"
+                className="w-full p-2 border rounded mt-1 bg-bkg border-content/20 font-mono text-sm"
+              />
+            </div>
             <div>
               <label className="text-sm font-medium">الاسم الكامل</label>
               <input type="text" value={editingUser.FullName} onChange={(e) => setEditingUser({...editingUser, FullName: e.target.value})} required className="w-full p-2 border rounded mt-1 bg-bkg border-content/20"/>

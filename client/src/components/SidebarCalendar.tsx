@@ -439,8 +439,13 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
               const visibleShared = viewFilter !== 'personal' ? dayItems : [];
               const visiblePersonal = viewFilter !== 'shared' ? dayPersonal : [];
               const visibleComments = viewFilter !== 'shared' ? dayComments : [];
+              // hasEvents = true فقط عندما يوجد محتوى حقيقي يُعرض في المربع
+              // (أيام الامتداد الوسطى والنهائية لا تُلوَّن — يكفيها الخط الجانبي)
               const hasEvents =
-                visibleShared.length > 0 ||
+                visibleShared.some(it => {
+                  const isFirstVisible = firstVisibleDayMap.get(it.SubtaskID) === d.key;
+                  return it._spanPos === 'single' || (isFirstVisible && it._spanPos === 'start');
+                }) ||
                 visiblePersonal.length > 0 ||
                 visibleComments.length > 0;
               const isWeekend = d.date.getDay() === 5 || d.date.getDay() === 6;
@@ -520,7 +525,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                             <button
                               type="button"
                               style={{ color }}
-                              className="font-semibold hover:underline truncate text-left"
+                              className="font-semibold hover:underline break-words text-left"
                               onClick={() => openTaskInNewTab(item.TaskID)}
                             >
                               {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
@@ -560,7 +565,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                                   <button
                                     type="button"
                                     style={{ color }}
-                                    className="font-semibold hover:underline cursor-pointer text-right w-full truncate block"
+                                    className="font-semibold hover:underline cursor-pointer text-right w-full break-words block"
                                     onClick={() => openTaskInNewTab(item.TaskID)}
                                   >
                                     {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}

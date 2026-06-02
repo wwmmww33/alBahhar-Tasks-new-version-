@@ -1,5 +1,6 @@
 // src/components/TaskCard.tsx
-import { User, Calendar, Flag, AlertTriangle, CheckSquare } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { User, Calendar, Flag, AlertTriangle, CheckSquare, ExternalLink } from 'lucide-react';
 // import { useNotification } from '../contexts/NotificationContext';
 import type { Subtask } from '../types';
 
@@ -103,8 +104,10 @@ const TaskCard: React.FC<TaskCardProps> = ({
     }
   };
 
+  const navigate = useNavigate();
+
   const getCardClassName = () => {
-    let baseClasses = 'bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 hover:shadow-md dark:hover:shadow-lg transition-all duration-200 relative';
+    let baseClasses = 'bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 hover:shadow-md dark:hover:shadow-lg transition-all duration-200 relative cursor-pointer';
 
     
     if (isSelectionMode) {
@@ -220,7 +223,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
   }
 
   return (
-    <a href={`/task/${task.TaskID}`} target="_blank" rel="noreferrer" className={getCardClassName()}>
+    <div onClick={() => navigate(`/task/${task.TaskID}`)} className={getCardClassName()}>
       <div className="p-4">
         {/* العنوان وأزرار الأولوية */}
         <div className="flex justify-between items-start mb-3">
@@ -231,8 +234,8 @@ const TaskCard: React.FC<TaskCardProps> = ({
                 <button
                   onClick={(e) => handlePriorityClick(e, 'urgent')}
                   className={`p-1 rounded transition-colors ${
-                    task.Priority === 'urgent' 
-                      ? 'bg-red-500 text-white dark:bg-red-600' 
+                    task.Priority === 'urgent'
+                      ? 'bg-red-500 text-white dark:bg-red-600'
                       : 'bg-gray-200 text-gray-600 hover:bg-red-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-red-800/50'
                   }`}
                   title="تحديد كأولوية عاجلة"
@@ -242,8 +245,8 @@ const TaskCard: React.FC<TaskCardProps> = ({
                 <button
                   onClick={(e) => handlePriorityClick(e, 'normal')}
                   className={`p-1 rounded transition-colors ${
-                    task.Priority === 'normal' 
-                      ? 'bg-blue-500 text-white dark:bg-blue-600' 
+                    task.Priority === 'normal'
+                      ? 'bg-blue-500 text-white dark:bg-blue-600'
                       : 'bg-gray-200 text-gray-600 hover:bg-blue-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-blue-800/50'
                   }`}
                   title="أولوية عادية"
@@ -252,6 +255,16 @@ const TaskCard: React.FC<TaskCardProps> = ({
                 </button>
               </div>
             )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                window.open(`/task/${task.TaskID}`, '_blank', 'noopener,noreferrer');
+              }}
+              className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-700 transition-colors"
+              title="فتح في تبويب جديد"
+            >
+              <ExternalLink size={13} />
+            </button>
             <span className={`px-3 py-1 text-xs font-semibold rounded-full ${style.bg} ${style.text}`}>
               {style.label}
             </span>
@@ -298,7 +311,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
 
         {/* تم إزالة مؤشر المهام الفرعية الجديدة لصالح نظام HasAssignmentNotifications الموحد */}
       </div>
-    </a>
+    </div>
   );
 };
 

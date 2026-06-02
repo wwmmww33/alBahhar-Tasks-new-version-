@@ -97072,52 +97072,48 @@ var require_authController = __commonJS({
     };
     exports2.registerRequest = async (req, res) => {
       const pool = req.app.locals.db;
-      const { userId, password, fullName, departmentId, vacancyName, rank } = req.body;
+      const { userId, password, fullName, vacancyId } = req.body;
+      if (!userId || !password || !fullName)
+        return res.status(400).json({ message: "userId \u0648 password \u0648 fullName \u0645\u0637\u0644\u0648\u0628\u0629." });
       try {
         const hashed = encryptionConfig.hashPassword(password).combined;
         const probe = await pool.request().query(`
             SELECT
-                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','VacancyName') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyName,
-                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','Rank')        IS NOT NULL THEN 1 ELSE 0 END AS HasRank,
-                ISNULL(
-                    (SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
-                     WHERE TABLE_NAME='RegistrationRequests' AND COLUMN_NAME='Rank'),
-                    ''
-                ) AS RankDataType
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','VacancyID')   IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyID,
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasDeptID,
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','VacancyName') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyName
         `);
         const s = probe.recordset[0] || {};
-        const rankColIsNumeric = ["int", "bigint", "smallint", "tinyint", "numeric", "decimal"].includes(
-          (s.RankDataType || "").toLowerCase()
-        );
-        const cols = ["UserID", "PasswordHash", "FullName", "DepartmentID"];
-        const vals = ["@UserID", "@PasswordHash", "@FullName", "@DepartmentID"];
-        const reqq = pool.request().input("UserID", sql2.NVarChar, userId).input("PasswordHash", sql2.NVarChar, hashed).input("FullName", sql2.NVarChar, fullName).input("DepartmentID", sql2.Int, departmentId);
-        if (s.HasVacancyName && vacancyName && String(vacancyName).trim()) {
+        let deptId = null;
+        let vacancyName = null;
+        if (vacancyId) {
+          const vacRes = await pool.request().input("VID", sql2.Int, parseInt(vacancyId, 10)).query(`SELECT TOP 1 DepartmentID, Name FROM dbo.JobVacancies WHERE VacancyID = @VID`).catch(() => null);
+          deptId = vacRes?.recordset[0]?.DepartmentID ?? null;
+          vacancyName = vacRes?.recordset[0]?.Name ?? null;
+        }
+        const cols = ["UserID", "PasswordHash", "FullName"];
+        const vals = ["@UserID", "@PasswordHash", "@FullName"];
+        const reqq = pool.request().input("UserID", sql2.NVarChar, userId).input("PasswordHash", sql2.NVarChar, hashed).input("FullName", sql2.NVarChar, fullName);
+        if (s.HasDeptID) {
+          cols.push("DepartmentID");
+          vals.push("@DepartmentID");
+          reqq.input("DepartmentID", sql2.Int, deptId);
+        }
+        if (s.HasVacancyID && vacancyId) {
+          cols.push("VacancyID");
+          vals.push("@VacancyID");
+          reqq.input("VacancyID", sql2.Int, parseInt(vacancyId, 10));
+        }
+        if (s.HasVacancyName && vacancyName) {
           cols.push("VacancyName");
           vals.push("@VacancyName");
-          reqq.input("VacancyName", sql2.NVarChar, String(vacancyName).trim());
-        }
-        if (s.HasRank && rank && String(rank).trim()) {
-          if (rankColIsNumeric) {
-            const rankLookup = await pool.request().input("RankLabel", sql2.NVarChar, String(rank).trim()).query(`SELECT TOP 1 RankID FROM dbo.Ranks
-                            WHERE Name = @RankLabel OR RankName = @RankLabel`).catch(() => null);
-            const rankId = rankLookup?.recordset[0]?.RankID ?? null;
-            if (rankId != null) {
-              cols.push("Rank");
-              vals.push("@Rank");
-              reqq.input("Rank", sql2.Int, rankId);
-            }
-          } else {
-            cols.push("Rank");
-            vals.push("@Rank");
-            reqq.input("Rank", sql2.NVarChar, String(rank).trim());
-          }
+          reqq.input("VacancyName", sql2.NVarChar, vacancyName);
         }
         await reqq.query(`INSERT INTO RegistrationRequests (${cols.join(",")}) VALUES (${vals.join(",")})`);
-        res.status(201).json({ message: "Registration request submitted successfully. Waiting for admin approval." });
+        res.status(201).json({ message: "\u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u0637\u0644\u0628 \u0627\u0644\u062A\u0633\u062C\u064A\u0644 \u0628\u0646\u062C\u0627\u062D. \u0641\u064A \u0627\u0646\u062A\u0638\u0627\u0631 \u0645\u0648\u0627\u0641\u0642\u0629 \u0627\u0644\u0645\u062F\u064A\u0631." });
       } catch (error) {
         console.error("REGISTER ERROR:", error);
-        res.status(500).send({ message: "Failed to submit registration request" });
+        res.status(500).send({ message: "\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0637\u0644\u0628 \u0627\u0644\u062A\u0633\u062C\u064A\u0644" });
       }
     };
   }
@@ -97261,19 +97257,30 @@ var require_delegationUtils = __commonJS({
     }
     async function hasActiveDelegation(pool, delegatorUserId, delegateUserId) {
       try {
-        const delegatorId = delegatorUserId == null ? "" : String(delegatorUserId).trim();
-        const delegateId = delegateUserId == null ? "" : String(delegateUserId).trim();
-        if (!delegatorId || !delegateId) return false;
-        if (delegatorId === delegateId) return true;
+        const rawDelegator = delegatorUserId == null ? "" : String(delegatorUserId).trim();
+        const rawDelegate = delegateUserId == null ? "" : String(delegateUserId).trim();
+        if (!rawDelegator || !rawDelegate) return false;
         const schema = await detectIdentitySchema(pool);
+        const resolvedDelegator = schema.isVacancy ? await resolveAccessActorId(pool, rawDelegator, schema) : rawDelegator;
+        const resolvedDelegate = schema.isVacancy ? await resolveAccessActorId(pool, rawDelegate, schema) : rawDelegate;
+        if (!resolvedDelegator || !resolvedDelegate) return false;
+        if (resolvedDelegator === resolvedDelegate) return true;
         const request = pool.request();
-        request.input("delegatorUserID", sql2.NVarChar(50), delegatorId);
-        request.input("delegateUserID", sql2.NVarChar(50), delegateId);
+        if (schema.isVacancy) {
+          const delegatorInt = parseInt(resolvedDelegator, 10);
+          const delegateInt = parseInt(resolvedDelegate, 10);
+          if (!Number.isFinite(delegatorInt) || !Number.isFinite(delegateInt)) return false;
+          request.input("delegatorID", sql2.Int, delegatorInt);
+          request.input("delegateID", sql2.Int, delegateInt);
+        } else {
+          request.input("delegatorID", sql2.NVarChar(50), resolvedDelegator);
+          request.input("delegateID", sql2.NVarChar(50), resolvedDelegate);
+        }
         const result = await request.query(`
       SELECT COUNT(*) AS Cnt
       FROM dbo.TaskDelegations
-      WHERE ${schema.delegatorCol} = @delegatorUserID
-        AND ${schema.delegateCol} = @delegateUserID
+      WHERE ${schema.delegatorCol} = @delegatorID
+        AND ${schema.delegateCol}  = @delegateID
         AND IsActive = 1
         AND StartDate <= GETDATE()
         AND (EndDate IS NULL OR EndDate >= GETDATE())
@@ -98000,18 +98007,19 @@ var require_taskController = __commonJS({
       if (p.HasDepartmentType) {
         const rootResult = await pool.request().input("DepartmentID", sql2.NVarChar, baseDepartmentId).query(`
                 ;WITH UpTree AS (
-                    SELECT DepartmentID, ${parentCol} AS ParentDepartmentID, 0 AS Depth
+                    SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS ParentDepartmentID, 0 AS Depth
                     FROM dbo.Departments
                     WHERE DepartmentID = @DepartmentID
                     UNION ALL
-                    SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
+                    SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS ParentDepartmentID, u.Depth + 1
                     FROM dbo.Departments d
-                    INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
+                    INNER JOIN UpTree u ON u.ParentDepartmentID IS NOT NULL
+                                       AND d.DepartmentID = u.ParentDepartmentID
                 )
                 SELECT TOP 1 u.DepartmentID
                 FROM UpTree u
                 INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
-                WHERE d.[Type] = 1
+                WHERE TRY_CAST(d.[Type] AS INT) = 1
                 ORDER BY u.Depth ASC
                 OPTION (MAXRECURSION 100)
             `);
@@ -98022,13 +98030,14 @@ var require_taskController = __commonJS({
       if (!rootDepartmentId || !/^\d+$/.test(String(rootDepartmentId))) return [];
       const deptTreeResult = await pool.request().input("RootDepartmentID", sql2.NVarChar, rootDepartmentId).query(`
             ;WITH DeptTree AS (
-                SELECT DepartmentID, ${parentCol} AS ParentDepartmentID
+                SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS ParentDepartmentID
                 FROM dbo.Departments
                 WHERE DepartmentID = @RootDepartmentID
                 UNION ALL
-                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
+                SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS ParentDepartmentID
                 FROM dbo.Departments d
-                INNER JOIN DeptTree dt ON d.${parentCol} = dt.DepartmentID
+                INNER JOIN DeptTree dt ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                       AND TRY_CAST(d.${parentCol} AS INT) = dt.DepartmentID
             )
             SELECT DISTINCT DepartmentID
             FROM DeptTree
@@ -98820,15 +98829,10 @@ var require_taskController = __commonJS({
       const pool = req.app.locals.db;
       const { id } = req.params;
       let { Status } = req.body;
-      const validStatuses = ["open", "in-progress", "completed", "cancelled", "external", "approved-in-progress"];
+      const validStatuses = ["open", "in-progress", "completed", "cancelled"];
       if (!Status || !validStatuses.includes(Status)) {
-        return res.status(400).json({ message: "Valid status is required (open, in-progress, completed, cancelled, external, approved-in-progress)" });
+        return res.status(400).json({ message: "Valid status is required (open, in-progress, completed, cancelled)" });
       }
-      const statusMapping = {
-        "external": "in-progress",
-        "approved-in-progress": "in-progress"
-      };
-      const dbStatus = statusMapping[Status] || Status;
       try {
         await pool.request().input("TaskID", sql2.Int, id).input("Status", sql2.NVarChar, Status).query("UPDATE Tasks SET Status = @Status WHERE TaskID = @TaskID");
         res.status(200).json({ message: "Task status updated successfully" });
@@ -99142,7 +99146,9 @@ var require_taskController = __commonJS({
               CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignNotifVacancy,
               CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentNotifVacancy,
               CASE WHEN COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskViewsVacancy,
-              CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentVacancy
+              CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentVacancy,
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasActedBy,
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy
         `);
         const s = schema.recordset[0] || {};
         const isVacancy = !!(s.HasTaskVacancy || s.HasSubVacancy || s.HasDelegationVacancy);
@@ -99158,6 +99164,13 @@ var require_taskController = __commonJS({
         const identityKey = isVacancy ? "VacancyID" : "UserID";
         const identityName = isVacancy ? "Name" : "FullName";
         const commentAuthorCol = s.HasCommentVacancy ? "CommentedByVacancyID" : "UserID";
+        const actedByCoalesce = (() => {
+          if (isVacancy) {
+            return s.HasLastActedByVacancy ? `COALESCE(t.LastActedByVacancyID, t.${taskCreatorCol})` : `t.${taskCreatorCol}`;
+          } else {
+            return s.HasActedBy ? `COALESCE(t.ActedBy, t.${taskCreatorCol})` : `t.${taskCreatorCol}`;
+          }
+        })();
         const scopeDepartmentIds = isAdmin === "true" ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
         const accessParts = [
           `t.${taskCreatorCol} = @UserID`,
@@ -99216,7 +99229,7 @@ var require_taskController = __commonJS({
                 ) as HasCommentNotifications
             FROM Tasks t
             LEFT JOIN ${identityTable} creator ON t.${taskCreatorCol} = creator.${identityKey}
-            LEFT JOIN ${identityTable} acted ON COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${taskCreatorCol}) = acted.${identityKey}
+            LEFT JOIN ${identityTable} acted ON ${actedByCoalesce} = acted.${identityKey}
             ${assigneeJoin}
             LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
             LEFT JOIN TaskViews tv ON tv.TaskID = t.TaskID AND tv.${taskViewCol} = @UserID
@@ -100065,6 +100078,27 @@ var require_subtaskController = __commonJS({
         return res.status(400).json({ message: "assignedToUserIds array is required." });
       }
       try {
+        const schemaProbe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedByVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedBy')           IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedByUser,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedToVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedTo')          IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedToUser,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'ActedBy')             IS NOT NULL THEN 1 ELSE 0 END AS HasActedBy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'EndDate')             IS NOT NULL THEN 1 ELSE 0 END AS HasEndDate,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'ShowInCalendar')      IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar,
+        CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifToVacancy,
+        CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToUserID')    IS NOT NULL THEN 1 ELSE 0 END AS HasNotifToUser,
+        CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifByVacancy,
+        CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByUserID')    IS NOT NULL THEN 1 ELSE 0 END AS HasNotifByUser
+    `);
+        const schema = schemaProbe.recordset[0] || {};
+        const assignedToCol = schema.HasAssignedToVacancy ? "AssignedToVacancyID" : "AssignedTo";
+        const createdByCol = schema.HasCreatedByVacancy ? "CreatedByVacancyID" : "CreatedBy";
+        const prefersVacancy = !!schema.HasAssignedToVacancy;
+        const notifToCol = schema.HasNotifToVacancy ? "AssignedToVacancyID" : schema.HasNotifToUser ? "AssignedToUserID" : null;
+        const notifByCol = schema.HasNotifByVacancy ? "AssignedByVacancyID" : schema.HasNotifByUser ? "AssignedByUserID" : null;
         const subtaskResult = await pool.request().input("SubtaskID", sql2.Int, subtaskId).query("SELECT * FROM Subtasks WHERE SubtaskID = @SubtaskID");
         if (subtaskResult.recordset.length === 0) {
           return res.status(404).json({ message: "Subtask not found" });
@@ -100075,39 +100109,58 @@ var require_subtaskController = __commonJS({
         if (!isCreator) {
           return res.status(403).json({ message: "\u0641\u0642\u0637 \u0645\u0646\u0634\u0626 \u0627\u0644\u0645\u0647\u0645\u0629 \u0627\u0644\u0641\u0631\u0639\u064A\u0629 \u064A\u0645\u0643\u0646\u0647 \u062A\u063A\u064A\u064A\u0631 \u0627\u0644\u0625\u0633\u0646\u0627\u062F." });
         }
+        const assignedByResolved = assignedByUserId ? await resolveActorId(pool, assignedByUserId, prefersVacancy) : null;
+        const insertNotification = async (assignedToResolved) => {
+          if (!assignedToResolved || !assignedByResolved || !notifToCol || !notifByCol) return;
+          try {
+            await pool.request().input("TaskID", sql2.Int, originalSubtask.TaskID).input("AssignedToActor", sql2.NVarChar, assignedToResolved).input("AssignedByActor", sql2.NVarChar, assignedByResolved).query(`INSERT INTO TaskAssignmentNotifications (TaskID, ${notifToCol}, ${notifByCol}) VALUES (@TaskID, @AssignedToActor, @AssignedByActor)`);
+          } catch (_) {
+          }
+        };
         const firstUserId = assignedToUserIds[0];
         const otherUserIds = assignedToUserIds.slice(1);
-        await pool.request().input("SubtaskID", sql2.Int, subtaskId).input("AssignedTo", sql2.NVarChar, firstUserId).query("UPDATE Subtasks SET AssignedTo = @AssignedTo WHERE SubtaskID = @SubtaskID");
-        if (firstUserId !== originalSubtask.AssignedTo && assignedByUserId) {
-          const userCheck = await pool.request().input("AssignedByUserID", sql2.NVarChar, assignedByUserId).query("SELECT UserID FROM Users WHERE UserID = @AssignedByUserID");
-          if (userCheck.recordset.length > 0) {
-            await pool.request().input("TaskID", sql2.Int, originalSubtask.TaskID).input("AssignedToUserID", sql2.NVarChar, firstUserId).input("AssignedByUserID", sql2.NVarChar, assignedByUserId).query(`
-            INSERT INTO TaskAssignmentNotifications 
-            (TaskID, AssignedToUserID, AssignedByUserID)
-            VALUES (@TaskID, @AssignedToUserID, @AssignedByUserID)
-          `);
-          }
-        }
+        const firstResolved = await resolveActorId(pool, firstUserId, prefersVacancy);
+        await pool.request().input("SubtaskID", sql2.Int, subtaskId).input("AssignedToActor", sql2.NVarChar, firstResolved).query(`UPDATE Subtasks SET ${assignedToCol} = @AssignedToActor WHERE SubtaskID = @SubtaskID`);
+        await insertNotification(firstResolved);
+        const originalCreatedBy = schema.HasCreatedByVacancy ? String(originalSubtask.CreatedByVacancyID ?? "").trim() : String(originalSubtask.CreatedBy ?? "").trim();
         for (const userId of otherUserIds) {
-          await pool.request().input("TaskID", sql2.Int, originalSubtask.TaskID).input("Title", sql2.NVarChar, originalSubtask.Title).input("CreatedBy", sql2.NVarChar, originalSubtask.CreatedBy).input("ActedBy", sql2.NVarChar, originalSubtask.ActedBy).input("AssignedTo", sql2.NVarChar, userId).input("DueDate", sql2.Date, originalSubtask.DueDate).input("ShowInCalendar", sql2.Bit, originalSubtask.ShowInCalendar).query(`
-          INSERT INTO Subtasks (TaskID, Title, CreatedBy, ActedBy, AssignedTo, IsCompleted, DueDate, CreatedAt, ShowInCalendar)
-          VALUES (@TaskID, @Title, @CreatedBy, @ActedBy, @AssignedTo, 0, @DueDate, GETDATE(), @ShowInCalendar);
-        `);
-          if (userId && assignedByUserId) {
-            const userCheck = await pool.request().input("AssignedByUserID", sql2.NVarChar, assignedByUserId).query("SELECT UserID FROM Users WHERE UserID = @AssignedByUserID");
-            if (userCheck.recordset.length > 0) {
-              await pool.request().input("TaskID", sql2.Int, originalSubtask.TaskID).input("AssignedToUserID", sql2.NVarChar, userId).input("AssignedByUserID", sql2.NVarChar, assignedByUserId).query(`
-              INSERT INTO TaskAssignmentNotifications 
-              (TaskID, AssignedToUserID, AssignedByUserID)
-              VALUES (@TaskID, @AssignedToUserID, @AssignedByUserID)
-            `);
-            }
+          const userResolved = await resolveActorId(pool, userId, prefersVacancy);
+          if (!userResolved) continue;
+          const insertCols = ["TaskID", "Title", createdByCol, assignedToCol, "IsCompleted", "CreatedAt"];
+          const insertVals = ["@cp_TaskID", "@cp_Title", "@cp_CreatedBy", "@cp_AssignedTo", "0", "GETDATE()"];
+          const copyReq = pool.request().input("cp_TaskID", sql2.Int, originalSubtask.TaskID).input("cp_Title", sql2.NVarChar, originalSubtask.Title).input("cp_CreatedBy", sql2.NVarChar, originalCreatedBy).input("cp_AssignedTo", sql2.NVarChar, userResolved);
+          if (schema.HasActedBy) {
+            copyReq.input("cp_ActedBy", sql2.NVarChar, originalSubtask.ActedBy || null);
+            insertCols.push("ActedBy");
+            insertVals.push("@cp_ActedBy");
           }
+          if (schema.HasLastActedByVacancy && originalSubtask.LastActedByVacancyID != null) {
+            copyReq.input("cp_LastActedBy", sql2.NVarChar, String(originalSubtask.LastActedByVacancyID));
+            insertCols.push("LastActedByVacancyID");
+            insertVals.push("@cp_LastActedBy");
+          }
+          if (originalSubtask.DueDate) {
+            copyReq.input("cp_DueDate", sql2.Date, originalSubtask.DueDate);
+            insertCols.push("DueDate");
+            insertVals.push("@cp_DueDate");
+          }
+          if (schema.HasEndDate && originalSubtask.EndDate) {
+            copyReq.input("cp_EndDate", sql2.Date, originalSubtask.EndDate);
+            insertCols.push("EndDate");
+            insertVals.push("@cp_EndDate");
+          }
+          if (schema.HasShowInCalendar) {
+            copyReq.input("cp_ShowInCalendar", sql2.Bit, originalSubtask.ShowInCalendar || 0);
+            insertCols.push("ShowInCalendar");
+            insertVals.push("@cp_ShowInCalendar");
+          }
+          await copyReq.query(`INSERT INTO Subtasks (${insertCols.join(", ")}) VALUES (${insertVals.join(", ")})`);
+          await insertNotification(userResolved);
         }
         res.status(200).json({ message: "Subtasks assigned/duplicated successfully" });
       } catch (error) {
         console.error("Error in bulk assignment:", error);
-        res.status(500).send({ message: "Error in bulk assignment" });
+        res.status(500).send({ message: "Error in bulk assignment", detail: error.message });
       }
     };
     exports2.deleteSubtask = async (req, res) => {
@@ -100987,6 +101040,298 @@ var require_departmentController = __commonJS({
         res.status(500).send({ message: "Error deleting department" });
       }
     };
+    exports2.checkDepartmentUsage = async (req, res) => {
+      const pool = req.app.locals.db;
+      const deptId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(deptId)) return res.status(400).json({ message: "id must be integer" });
+      try {
+        const cols = await resolveDeptColumns(pool);
+        const parentCol = cols.parentCol || "ParentID";
+        const childRes = await pool.request().input("DID", sql2.Int, deptId).query(`SELECT COUNT(*) AS cnt FROM dbo.Departments WHERE ${parentCol} = @DID`);
+        const childDepts = childRes.recordset[0]?.cnt || 0;
+        let vacancies = 0, tasks = 0, subtasks = 0, assignments = 0;
+        const probe = await pool.request().query(`
+            SELECT
+                CASE WHEN OBJECT_ID('dbo.JobVacancies','U')                IS NOT NULL THEN 1 ELSE 0 END AS HasVac,
+                CASE WHEN COL_LENGTH('dbo.JobVacancies','DepartmentID')    IS NOT NULL THEN 1 ELSE 0 END AS HasVacDept,
+                CASE WHEN COL_LENGTH('dbo.Tasks','DepartmentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasTasksDept,
+                CASE WHEN COL_LENGTH('dbo.Tasks','AssignedToVacancyID')    IS NOT NULL THEN 1 ELSE 0 END AS HasTasksVacID,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubsVacID,
+                CASE WHEN OBJECT_ID('dbo.Assignments','U')                 IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+                CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')        IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent
+        `);
+        const p = probe.recordset[0] || {};
+        if (p.HasVac && p.HasVacDept) {
+          const r = await pool.request().input("DID", sql2.Int, deptId).query(`SELECT COUNT(*) AS cnt FROM dbo.JobVacancies WHERE DepartmentID = @DID`);
+          vacancies = r.recordset[0]?.cnt || 0;
+        }
+        if (p.HasTasksDept) {
+          const r = await pool.request().input("DID", sql2.Int, deptId).query(`SELECT COUNT(*) AS cnt FROM dbo.Tasks WHERE DepartmentID = @DID`);
+          tasks = r.recordset[0]?.cnt || 0;
+        }
+        if (p.HasVac && p.HasVacDept && p.HasSubsVacID) {
+          const r = await pool.request().input("DID", sql2.Int, deptId).query(`SELECT COUNT(*) AS cnt FROM dbo.Subtasks s
+                        JOIN dbo.JobVacancies v ON v.VacancyID = s.AssignedToVacancyID
+                        WHERE v.DepartmentID = @DID`);
+          subtasks = r.recordset[0]?.cnt || 0;
+        }
+        if (p.HasAssignments) {
+          const w = p.HasAssIsCurrent ? "AND a.IsCurrent = 1" : "";
+          const r = await pool.request().input("DID", sql2.Int, deptId).query(`SELECT COUNT(*) AS cnt FROM dbo.Assignments a
+                        JOIN dbo.JobVacancies v ON v.VacancyID = a.VacancyID
+                        WHERE v.DepartmentID = @DID ${w}`);
+          assignments = r.recordset[0]?.cnt || 0;
+        }
+        const canDelete = childDepts === 0 && tasks === 0 && subtasks === 0 && assignments === 0 && vacancies === 0;
+        res.status(200).json({ childDepts, vacancies, tasks, subtasks, assignments, canDelete });
+      } catch (err) {
+        console.error("CHECK DEPT USAGE ERROR:", err);
+        res.status(500).json({ message: "Error checking department usage", detail: err.message });
+      }
+    };
+    exports2.transferAndDeleteDepartment = async (req, res) => {
+      const pool = req.app.locals.db;
+      const deptId = parseInt(req.params.id, 10);
+      const targetId = parseInt(req.body?.targetVacancyId, 10);
+      if (!Number.isInteger(deptId) || !Number.isInteger(targetId))
+        return res.status(400).json({ message: "deptId and targetVacancyId must be integers" });
+      const transaction = new sql2.Transaction(pool);
+      try {
+        const probe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Tasks','DepartmentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasTasksDept,
+                CASE WHEN COL_LENGTH('dbo.Tasks','AssignedToVacancyID')    IS NOT NULL THEN 1 ELSE 0 END AS HasTasksVacID,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubsVacID,
+                CASE WHEN OBJECT_ID('dbo.Assignments','U')                 IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+                CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')        IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent,
+                CASE WHEN OBJECT_ID('dbo.VacancyRanks','U')                IS NOT NULL THEN 1 ELSE 0 END AS HasVacRanks,
+                CASE WHEN COL_LENGTH('dbo.JobVacancies','DepartmentID')    IS NOT NULL THEN 1 ELSE 0 END AS HasVacDept
+        `);
+        const p = probe.recordset[0] || {};
+        let targetDeptId = deptId;
+        if (p.HasVacDept) {
+          const tdRes = await pool.request().input("TGT", sql2.Int, targetId).query(`SELECT TOP 1 DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @TGT`);
+          targetDeptId = tdRes.recordset[0]?.DepartmentID ?? deptId;
+        }
+        await transaction.begin();
+        if (p.HasTasksVacID && p.HasVacDept) {
+          await new sql2.Request(transaction).input("DID", sql2.Int, deptId).input("TGT", sql2.Int, targetId).query(`UPDATE dbo.Tasks SET AssignedToVacancyID = @TGT
+                        WHERE AssignedToVacancyID IN (SELECT VacancyID FROM dbo.JobVacancies WHERE DepartmentID = @DID)`);
+        }
+        if (p.HasTasksDept) {
+          await new sql2.Request(transaction).input("DID", sql2.Int, deptId).input("TDID", sql2.Int, targetDeptId).query(`UPDATE dbo.Tasks SET DepartmentID = @TDID WHERE DepartmentID = @DID`);
+        }
+        if (p.HasSubsVacID && p.HasVacDept) {
+          await new sql2.Request(transaction).input("DID", sql2.Int, deptId).input("TGT", sql2.Int, targetId).query(`UPDATE dbo.Subtasks SET AssignedToVacancyID = @TGT
+                        WHERE AssignedToVacancyID IN (SELECT VacancyID FROM dbo.JobVacancies WHERE DepartmentID = @DID)`);
+        }
+        if (p.HasAssignments && p.HasAssIsCurrent && p.HasVacDept) {
+          await new sql2.Request(transaction).input("DID", sql2.Int, deptId).query(`UPDATE dbo.Assignments SET IsCurrent = 0
+                        WHERE IsCurrent = 1 AND VacancyID IN (SELECT VacancyID FROM dbo.JobVacancies WHERE DepartmentID = @DID)`);
+        }
+        if (p.HasVacRanks && p.HasVacDept) {
+          await new sql2.Request(transaction).input("DID", sql2.Int, deptId).query(`DELETE FROM dbo.VacancyRanks WHERE VacancyID IN (SELECT VacancyID FROM dbo.JobVacancies WHERE DepartmentID = @DID)`);
+        }
+        if (p.HasAssignments && p.HasVacDept) {
+          await new sql2.Request(transaction).input("DID", sql2.Int, deptId).query(`DELETE FROM dbo.Assignments WHERE VacancyID IN (SELECT VacancyID FROM dbo.JobVacancies WHERE DepartmentID = @DID)`);
+        }
+        if (p.HasVacDept) {
+          await new sql2.Request(transaction).input("DID", sql2.Int, deptId).query(`DELETE FROM dbo.JobVacancies WHERE DepartmentID = @DID`);
+        }
+        await new sql2.Request(transaction).input("DID", sql2.Int, deptId).query(`DELETE FROM dbo.Departments WHERE DepartmentID = @DID`);
+        await transaction.commit();
+        res.status(200).json({ message: "Department transferred and deleted successfully" });
+      } catch (err) {
+        try {
+          await transaction.rollback();
+        } catch (_) {
+        }
+        console.error("TRANSFER AND DELETE DEPT ERROR:", err);
+        res.status(500).json({ message: "Error during transfer", detail: err.message });
+      }
+    };
+    exports2.importDepartmentsFromExcel = async (req, res) => {
+      const pool = req.app.locals.db;
+      const parentDeptId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(parentDeptId)) return res.status(400).json({ message: "id must be integer" });
+      const { rows } = req.body || {};
+      if (!Array.isArray(rows) || rows.length === 0)
+        return res.status(400).json({ message: "rows array is required and must not be empty" });
+      try {
+        let findCol2 = function(row, ...candidates) {
+          const keys = Object.keys(row);
+          for (const c of candidates) {
+            const found = keys.find((k) => k.trim().toLowerCase() === c.trim().toLowerCase());
+            if (found !== void 0) return found;
+          }
+          return null;
+        }, visit2 = function(posId) {
+          if (!posId || visited.has(posId)) return;
+          visited.add(posId);
+          const row = nodeMap.get(posId);
+          if (!row) return;
+          const parentExcelId = COL_PARENT_ID ? String(row[COL_PARENT_ID] || "").trim() : "";
+          if (parentExcelId && posIdSet.has(parentExcelId)) visit2(parentExcelId);
+          insertOrder.push(row);
+        };
+        var findCol = findCol2, visit = visit2;
+        const sample = rows[0];
+        const COL_POS_ID = findCol2(sample, "PositionID", "Position_ID", "ID");
+        const COL_PARENT_ID = findCol2(sample, "Parent_PositionID", "ParentID", "Parent_ID");
+        const COL_DEPT_AR = findCol2(sample, "Department_Ar", "DepartmentAr", "\u0627\u0644\u0627\u0633\u0645", "Name");
+        const COL_TYPE = findCol2(sample, "Type", "\u0627\u0644\u0646\u0648\u0639");
+        const COL_POS_AR = findCol2(sample, "Position_Ar", "PositionAr", "\u0627\u0644\u0645\u0633\u0645\u0649");
+        const COL_RANK = findCol2(sample, "Postion_Rnk", "Position_Rnk", "Rank", "\u0627\u0644\u0631\u062A\u0628\u0629");
+        if (!COL_POS_ID || !COL_DEPT_AR) {
+          return res.status(400).json({ message: "\u0644\u0645 \u064A\u062A\u0645 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 \u0623\u0639\u0645\u062F\u0629 PositionID \u0648 Department_Ar \u0641\u064A \u0627\u0644\u0645\u0644\u0641." });
+        }
+        const posIdSet = new Set(rows.map((r) => String(r[COL_POS_ID] || "").trim()).filter(Boolean));
+        const nodeMap = new Map(rows.map((r) => [String(r[COL_POS_ID] || "").trim(), r]));
+        const visited = /* @__PURE__ */ new Set();
+        const insertOrder = [];
+        rows.forEach((r) => visit2(String(r[COL_POS_ID] || "").trim()));
+        const cols = await resolveDeptColumns(pool);
+        const vacProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN OBJECT_ID('dbo.JobVacancies','U')             IS NOT NULL THEN 1 ELSE 0 END AS HasJV,
+                CASE WHEN COL_LENGTH('dbo.JobVacancies','Name')         IS NOT NULL THEN 1 ELSE 0 END AS HasJVName,
+                CASE WHEN COL_LENGTH('dbo.JobVacancies','DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasJVDept,
+                CASE WHEN COL_LENGTH('dbo.JobVacancies','IsActive')     IS NOT NULL THEN 1 ELSE 0 END AS HasJVActive,
+                CASE WHEN COL_LENGTH('dbo.JobVacancies','CreatedAt')    IS NOT NULL THEN 1 ELSE 0 END AS HasJVCreatedAt,
+                CASE WHEN COL_LENGTH('dbo.JobVacancies','Rank')         IS NOT NULL THEN 1 ELSE 0 END AS HasJVRank,
+                CASE WHEN OBJECT_ID('dbo.Ranks','U')                    IS NOT NULL THEN 1 ELSE 0 END AS HasRanks
+        `);
+        const vp = vacProbe.recordset[0] || {};
+        let jvRankIsInt = false;
+        if (vp.HasJVRank) {
+          const rankTypeRes = await pool.request().query(`
+                SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME='JobVacancies' AND COLUMN_NAME='Rank'
+            `).catch(() => ({ recordset: [] }));
+          const dt = (rankTypeRes.recordset[0]?.DATA_TYPE || "").toLowerCase();
+          jvRankIsInt = ["int", "bigint", "smallint", "tinyint"].includes(dt);
+        }
+        const ranksLookup = /* @__PURE__ */ new Map();
+        if (vp.HasRanks) {
+          const rankColsProbe = await pool.request().query(`
+                SELECT
+                    CASE WHEN COL_LENGTH('dbo.Ranks','Name')     IS NOT NULL THEN 1 ELSE 0 END AS HasName,
+                    CASE WHEN COL_LENGTH('dbo.Ranks','RankName') IS NOT NULL THEN 1 ELSE 0 END AS HasRankName
+            `);
+          const rc = rankColsProbe.recordset[0] || {};
+          const nameExpr = rc.HasName ? "ISNULL(Name,'')" : rc.HasRankName ? "ISNULL(RankName,'')" : "''";
+          const altExpr = rc.HasRankName ? "ISNULL(RankName,'')" : "''";
+          const ranksRes = await pool.request().query(
+            `SELECT RankID, ${nameExpr} AS N1, ${altExpr} AS N2 FROM dbo.Ranks`
+          ).catch((e) => {
+            console.error("[IMPORT] Ranks query failed:", e.message);
+            return { recordset: [] };
+          });
+          for (const r of ranksRes.recordset) {
+            const entry = { id: r.RankID, name: (r.N1 || r.N2 || "").trim() };
+            if (r.N1 && r.N1.trim()) ranksLookup.set(r.N1.trim().toLowerCase(), entry);
+            if (r.N2 && r.N2.trim() && r.N2 !== r.N1) ranksLookup.set(r.N2.trim().toLowerCase(), entry);
+          }
+        }
+        console.log(`[IMPORT] HasJVRank=${vp.HasJVRank} jvRankIsInt=${jvRankIsInt} HasRanks=${vp.HasRanks} ranksCount=${ranksLookup.size} COL_RANK=${COL_RANK}`);
+        const transaction = new sql2.Transaction(pool);
+        await transaction.begin();
+        const excelIdToDbId = /* @__PURE__ */ new Map();
+        let deptCount = 0;
+        let vacCount = 0;
+        try {
+          for (const row of insertOrder) {
+            const excelPosId = String(row[COL_POS_ID] || "").trim();
+            const excelParent = COL_PARENT_ID ? String(row[COL_PARENT_ID] || "").trim() : "";
+            const deptName = String(row[COL_DEPT_AR] || "").trim() || `\u0642\u0633\u0645 \u0645\u0633\u062A\u0648\u0631\u062F`;
+            const typeVal = COL_TYPE ? String(row[COL_TYPE] || "").trim() : null;
+            const dbParentId = excelParent && posIdSet.has(excelParent) ? excelIdToDbId.get(excelParent) ?? parentDeptId : parentDeptId;
+            let deptNameFinal = deptName;
+            let nameCounter = 2;
+            while (true) {
+              const nameCheck = await new sql2.Request(transaction).input("EName", sql2.NVarChar, deptNameFinal).query(`SELECT TOP 1 DepartmentID FROM dbo.Departments WHERE Name = @EName`);
+              if (!nameCheck.recordset[0]) break;
+              deptNameFinal = `${deptName} (${nameCounter++})`;
+            }
+            let newDeptId = null;
+            const dReq = new sql2.Request(transaction).input("Name", sql2.NVarChar, deptNameFinal);
+            let dCols = "Name";
+            let dVals = "@Name";
+            if (cols.parentCol) {
+              dReq.input("Parent", sql2.Int, dbParentId);
+              dCols += `, ${cols.parentCol}`;
+              dVals += ", @Parent";
+            }
+            if (cols.activeCol) {
+              dCols += `, ${cols.activeCol}`;
+              dVals += ", 1";
+            }
+            if (cols.hasTypeCol && typeVal) {
+              dReq.input("Type", sql2.NVarChar, typeVal);
+              dCols += ", Type";
+              dVals += ", @Type";
+            }
+            const dRes = await dReq.query(
+              `INSERT INTO dbo.Departments (${dCols}) OUTPUT INSERTED.DepartmentID VALUES (${dVals})`
+            );
+            newDeptId = dRes.recordset[0]?.DepartmentID;
+            if (!newDeptId) throw new Error(`\u0641\u0634\u0644 \u0625\u062F\u0631\u0627\u062C \u0627\u0644\u0642\u0633\u0645: ${deptNameFinal}`);
+            deptCount++;
+            excelIdToDbId.set(excelPosId, newDeptId);
+            if (!vp.HasJV || !vp.HasJVDept || !vp.HasJVName) continue;
+            const posName = COL_POS_AR ? String(row[COL_POS_AR] || "").trim() : "";
+            if (!posName) continue;
+            const vReq = new sql2.Request(transaction).input("DID", sql2.Int, newDeptId).input("VNAME", sql2.NVarChar, posName);
+            let vCols = "DepartmentID, Name";
+            let vVals = "@DID, @VNAME";
+            if (vp.HasJVActive) {
+              vCols += ", IsActive";
+              vVals += ", 1";
+            }
+            if (vp.HasJVCreatedAt) {
+              vCols += ", CreatedAt";
+              vVals += ", GETDATE()";
+            }
+            if (vp.HasJVRank && COL_RANK) {
+              const rankLabel = String(row[COL_RANK] || "").trim();
+              if (rankLabel) {
+                const rankEntry = ranksLookup.get(rankLabel.toLowerCase());
+                console.log(`[IMPORT] rank lookup: label="${rankLabel}" \u2192 found=${!!rankEntry} id=${rankEntry?.id}`);
+                if (rankEntry) {
+                  if (jvRankIsInt) {
+                    vReq.input("RANK", sql2.Int, rankEntry.id);
+                  } else {
+                    vReq.input("RANK", sql2.NVarChar, rankEntry.name);
+                  }
+                  vCols += ", Rank";
+                  vVals += ", @RANK";
+                }
+              }
+            }
+            await vReq.query(
+              `INSERT INTO dbo.JobVacancies (${vCols}) VALUES (${vVals})`
+            );
+            vacCount++;
+          }
+          await transaction.commit();
+          _deptColsCache = null;
+          res.status(200).json({
+            message: `\u062A\u0645 \u0627\u0644\u0627\u0633\u062A\u064A\u0631\u0627\u062F \u0628\u0646\u062C\u0627\u062D`,
+            deptCount,
+            vacCount
+          });
+        } catch (innerErr) {
+          try {
+            await transaction.rollback();
+          } catch (_) {
+          }
+          throw innerErr;
+        }
+      } catch (err) {
+        console.error("IMPORT EXCEL ERROR:", err);
+        res.status(500).json({ message: "\u062E\u0637\u0623 \u0623\u062B\u0646\u0627\u0621 \u0627\u0633\u062A\u064A\u0631\u0627\u062F \u0627\u0644\u0645\u0644\u0641", detail: err.message });
+      }
+    };
   }
 });
 
@@ -101000,6 +101345,9 @@ var require_departmentRoutes = __commonJS({
     router.post("/", departmentController.createDepartment);
     router.put("/:id", departmentController.updateDepartment);
     router.delete("/:id", departmentController.deleteDepartment);
+    router.get("/:id/usage", departmentController.checkDepartmentUsage);
+    router.post("/:id/transfer-and-delete", departmentController.transferAndDeleteDepartment);
+    router.post("/:id/import-excel", departmentController.importDepartmentsFromExcel);
     module2.exports = router;
   }
 });
@@ -101026,11 +101374,13 @@ var require_userController = __commonJS({
       }
       try {
         const schema = await detectSchema(pool);
+        const svcCol = schema.hasServiceID ? "u.ServiceID," : "CAST(NULL AS NVARCHAR(100)) AS ServiceID,";
         let query;
         if (schema.hasUsersDepartmentID) {
           query = `
                 SELECT
                     u.UserID,
+                    ${svcCol}
                     u.FullName,
                     u.DepartmentID,
                     d.Name AS DepartmentName,
@@ -101043,6 +101393,7 @@ var require_userController = __commonJS({
           query = `
                 SELECT
                     u.UserID,
+                    ${svcCol}
                     u.FullName,
                     v.DepartmentID,
                     d.Name AS DepartmentName,
@@ -101057,6 +101408,7 @@ var require_userController = __commonJS({
           query = `
                 SELECT
                     u.UserID,
+                    ${svcCol}
                     u.FullName,
                     p.DepartmentID,
                     d.Name AS DepartmentName,
@@ -101070,6 +101422,7 @@ var require_userController = __commonJS({
           query = `
                 SELECT
                     u.UserID,
+                    ${svcCol}
                     u.FullName,
                     CAST(NULL AS INT) AS DepartmentID,
                     CAST(NULL AS NVARCHAR(200)) AS DepartmentName,
@@ -101097,6 +101450,30 @@ var require_userController = __commonJS({
       } catch (error) {
         console.error("DATABASE GET USERS ERROR:", error);
         res.status(500).send({ message: "Error fetching users" });
+      }
+    };
+    exports2.bootstrapAdmin = async (req, res) => {
+      const pool = req.app.locals.db;
+      if (!pool) return res.status(503).json({ message: "Database connection unavailable." });
+      const { userId } = req.body;
+      if (!userId) return res.status(400).json({ message: "userId is required." });
+      try {
+        const s = await probeUserRolesSchema(pool);
+        if (!s.HasTable) return res.status(400).json({ message: "UserRoles table does not exist." });
+        const adminCheck = await pool.request().query(`SELECT COUNT(*) AS cnt FROM dbo.UserRoles WHERE Role = 1`);
+        if (adminCheck.recordset[0].cnt > 0) {
+          return res.status(403).json({ message: "\u064A\u0648\u062C\u062F \u0645\u062F\u064A\u0631 \u0639\u0627\u0645 \u0628\u0627\u0644\u0641\u0639\u0644. \u0644\u0627 \u064A\u0645\u0643\u0646 \u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u0647\u0630\u0647 \u0627\u0644\u0648\u0638\u064A\u0641\u0629." });
+        }
+        const existing = await pool.request().input("UserID", sql2.NVarChar, String(userId).trim()).query(`SELECT TOP 1 UserID FROM dbo.UserRoles WHERE UserID = @UserID`);
+        if (existing.recordset[0]) {
+          await pool.request().input("UserID", sql2.NVarChar, String(userId).trim()).query(`UPDATE dbo.UserRoles SET Role = 1 WHERE UserID = @UserID`);
+        } else {
+          await pool.request().input("UserID", sql2.NVarChar, String(userId).trim()).query(`INSERT INTO dbo.UserRoles (UserID, Role) VALUES (@UserID, 1)`);
+        }
+        return res.status(200).json({ message: "\u062A\u0645 \u062A\u0639\u064A\u064A\u0646 \u0627\u0644\u0645\u062F\u064A\u0631 \u0627\u0644\u0639\u0627\u0645 \u0628\u0646\u062C\u0627\u062D." });
+      } catch (err) {
+        console.error("BOOTSTRAP ADMIN ERROR:", err);
+        return res.status(500).json({ message: "Error setting admin", detail: err.message });
       }
     };
     exports2.setUserRole = async (req, res) => {
@@ -101225,108 +101602,13 @@ var require_userController = __commonJS({
       const newAssignmentId = inserted.recordset[0]?.AssignmentID;
       return { changed: true, newAssignmentId, newVacancyId: parseInt(targetVacancyId, 10) };
     }
-    async function moveUserToDepartmentViaAssignmentsWithName(transaction, pool, userId, targetDepartmentId, vacancyName) {
-      const tdId = parseInt(targetDepartmentId, 10);
-      if (!Number.isInteger(tdId)) throw new Error("Invalid target DepartmentID.");
-      const probe = await new sql2.Request(transaction).query(`
-        SELECT
-          CASE WHEN COL_LENGTH('dbo.Assignments', 'IsCurrent')  IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent,
-          CASE WHEN COL_LENGTH('dbo.Assignments', 'StartDate')  IS NOT NULL THEN 1 ELSE 0 END AS HasStartDate,
-          CASE WHEN COL_LENGTH('dbo.Assignments', 'EndDate')    IS NOT NULL THEN 1 ELSE 0 END AS HasEndDate,
-          CASE WHEN COL_LENGTH('dbo.Assignments', 'CreatedAt')  IS NOT NULL THEN 1 ELSE 0 END AS HasAssCreatedAt,
-          CASE WHEN COL_LENGTH('dbo.Assignments', 'UpdatedAt')  IS NOT NULL THEN 1 ELSE 0 END AS HasAssUpdatedAt,
-          CASE WHEN COL_LENGTH('dbo.JobVacancies', 'Name')      IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyName,
-          CASE WHEN COL_LENGTH('dbo.JobVacancies', 'IsActive')  IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyIsActive,
-          CASE WHEN COL_LENGTH('dbo.JobVacancies', 'CreatedAt') IS NOT NULL THEN 1 ELSE 0 END AS HasVacCreatedAt
-    `);
-      const p = probe.recordset[0] || {};
-      let targetVacancyId = null;
-      if (vacancyName && p.HasVacancyName) {
-        const existing = await new sql2.Request(transaction).input("DepartmentID", sql2.Int, tdId).input("Name", sql2.NVarChar, vacancyName.trim()).query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies
-                    WHERE DepartmentID = @DepartmentID AND Name = @Name`);
-        targetVacancyId = existing.recordset[0]?.VacancyID ?? null;
-      }
-      if (targetVacancyId == null) {
-        const deptRow = await new sql2.Request(transaction).input("DepartmentID", sql2.Int, tdId).query(`SELECT TOP 1 Name FROM dbo.Departments WHERE DepartmentID = @DepartmentID`);
-        const proposedName = vacancyName ? vacancyName.trim() : `\u0645\u0648\u0638\u0641 - ${deptRow.recordset[0]?.Name || `Dept ${tdId}`}`;
-        const createReq = new sql2.Request(transaction).input("DepartmentID", sql2.Int, tdId);
-        const cols = ["DepartmentID"];
-        const vals = ["@DepartmentID"];
-        if (p.HasVacancyName) {
-          cols.push("Name");
-          vals.push("@Name");
-          createReq.input("Name", sql2.NVarChar(200), proposedName);
-        }
-        if (p.HasVacancyIsActive) {
-          cols.push("IsActive");
-          vals.push("1");
-        }
-        cols.push("CreatedAt");
-        vals.push("GETDATE()");
-        const created = await createReq.query(
-          `INSERT INTO dbo.JobVacancies (${cols.join(", ")}) OUTPUT INSERTED.VacancyID VALUES (${vals.join(", ")})`
-        );
-        targetVacancyId = created.recordset[0]?.VacancyID;
-        if (targetVacancyId == null) throw new Error("Failed to create JobVacancy.");
-      }
-      if (p.HasIsCurrent) {
-        const closeParts = ["IsCurrent = 0"];
-        if (p.HasEndDate) closeParts.push("EndDate = GETDATE()");
-        if (p.HasAssUpdatedAt) closeParts.push("UpdatedAt = GETDATE()");
-        await new sql2.Request(transaction).input("UserID", sql2.NVarChar(50), userId).query(`UPDATE dbo.Assignments SET ${closeParts.join(", ")} WHERE UserID = @UserID AND IsCurrent = 1`);
-      }
-      const insertCols = ["UserID", "VacancyID"];
-      const insertVals = ["@UserID", "@VacancyID"];
-      const insertReq = new sql2.Request(transaction).input("UserID", sql2.NVarChar(50), userId).input("VacancyID", sql2.Int, parseInt(targetVacancyId, 10));
-      if (p.HasIsCurrent) {
-        insertCols.push("IsCurrent");
-        insertVals.push("1");
-      }
-      if (p.HasStartDate) {
-        insertCols.push("StartDate");
-        insertVals.push("GETDATE()");
-      }
-      insertCols.push("CreatedAt");
-      insertVals.push("GETDATE()");
-      if (p.HasAssUpdatedAt) {
-        insertCols.push("UpdatedAt");
-        insertVals.push("GETDATE()");
-      }
-      const inserted = await insertReq.query(
-        `INSERT INTO dbo.Assignments (${insertCols.join(", ")}) OUTPUT INSERTED.AssignmentID VALUES (${insertVals.join(", ")})`
-      );
-      return { changed: true, newAssignmentId: inserted.recordset[0]?.AssignmentID, newVacancyId: parseInt(targetVacancyId, 10) };
-    }
-    async function saveVacancyRank(pool, vacancyId, rankVal) {
-      try {
-        const probe = await pool.request().query(`
-            SELECT
-              CASE WHEN OBJECT_ID('dbo.VacancyRanks','U')            IS NOT NULL THEN 1 ELSE 0 END AS HasTable,
-              CASE WHEN COL_LENGTH('dbo.VacancyRanks','VacancyID')    IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyID,
-              CASE WHEN COL_LENGTH('dbo.VacancyRanks','Rank')         IS NOT NULL THEN 1 ELSE 0 END AS HasRankCol,
-              CASE WHEN COL_LENGTH('dbo.VacancyRanks','Name')         IS NOT NULL THEN 1 ELSE 0 END AS HasNameCol
-        `);
-        const s = probe.recordset[0] || {};
-        if (!s.HasTable || !s.HasVacancyID) return;
-        const rankCol = s.HasRankCol ? "Rank" : s.HasNameCol ? "Name" : null;
-        if (!rankCol) return;
-        const existing = await pool.request().input("VacancyID", sql2.Int, vacancyId).query(`SELECT TOP 1 VacancyRankID FROM dbo.VacancyRanks WHERE VacancyID = @VacancyID`);
-        if (existing.recordset[0]) {
-          await pool.request().input("VacancyID", sql2.Int, vacancyId).input("RankVal", sql2.NVarChar(200), rankVal).query(`UPDATE dbo.VacancyRanks SET ${rankCol} = @RankVal WHERE VacancyID = @VacancyID`);
-        } else {
-          await pool.request().input("VacancyID", sql2.Int, vacancyId).input("RankVal", sql2.NVarChar(200), rankVal).query(`INSERT INTO dbo.VacancyRanks (VacancyID, ${rankCol}) VALUES (@VacancyID, @RankVal)`);
-        }
-      } catch (err) {
-        console.error("SAVE VACANCY RANK ERROR (non-fatal):", err.message);
-      }
-    }
     exports2.updateUser = async (req, res) => {
       const pool = req.app.locals.db;
       if (!pool) {
         return res.status(503).send({ message: "Database connection is not available." });
       }
       const { id } = req.params;
-      const { FullName, DepartmentID, PasswordHash, IsActive } = req.body;
+      const { FullName, DepartmentID, PasswordHash, IsActive, ServiceID } = req.body;
       if (typeof IsActive !== "boolean") {
         return res.status(400).json({ message: "IsActive must be a boolean." });
       }
@@ -101344,6 +101626,10 @@ var require_userController = __commonJS({
           const hashed = encryptionConfig.hashPassword(PasswordHash).combined;
           setParts.push("PasswordHash = @PasswordHash");
           userReq.input("PasswordHash", sql2.NVarChar, hashed);
+        }
+        if (schema.hasServiceID && ServiceID != null && String(ServiceID).trim() !== "") {
+          setParts.push("ServiceID = @ServiceID");
+          userReq.input("ServiceID", sql2.NVarChar, String(ServiceID).trim());
         }
         await userReq.query(`UPDATE Users SET ${setParts.join(", ")} WHERE UserID = @UserID`);
         let departmentChanged = false;
@@ -101446,41 +101732,66 @@ var require_userController = __commonJS({
           await transaction.rollback();
           return res.status(404).json({ message: "Request not found or already processed." });
         }
+        const username = String(requestData.UserID || "").trim();
+        const maxIdRes = await new sql2.Request(transaction).query(`
+            SELECT ISNULL(MAX(TRY_CAST(UserID AS INT)), 999) + 1 AS NextID
+            FROM dbo.Users
+            WHERE TRY_CAST(UserID AS INT) IS NOT NULL
+        `);
+        const newUserId = String(maxIdRes.recordset[0]?.NextID ?? 1e3);
         const userCols = ["UserID", "PasswordHash", "FullName", "IsActive"];
-        const userVals = ["@UserID", "@PasswordHash", "@FullName", "1"];
-        const insertReq = new sql2.Request(transaction).input("UserID", sql2.NVarChar, requestData.UserID).input("PasswordHash", sql2.NVarChar, requestData.PasswordHash).input("FullName", sql2.NVarChar, requestData.FullName);
+        const userVals = ["@NewUserID", "@PasswordHash", "@FullName", "1"];
+        const insertReq = new sql2.Request(transaction).input("NewUserID", sql2.NVarChar, newUserId).input("PasswordHash", sql2.NVarChar, requestData.PasswordHash).input("FullName", sql2.NVarChar, requestData.FullName);
         if (schema.hasUsersDepartmentID) {
           userCols.push("DepartmentID");
           userVals.push("@DepartmentID");
           insertReq.input("DepartmentID", sql2.Int, requestData.DepartmentID);
         }
+        if (schema.hasServiceID && username) {
+          userCols.push("ServiceID");
+          userVals.push("@ServiceID");
+          insertReq.input("ServiceID", sql2.NVarChar, username);
+        }
         await insertReq.query(`INSERT INTO Users (${userCols.join(", ")}) VALUES (${userVals.join(", ")})`);
-        if (!schema.hasUsersDepartmentID && schema.hasAssignments && schema.hasJobVacancies && schema.hasVacancyDepartmentID && requestData.DepartmentID != null) {
+        if (schema.hasAssignments && requestData.VacancyID) {
           try {
-            const vacancyName = requestData.VacancyName || null;
-            const rankVal = requestData.Rank ? String(requestData.Rank).trim() : null;
-            const assignInfo = await moveUserToDepartmentViaAssignmentsWithName(
-              transaction,
-              pool,
-              requestData.UserID,
-              parseInt(requestData.DepartmentID, 10),
-              vacancyName
-            );
-            if (rankVal && assignInfo.newVacancyId) {
-              await saveVacancyRank(pool, assignInfo.newVacancyId, rankVal);
+            const probe = await new sql2.Request(transaction).query(`
+                    SELECT
+                        CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')  IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent,
+                        CASE WHEN COL_LENGTH('dbo.Assignments','StartDate')  IS NOT NULL THEN 1 ELSE 0 END AS HasStartDate,
+                        CASE WHEN COL_LENGTH('dbo.Assignments','UpdatedAt')  IS NOT NULL THEN 1 ELSE 0 END AS HasAssUpdatedAt
+                `);
+            const p = probe.recordset[0] || {};
+            const insertCols = ["UserID", "VacancyID", "CreatedAt"];
+            const insertVals = ["@UserID", "@VacancyID", "GETDATE()"];
+            const assignReq = new sql2.Request(transaction).input("UserID", sql2.NVarChar(50), newUserId).input("VacancyID", sql2.Int, parseInt(requestData.VacancyID, 10));
+            if (p.HasIsCurrent) {
+              insertCols.push("IsCurrent");
+              insertVals.push("1");
             }
+            if (p.HasStartDate) {
+              insertCols.push("StartDate");
+              insertVals.push("GETDATE()");
+            }
+            if (p.HasAssUpdatedAt) {
+              insertCols.push("UpdatedAt");
+              insertVals.push("GETDATE()");
+            }
+            await assignReq.query(
+              `INSERT INTO dbo.Assignments (${insertCols.join(", ")}) VALUES (${insertVals.join(", ")})`
+            );
           } catch (assignErr) {
             console.error("APPROVE REGISTRATION ASSIGNMENT ERROR:", assignErr);
             await transaction.rollback();
             return res.status(500).send({
-              message: "User account was staged but assignment creation failed.",
+              message: "\u062A\u0645 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062D\u0633\u0627\u0628 \u0644\u0643\u0646 \u0641\u0634\u0644 \u0627\u0644\u0625\u0633\u0646\u0627\u062F \u0644\u0644\u0645\u0646\u0635\u0628.",
               detail: assignErr.message
             });
           }
         }
         await new sql2.Request(transaction).input("RequestID", sql2.Int, id).query("UPDATE RegistrationRequests SET Status = 'Approved' WHERE RequestID = @RequestID");
         await transaction.commit();
-        res.status(200).json({ message: "User approved and created successfully." });
+        res.status(200).json({ message: "User approved and created successfully.", newUserId });
       } catch (error) {
         try {
           await transaction.rollback();
@@ -101488,7 +101799,7 @@ var require_userController = __commonJS({
         }
         console.error("APPROVE REGISTRATION ERROR:", error);
         if (error.number === 2627) {
-          return res.status(409).send({ message: "User with this ID already exists." });
+          return res.status(409).send({ message: "\u064A\u0648\u062C\u062F \u0645\u0633\u062A\u062E\u062F\u0645 \u0628\u0646\u0641\u0633 \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u062A\u0633\u0644\u0633\u0644\u064A\u060C \u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629." });
         }
         res.status(500).send({ message: "Failed to approve request." });
       }
@@ -101503,9 +101814,10 @@ var require_userRoutes = __commonJS({
     var router = express2.Router();
     var userController = require_userController();
     router.get("/", userController.getAllUsers);
+    router.post("/bootstrap-admin", userController.bootstrapAdmin);
+    router.post("/encrypt-passwords", userController.encryptExistingPasswords);
     router.put("/:id/role", userController.setUserRole);
     router.put("/:id", userController.updateUser);
-    router.post("/encrypt-passwords", userController.encryptExistingPasswords);
     router.get("/requests", userController.getRegistrationRequests);
     router.post("/requests/:id/approve", userController.approveRegistrationRequest);
     router.delete("/requests/:id", userController.deleteRegistrationRequest);
@@ -101517,6 +101829,7 @@ var require_userRoutes = __commonJS({
 var require_profileController = __commonJS({
   "src/controllers/profileController.js"(exports2) {
     var sql2 = require_mssql();
+    var crypto4 = require("crypto");
     var encryptionConfig = require_encryption_config();
     var { detectSchema } = require_vacancyResolver();
     function buildProfileSelectSQL(schema) {
@@ -101558,51 +101871,31 @@ var require_profileController = __commonJS({
     }
     exports2.updateProfile = async (req, res) => {
       const pool = req.app.locals.db;
-      const { UserID, FullName, DepartmentID, PasswordHash, CurrentPassword } = req.body;
-      if (!pool) {
-        return res.status(503).send({ message: "Database connection is not available." });
-      }
-      if (!UserID || !FullName) {
-        return res.status(400).json({ message: "UserID and FullName are required." });
-      }
+      const { UserID, FullName, PasswordHash, CurrentPassword } = req.body;
+      if (!pool) return res.status(503).send({ message: "Database connection is not available." });
+      if (!UserID || !FullName) return res.status(400).json({ message: "UserID and FullName are required." });
       try {
         const schema = await detectSchema(pool);
         if (PasswordHash) {
-          if (!CurrentPassword) {
-            return res.status(400).json({ message: "Current password is required to change password." });
-          }
+          if (!CurrentPassword) return res.status(400).json({ message: "Current password is required to change password." });
           const currentUserResult = await pool.request().input("UserID", sql2.NVarChar, UserID).query("SELECT PasswordHash FROM Users WHERE UserID = @UserID");
           const currentUser = currentUserResult.recordset[0];
-          if (!currentUser) {
-            return res.status(404).json({ message: "User not found." });
-          }
+          if (!currentUser) return res.status(404).json({ message: "User not found." });
           const isValidCurrent = encryptionConfig.verifyPassword(CurrentPassword, currentUser.PasswordHash);
-          if (!isValidCurrent) {
-            return res.status(401).json({ message: "Current password is incorrect." });
-          }
+          if (!isValidCurrent) return res.status(401).json({ message: "Current password is incorrect." });
         }
         const setParts = ["FullName = @FullName"];
         const request = pool.request().input("UserID", sql2.NVarChar, UserID).input("FullName", sql2.NVarChar, FullName);
-        if (schema.hasUsersDepartmentID && DepartmentID != null) {
-          setParts.push("DepartmentID = @DepartmentID");
-          request.input("DepartmentID", sql2.Int, DepartmentID);
-        }
         if (PasswordHash) {
           const hashed = encryptionConfig.hashPassword(PasswordHash).combined;
           setParts.push("PasswordHash = @PasswordHash");
           request.input("PasswordHash", sql2.NVarChar, hashed);
         }
-        const updateSql = `UPDATE Users SET ${setParts.join(", ")} WHERE UserID = @UserID`;
-        await request.query(updateSql);
+        await request.query(`UPDATE Users SET ${setParts.join(", ")} WHERE UserID = @UserID`);
         const updatedUserResult = await pool.request().input("UserID", sql2.NVarChar, UserID).query(buildProfileSelectSQL(schema));
         const updatedUser = updatedUserResult.recordset[0];
-        if (!updatedUser) {
-          return res.status(404).json({ message: "User not found after update." });
-        }
-        res.status(200).json({
-          message: "Profile updated successfully",
-          user: updatedUser
-        });
+        if (!updatedUser) return res.status(404).json({ message: "User not found after update." });
+        res.status(200).json({ message: "Profile updated successfully", user: updatedUser });
       } catch (error) {
         console.error("UPDATE PROFILE ERROR:", error);
         res.status(500).send({ message: "Error updating profile" });
@@ -101611,22 +101904,267 @@ var require_profileController = __commonJS({
     exports2.getProfile = async (req, res) => {
       const pool = req.app.locals.db;
       const { userId } = req.params;
-      if (!pool) {
-        return res.status(503).send({ message: "Database connection is not available." });
-      }
+      if (!pool) return res.status(503).send({ message: "Database connection is not available." });
       try {
         const schema = await detectSchema(pool);
         const baseSql = buildProfileSelectSQL(schema);
         const finalSql = baseSql + " AND u.IsActive = 1";
         const result = await pool.request().input("UserID", sql2.NVarChar, userId).query(finalSql);
         const user = result.recordset[0];
-        if (!user) {
-          return res.status(404).json({ message: "User not found." });
-        }
+        if (!user) return res.status(404).json({ message: "User not found." });
         res.status(200).json(user);
       } catch (error) {
         console.error("GET PROFILE ERROR:", error);
         res.status(500).send({ message: "Error fetching profile" });
+      }
+    };
+    exports2.transferVacancy = async (req, res) => {
+      const pool = req.app.locals.db;
+      const { UserID, ToVacancyID } = req.body;
+      if (!pool) return res.status(503).json({ message: "Database not available." });
+      if (!UserID || !ToVacancyID) return res.status(400).json({ message: "UserID and ToVacancyID are required." });
+      try {
+        const schema = await detectSchema(pool);
+        let fromActorID;
+        if (schema.isVacancy) {
+          const assResult = await pool.request().input("UID", sql2.NVarChar(50), String(UserID).trim()).query(`
+                    SELECT TOP 1 a.VacancyID
+                    FROM dbo.Users u
+                    INNER JOIN dbo.Assignments a ON a.UserID = u.UserID
+                    WHERE u.UserID = @UID
+                      AND a.VacancyID IS NOT NULL
+                    ORDER BY
+                        CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,
+                        ISNULL(a.StartDate, '1900-01-01') DESC,
+                        a.AssignmentID DESC
+                `);
+          const vid = assResult.recordset[0]?.VacancyID;
+          if (!vid) return res.status(404).json({ message: "\u0644\u0645 \u064A\u062A\u0645 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 \u0645\u0646\u0635\u0628 \u062D\u0627\u0644\u064A \u0644\u0644\u0645\u0633\u062A\u062E\u062F\u0645." });
+          fromActorID = String(parseInt(vid, 10));
+        } else {
+          fromActorID = String(UserID).trim();
+        }
+        const toActorID = String(ToVacancyID).trim();
+        if (fromActorID === toActorID) {
+          return res.status(400).json({ message: "\u0644\u0627 \u064A\u0645\u0643\u0646 \u0627\u0644\u0646\u0642\u0644 \u0625\u0644\u0649 \u0646\u0641\u0633 \u0627\u0644\u0645\u0646\u0635\u0628." });
+        }
+        if (schema.isVacancy && schema.hasJobVacancies && schema.hasVacancyDepartmentID) {
+          const deptCheck = await pool.request().input("FromID", sql2.Int, parseInt(fromActorID)).input("ToID", sql2.Int, parseInt(toActorID)).query(`
+                    SELECT
+                        (SELECT DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @FromID) AS FromDept,
+                        (SELECT DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @ToID)   AS ToDept
+                `);
+          const deptRow = deptCheck.recordset[0] || {};
+          if (!deptRow.ToDept) return res.status(404).json({ message: "\u0627\u0644\u0645\u0646\u0635\u0628 \u0627\u0644\u0645\u0633\u062A\u0647\u062F\u0641 \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F." });
+          const deptSchemaProbe = await pool.request().query(`
+                SELECT
+                    CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasType,
+                    CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+                    CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID
+            `);
+          const ds = deptSchemaProbe.recordset[0] || {};
+          const parentCol = ds.HasParentID ? "ParentID" : ds.HasParentDeptID ? "ParentDepartmentID" : null;
+          if (ds.HasType && parentCol) {
+            const scopeCheck = await pool.request().input("FromDept", sql2.Int, deptRow.FromDept).input("ToDept", sql2.Int, deptRow.ToDept).query(`
+                        WITH FromAnc AS (
+                            SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, TRY_CAST([Type] AS INT) AS DType
+                            FROM dbo.Departments WHERE DepartmentID = @FromDept
+                            UNION ALL
+                            SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT), TRY_CAST(d.[Type] AS INT)
+                            FROM dbo.Departments d INNER JOIN FromAnc a ON a.PID IS NOT NULL AND d.DepartmentID = a.PID
+                            WHERE a.DType IS NULL OR a.DType <> 1
+                        ),
+                        FromRoot AS (
+                            SELECT COALESCE(
+                                (SELECT TOP 1 DepartmentID FROM FromAnc WHERE DType = 1),
+                                @FromDept
+                            ) AS RootDeptID
+                        ),
+                        DeptScope AS (
+                            SELECT d.DepartmentID
+                            FROM dbo.Departments d CROSS JOIN FromRoot r
+                            WHERE d.DepartmentID = r.RootDeptID
+                            UNION ALL
+                            SELECT d.DepartmentID
+                            FROM dbo.Departments d
+                            INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                                   AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                            WHERE TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1
+                        )
+                        SELECT
+                            (SELECT RootDeptID FROM FromRoot) AS FromRoot,
+                            CASE WHEN EXISTS(SELECT 1 FROM DeptScope WHERE DepartmentID = @ToDept)
+                                 THEN 1 ELSE 0 END AS IsInScope
+                        OPTION (MAXRECURSION 200)
+                    `);
+            const sc = scopeCheck.recordset[0] || {};
+            if (!sc.IsInScope) {
+              return res.status(400).json({ message: "\u0627\u0644\u0645\u0646\u0635\u0628 \u0627\u0644\u0645\u0633\u062A\u0647\u062F\u0641 \u0644\u0627 \u064A\u0646\u062A\u0645\u064A \u0644\u0646\u0641\u0633 \u0627\u0644\u0642\u0633\u0645 \u0627\u0644\u0645\u0633\u062A\u0642\u0644." });
+            }
+          } else {
+            if (String(deptRow.FromDept) !== String(deptRow.ToDept)) {
+              return res.status(400).json({ message: "\u064A\u062C\u0628 \u0623\u0646 \u064A\u0643\u0648\u0646 \u0627\u0644\u0645\u0646\u0635\u0628\u0627\u0646 \u0641\u064A \u0646\u0641\u0633 \u0627\u0644\u0642\u0633\u0645." });
+            }
+          }
+        }
+        await pool.request().query(`
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'VacancyTransferLog'
+            )
+            CREATE TABLE dbo.VacancyTransferLog (
+                LogID             INT           IDENTITY(1,1) PRIMARY KEY,
+                TransferID        NVARCHAR(50)  NOT NULL,
+                RequestedByUserID NVARCHAR(50)  NOT NULL,
+                FromActorID       NVARCHAR(50)  NOT NULL,
+                ToActorID         NVARCHAR(50)  NOT NULL,
+                TablesAffected    NVARCHAR(MAX) NOT NULL,
+                TotalAffected     INT           NOT NULL DEFAULT 0,
+                IsUndone          BIT           NOT NULL DEFAULT 0,
+                CreatedAt         DATETIME      NOT NULL DEFAULT GETDATE()
+            )
+        `);
+        const sp = (await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Tasks','CreatedByVacancyID')   IS NOT NULL THEN 1 ELSE 0 END AS T_CrVac,
+                CASE WHEN COL_LENGTH('dbo.Tasks','AssignedToVacancyID')  IS NOT NULL THEN 1 ELSE 0 END AS T_AsVac,
+                CASE WHEN COL_LENGTH('dbo.Tasks','LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS T_LaVac,
+                CASE WHEN COL_LENGTH('dbo.Tasks','CreatedBy')            IS NOT NULL THEN 1 ELSE 0 END AS T_Cr,
+                CASE WHEN COL_LENGTH('dbo.Tasks','AssignedTo')           IS NOT NULL THEN 1 ELSE 0 END AS T_As,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','CreatedByVacancyID')   IS NOT NULL THEN 1 ELSE 0 END AS S_CrVac,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID')  IS NOT NULL THEN 1 ELSE 0 END AS S_AsVac,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS S_LaVac,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','CreatedBy')            IS NOT NULL THEN 1 ELSE 0 END AS S_Cr,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedTo')           IS NOT NULL THEN 1 ELSE 0 END AS S_As,
+                CASE WHEN COL_LENGTH('dbo.Comments','CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS C_CmVac,
+                CASE WHEN COL_LENGTH('dbo.Comments','UserID')               IS NOT NULL THEN 1 ELSE 0 END AS C_UID,
+                CASE WHEN OBJECT_ID('dbo.TaskAssignmentNotifications','U')  IS NOT NULL THEN 1 ELSE 0 END AS HasNotifs,
+                CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS N_ToVac,
+                CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','AssignedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS N_ByVac,
+                CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','AssignedToUserID')    IS NOT NULL THEN 1 ELSE 0 END AS N_ToUsr,
+                CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','AssignedByUserID')    IS NOT NULL THEN 1 ELSE 0 END AS N_ByUsr,
+                CASE WHEN OBJECT_ID('dbo.TaskDelegations','U')              IS NOT NULL THEN 1 ELSE 0 END AS HasDeleg,
+                CASE WHEN COL_LENGTH('dbo.TaskDelegations','DelegatorVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS D_OrVac,
+                CASE WHEN COL_LENGTH('dbo.TaskDelegations','DelegateVacancyID')  IS NOT NULL THEN 1 ELSE 0 END AS D_EeVac,
+                CASE WHEN COL_LENGTH('dbo.TaskDelegations','DelegatorUserID')    IS NOT NULL THEN 1 ELSE 0 END AS D_OrUsr,
+                CASE WHEN COL_LENGTH('dbo.TaskDelegations','DelegateUserID')     IS NOT NULL THEN 1 ELSE 0 END AS D_EeUsr
+        `)).recordset[0] || {};
+        const isVac = schema.isVacancy;
+        const targets = [];
+        if (isVac) {
+          if (sp.T_CrVac) targets.push(["Tasks", "CreatedByVacancyID"]);
+          if (sp.T_AsVac) targets.push(["Tasks", "AssignedToVacancyID"]);
+          if (sp.T_LaVac) targets.push(["Tasks", "LastActedByVacancyID"]);
+          if (sp.S_CrVac) targets.push(["Subtasks", "CreatedByVacancyID"]);
+          if (sp.S_AsVac) targets.push(["Subtasks", "AssignedToVacancyID"]);
+          if (sp.S_LaVac) targets.push(["Subtasks", "LastActedByVacancyID"]);
+          if (sp.C_CmVac) targets.push(["Comments", "CommentedByVacancyID"]);
+          if (sp.HasNotifs && sp.N_ToVac) targets.push(["TaskAssignmentNotifications", "AssignedToVacancyID"]);
+          if (sp.HasNotifs && sp.N_ByVac) targets.push(["TaskAssignmentNotifications", "AssignedByVacancyID"]);
+          if (sp.HasDeleg && sp.D_OrVac) targets.push(["TaskDelegations", "DelegatorVacancyID"]);
+          if (sp.HasDeleg && sp.D_EeVac) targets.push(["TaskDelegations", "DelegateVacancyID"]);
+        } else {
+          if (sp.T_Cr) targets.push(["Tasks", "CreatedBy"]);
+          if (sp.T_As) targets.push(["Tasks", "AssignedTo"]);
+          if (sp.S_Cr) targets.push(["Subtasks", "CreatedBy"]);
+          if (sp.S_As) targets.push(["Subtasks", "AssignedTo"]);
+          if (sp.C_UID) targets.push(["Comments", "UserID"]);
+          if (sp.HasNotifs && sp.N_ToUsr) targets.push(["TaskAssignmentNotifications", "AssignedToUserID"]);
+          if (sp.HasNotifs && sp.N_ByUsr) targets.push(["TaskAssignmentNotifications", "AssignedByUserID"]);
+          if (sp.HasDeleg && sp.D_OrUsr) targets.push(["TaskDelegations", "DelegatorUserID"]);
+          if (sp.HasDeleg && sp.D_EeUsr) targets.push(["TaskDelegations", "DelegateUserID"]);
+        }
+        const affectedCounts = {};
+        let totalAffected = 0;
+        for (const [table, col] of targets) {
+          const r = pool.request();
+          if (isVac) {
+            r.input("From", sql2.Int, parseInt(fromActorID));
+            r.input("To", sql2.Int, parseInt(toActorID));
+          } else {
+            r.input("From", sql2.NVarChar(50), fromActorID);
+            r.input("To", sql2.NVarChar(50), toActorID);
+          }
+          const upd = await r.query(`UPDATE dbo.${table} SET ${col} = @To WHERE ${col} = @From`);
+          const cnt = upd.rowsAffected?.[0] || 0;
+          if (cnt > 0) {
+            affectedCounts[`${table}.${col}`] = cnt;
+            totalAffected += cnt;
+          }
+        }
+        const transferId = crypto4.randomUUID();
+        await pool.request().input("TransferID", sql2.NVarChar(50), transferId).input("UserID", sql2.NVarChar(50), UserID).input("From", sql2.NVarChar(50), fromActorID).input("To", sql2.NVarChar(50), toActorID).input("Tables", sql2.NVarChar(sql2.MAX), JSON.stringify(affectedCounts)).input("Total", sql2.Int, totalAffected).query(`
+                INSERT INTO dbo.VacancyTransferLog
+                    (TransferID, RequestedByUserID, FromActorID, ToActorID, TablesAffected, TotalAffected)
+                VALUES (@TransferID, @UserID, @From, @To, @Tables, @Total)
+            `);
+        res.status(200).json({
+          message: "\u062A\u0645 \u0646\u0642\u0644 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u0628\u0646\u062C\u0627\u062D",
+          transferId,
+          fromActorID,
+          toActorID,
+          affectedCounts,
+          totalAffected
+        });
+      } catch (error) {
+        console.error("TRANSFER VACANCY ERROR:", error);
+        res.status(500).json({ message: "\u062D\u062F\u062B \u062E\u0637\u0623 \u0623\u062B\u0646\u0627\u0621 \u0646\u0642\u0644 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A." });
+      }
+    };
+    exports2.undoTransfer = async (req, res) => {
+      const pool = req.app.locals.db;
+      const { transferId, UserID } = req.body;
+      if (!pool) return res.status(503).json({ message: "Database not available." });
+      if (!transferId || !UserID) return res.status(400).json({ message: "transferId and UserID are required." });
+      try {
+        const tableCheck = await pool.request().query(`
+            SELECT CASE WHEN OBJECT_ID('dbo.VacancyTransferLog','U') IS NOT NULL THEN 1 ELSE 0 END AS HasTable
+        `);
+        if (!tableCheck.recordset[0]?.HasTable) {
+          return res.status(404).json({ message: "\u0644\u0627 \u064A\u0648\u062C\u062F \u0633\u062C\u0644 \u0646\u0642\u0644." });
+        }
+        const logResult = await pool.request().input("TransferID", sql2.NVarChar(50), transferId).input("UserID", sql2.NVarChar(50), UserID).query(`
+                SELECT * FROM dbo.VacancyTransferLog
+                WHERE TransferID = @TransferID
+                  AND RequestedByUserID = @UserID
+                  AND IsUndone = 0
+            `);
+        const log = logResult.recordset[0];
+        if (!log) return res.status(404).json({ message: "\u0644\u0645 \u064A\u062A\u0645 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 \u0633\u062C\u0644 \u0627\u0644\u0646\u0642\u0644 \u0623\u0648 \u062A\u0645 \u0627\u0644\u062A\u0631\u0627\u062C\u0639 \u0645\u0633\u0628\u0642\u0627\u064B." });
+        const { FromActorID, ToActorID, TablesAffected } = log;
+        let affectedMap = {};
+        try {
+          affectedMap = JSON.parse(TablesAffected);
+        } catch {
+        }
+        const schema = await detectSchema(pool);
+        const isVac = schema.isVacancy;
+        const restoredCounts = {};
+        for (const tableCol of Object.keys(affectedMap)) {
+          const dotIdx = tableCol.indexOf(".");
+          const table = tableCol.substring(0, dotIdx);
+          const col = tableCol.substring(dotIdx + 1);
+          const r = pool.request();
+          if (isVac) {
+            r.input("From", sql2.Int, parseInt(ToActorID));
+            r.input("To", sql2.Int, parseInt(FromActorID));
+          } else {
+            r.input("From", sql2.NVarChar(50), ToActorID);
+            r.input("To", sql2.NVarChar(50), FromActorID);
+          }
+          const upd = await r.query(`UPDATE dbo.${table} SET ${col} = @To WHERE ${col} = @From`);
+          const cnt = upd.rowsAffected?.[0] || 0;
+          if (cnt > 0) restoredCounts[tableCol] = cnt;
+        }
+        await pool.request().input("TransferID", sql2.NVarChar(50), transferId).query(`UPDATE dbo.VacancyTransferLog SET IsUndone = 1 WHERE TransferID = @TransferID`);
+        res.status(200).json({
+          message: "\u062A\u0645 \u0627\u0644\u062A\u0631\u0627\u062C\u0639 \u0628\u0646\u062C\u0627\u062D",
+          restoredCounts,
+          totalRestored: Object.values(restoredCounts).reduce((a, b) => a + b, 0)
+        });
+      } catch (error) {
+        console.error("UNDO TRANSFER ERROR:", error);
+        res.status(500).json({ message: "\u062D\u062F\u062B \u062E\u0637\u0623 \u0623\u062B\u0646\u0627\u0621 \u0627\u0644\u062A\u0631\u0627\u062C\u0639." });
       }
     };
   }
@@ -101640,6 +102178,8 @@ var require_profileRoutes = __commonJS({
     var profileController = require_profileController();
     router.get("/:userId", profileController.getProfile);
     router.put("/update", profileController.updateProfile);
+    router.post("/transfer-vacancy", profileController.transferVacancy);
+    router.post("/undo-transfer", profileController.undoTransfer);
     module2.exports = router;
   }
 });
@@ -103680,8 +104220,50 @@ var require_vacancyController = __commonJS({
       if (!Number.isInteger(departmentId)) {
         return res.status(400).json({ message: "departmentId must be an integer." });
       }
-      let builtQuery = "";
       try {
+        let toInt2 = function(val) {
+          const n = Number(val);
+          return Number.isFinite(n) ? Math.round(n) : null;
+        }, isIndependent2 = function(dept) {
+          if (!typeColJS) return false;
+          const v = dept[typeColJS];
+          return v === 1 || v === true || v === "1";
+        }, findIndependentRoot2 = function(startId) {
+          const map = new Map(allDepts.map((d) => [toInt2(d[deptIdCol]), d]));
+          let cur = map.get(startId);
+          const visited = /* @__PURE__ */ new Set();
+          while (cur && !visited.has(toInt2(cur[deptIdCol]))) {
+            const curId = toInt2(cur[deptIdCol]);
+            visited.add(curId);
+            if (isIndependent2(cur)) {
+              console.log(`[SCOPE] independentRoot=${curId}`);
+              return curId;
+            }
+            const pid = parentColJS ? toInt2(cur[parentColJS]) : null;
+            if (!pid) break;
+            cur = map.get(pid);
+          }
+          console.log(`[SCOPE] noIndependentRootFound, fallback to startId=${startId}`);
+          return startId;
+        }, getSubtreeIds2 = function(rootId2) {
+          const result2 = /* @__PURE__ */ new Set();
+          const queue = [rootId2];
+          while (queue.length > 0) {
+            const cur = queue.shift();
+            result2.add(cur);
+            if (parentColJS) {
+              allDepts.forEach((d) => {
+                const pid = toInt2(d[parentColJS]);
+                const did = toInt2(d[deptIdCol]);
+                if (pid === cur && did != null && !result2.has(did)) {
+                  queue.push(did);
+                }
+              });
+            }
+          }
+          return result2;
+        };
+        var toInt = toInt2, isIndependent = isIndependent2, findIndependentRoot = findIndependentRoot2, getSubtreeIds = getSubtreeIds2;
         const sr = await pool.request().query(`
             SELECT
                 CASE WHEN OBJECT_ID('dbo.JobVacancies','U') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancies,
@@ -103689,75 +104271,25 @@ var require_vacancyController = __commonJS({
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacDept,
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','Name')         IS NOT NULL THEN 1 ELSE 0 END AS HasVacName,
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','IsActive')     IS NOT NULL THEN 1 ELSE 0 END AS HasVacIsActive,
-                CASE WHEN COL_LENGTH('dbo.Assignments', 'IsCurrent')    IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
+                CASE WHEN COL_LENGTH('dbo.Assignments', 'IsCurrent')    IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent
         `);
         const s = sr.recordset[0] || {};
-        if (!s.HasVacancies || !s.HasVacDept) {
-          return res.status(200).json([]);
-        }
-        const parentCol = s.HasParentID ? "ParentID" : s.HasParentDeptID ? "ParentDepartmentID" : null;
+        if (!s.HasVacancies || !s.HasVacDept) return res.status(200).json([]);
+        const deptsRes = await pool.request().query("SELECT * FROM dbo.Departments");
+        const allDepts = deptsRes.recordset;
+        const sampleDept = allDepts[0] || {};
+        const sampleKeys = Object.keys(sampleDept);
+        const parentColJS = sampleKeys.find((k) => k === "ParentID") || sampleKeys.find((k) => k === "ParentDepartmentID") || null;
+        const typeColJS = sampleKeys.find((k) => k === "Type") || null;
+        const deptIdCol = sampleKeys.find((k) => k === "DepartmentID") || "DepartmentID";
+        console.log(`[SCOPE] deptId=${departmentId} depts=${allDepts.length} parentCol=${parentColJS} typeCol=${typeColJS} deptIdCol=${deptIdCol}`);
+        const rootId = findIndependentRoot2(departmentId);
+        const scopeIds = [...getSubtreeIds2(rootId)].filter((id) => id != null && Number.isFinite(id));
+        console.log(`[SCOPE] rootId=${rootId} scopeIds=[${scopeIds.join(",")}]`);
+        if (scopeIds.length === 0) return res.status(200).json([]);
+        const inClause = scopeIds.join(",");
         const nameExpr = s.HasVacName ? "jv.Name" : "CAST(jv.VacancyID AS NVARCHAR(50))";
         const isActiveFilter = s.HasVacIsActive ? "AND (jv.IsActive = 1 OR jv.IsActive IS NULL)" : "";
-        const typeNotZero = s.HasDeptType ? `(d.[Type] IS NULL OR TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 0)` : null;
-        let withCte = "";
-        let deptFilter = "";
-        if (parentCol) {
-          const downWhere = `WHERE d.[Type] IS NULL OR TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 0`;
-          if (s.HasDeptType) {
-            withCte = `
-                    WITH UpTree AS (
-                        SELECT DepartmentID, ${parentCol} AS PID, 0 AS Lvl,
-                               TRY_CAST([Type] AS INT) AS DType
-                        FROM dbo.Departments
-                        WHERE DepartmentID = @DepartmentID
-                        UNION ALL
-                        SELECT d.DepartmentID, d.${parentCol} AS PID, u.Lvl + 1,
-                               TRY_CAST(d.[Type] AS INT) AS DType
-                        FROM dbo.Departments d
-                        INNER JOIN UpTree u ON d.DepartmentID = u.PID
-                    ),
-                    RootID AS (
-                        SELECT COALESCE(
-                            (SELECT TOP 1 DepartmentID FROM UpTree WHERE DType = 0 ORDER BY Lvl ASC),
-                            (SELECT TOP 1 DepartmentID FROM UpTree WHERE Lvl = 1),
-                            @DepartmentID
-                        ) AS RootDeptID
-                    ),
-                    DeptScope AS (
-                        SELECT d.DepartmentID
-                        FROM dbo.Departments d CROSS JOIN RootID r
-                        WHERE d.DepartmentID = r.RootDeptID
-                        UNION ALL
-                        SELECT d.DepartmentID
-                        FROM dbo.Departments d
-                        INNER JOIN DeptScope t ON d.${parentCol} = t.DepartmentID
-                        ${downWhere}
-                    )
-                `;
-          } else {
-            withCte = `
-                    WITH ParentID AS (
-                        SELECT COALESCE(
-                            (SELECT TOP 1 ${parentCol} FROM dbo.Departments WHERE DepartmentID = @DepartmentID AND ${parentCol} IS NOT NULL),
-                            @DepartmentID
-                        ) AS RootDeptID
-                    ),
-                    DeptScope AS (
-                        SELECT d.DepartmentID FROM dbo.Departments d CROSS JOIN ParentID p WHERE d.DepartmentID = p.RootDeptID
-                        UNION ALL
-                        SELECT d.DepartmentID
-                        FROM dbo.Departments d
-                        INNER JOIN DeptScope t ON d.${parentCol} = t.DepartmentID
-                    )
-                `;
-          }
-          deptFilter = "EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)";
-        } else {
-          deptFilter = "jv.DepartmentID = @DepartmentID";
-        }
         const assJoin = s.HasAssignments ? `LEFT JOIN dbo.Assignments ca ON ca.VacancyID = jv.VacancyID ${s.HasAssIsCurrent ? "AND ca.IsCurrent = 1" : ""}
                LEFT JOIN dbo.Users u ON u.UserID = ca.UserID` : "";
         const personName = s.HasAssignments ? "u.FullName" : "CAST(NULL AS NVARCHAR(200))";
@@ -103776,18 +104308,14 @@ var require_vacancyController = __commonJS({
                 ${personName} AS CurrentUserFullName
             FROM dbo.JobVacancies jv
             ${assJoin}
-            WHERE ${deptFilter}
+            WHERE jv.DepartmentID IN (${inClause})
             ${isActiveFilter}
             ORDER BY FullName
-            OPTION (MAXRECURSION 100)
         `;
-        builtQuery = withCte ? `${withCte}
-${mainSql}` : mainSql;
-        const result = await pool.request().input("DepartmentID", sql2.Int, departmentId).query(builtQuery);
+        const result = await pool.request().query(mainSql);
         res.status(200).json(result.recordset || []);
       } catch (err) {
         console.error("LIST VACANCIES BY DEPT SCOPE ERROR:", err.message);
-        console.error("SQL used:\n", builtQuery);
         res.status(500).send({ message: "Error fetching assignable users", detail: err.message });
       }
     };
@@ -103806,6 +104334,16 @@ ${mainSql}` : mainSql;
         const nameCol = s.HasVacName ? "jv.Name" : `CAST(jv.VacancyID AS NVARCHAR(50))`;
         const isActiveCol = s.HasVacIsActive ? "jv.IsActive" : "CAST(1 AS BIT)";
         const deptFilter = s.HasVacDept ? "jv.DepartmentID = @DepartmentID" : "1 = 0";
+        const ranksProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN OBJECT_ID('dbo.Ranks','U')           IS NOT NULL THEN 1 ELSE 0 END AS HasRanks,
+                CASE WHEN COL_LENGTH('dbo.Ranks','Name')        IS NOT NULL THEN 1 ELSE 0 END AS HasRankName,
+                CASE WHEN COL_LENGTH('dbo.Ranks','RankName')    IS NOT NULL THEN 1 ELSE 0 END AS HasRankRankName
+        `);
+        const rp = ranksProbe.recordset[0] || {};
+        const rankNameCol = rp.HasRankName ? "rk.Name" : rp.HasRankRankName ? "rk.RankName" : null;
+        const rankJoin = s.HasVacRank && rp.HasRanks && rankNameCol ? `LEFT JOIN dbo.Ranks rk ON rk.RankID = jv.Rank` : "";
+        const rankSelect = s.HasVacRank && rp.HasRanks && rankNameCol ? `, jv.Rank AS RankID, ${rankNameCol} AS RankName` : s.HasVacRank ? `, jv.Rank AS RankID, CAST(NULL AS NVARCHAR(200)) AS RankName` : `, CAST(NULL AS INT) AS RankID, CAST(NULL AS NVARCHAR(200)) AS RankName`;
         const assignJoin = s.HasAssignments ? `
             OUTER APPLY (
                 SELECT TOP 1 a.AssignmentID, a.UserID, a.VacancyID
@@ -103834,8 +104372,10 @@ ${mainSql}` : mainSql;
                     ${nameCol}     AS Name,
                     ${isActiveCol} AS IsActive,
                     ${s.HasVacDept ? "jv.DepartmentID" : "CAST(NULL AS INT) AS DepartmentID"}
+                    ${rankSelect}
                     ${selectUser}
                 FROM dbo.JobVacancies jv
+                ${rankJoin}
                 ${assignJoin}
                 WHERE ${deptFilter}
                 ORDER BY ${s.HasVacName ? "jv.Name" : "jv.VacancyID"}
@@ -103844,6 +104384,283 @@ ${mainSql}` : mainSql;
       } catch (err) {
         console.error("LIST VACANCIES BY DEPARTMENT ERROR:", err);
         res.status(500).send({ message: "Error fetching vacancies", detail: err.message });
+      }
+    };
+    exports2.listAllVacancies = async (req, res) => {
+      const pool = req.app.locals.db;
+      if (!pool) return res.status(503).json({ message: "DB not available" });
+      try {
+        const s = await probeVacancySchema(pool);
+        if (!s.HasVacancies) return res.status(200).json([]);
+        const nameCol = s.HasVacName ? "jv.Name" : `CAST(jv.VacancyID AS NVARCHAR(50))`;
+        const activeFilter = s.HasVacIsActive ? "WHERE (jv.IsActive = 1 OR jv.IsActive IS NULL)" : "";
+        const deptCol = s.HasVacDept ? "jv.DepartmentID" : "CAST(NULL AS INT) AS DepartmentID";
+        const result = await pool.request().query(`
+            SELECT jv.VacancyID, ${nameCol} AS Name, ${deptCol}
+            FROM dbo.JobVacancies jv
+            ${activeFilter}
+            ORDER BY ${s.HasVacName ? "jv.Name" : "jv.VacancyID"}
+        `);
+        res.status(200).json(result.recordset || []);
+      } catch (err) {
+        res.status(500).json({ message: "Error fetching vacancies", detail: err.message });
+      }
+    };
+    exports2.listByIndependentDepartment = async (req, res) => {
+      const pool = req.app.locals.db;
+      if (!pool) return res.status(503).send({ message: "Database connection is not available." });
+      const departmentId = parseInt(req.params.departmentId, 10);
+      if (!Number.isInteger(departmentId)) {
+        return res.status(400).json({ message: "departmentId must be an integer." });
+      }
+      let builtQuery = "";
+      try {
+        const s = await probeVacancySchema(pool);
+        if (!s.HasVacancies) return res.status(200).json([]);
+        const deptProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+                CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
+        `);
+        const dp = deptProbe.recordset[0] || {};
+        const parentCol = dp.HasParentID ? "ParentID" : dp.HasParentDeptID ? "ParentDepartmentID" : null;
+        const nameCol = s.HasVacName ? "jv.Name" : "CAST(jv.VacancyID AS NVARCHAR(50))";
+        const isActiveCol = s.HasVacIsActive ? "jv.IsActive" : "CAST(1 AS BIT)";
+        const isActiveFilter = s.HasVacIsActive ? "AND (jv.IsActive = 1 OR jv.IsActive IS NULL)" : "";
+        const assignJoin = s.HasAssignments ? `
+            OUTER APPLY (
+                SELECT TOP 1 a.UserID, a.VacancyID
+                FROM dbo.Assignments a
+                WHERE a.VacancyID = jv.VacancyID
+                  ${s.HasAssIsCurrent ? "AND a.IsCurrent = 1" : ""}
+                ORDER BY
+                  ${s.HasAssIsCurrent ? "CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END," : ""}
+                  ${s.HasAssStartDate ? `ISNULL(a.StartDate, '1900-01-01') DESC,` : ""}
+                  a.AssignmentID DESC
+            ) ca
+            LEFT JOIN dbo.Users u ON u.UserID = ca.UserID
+        ` : "";
+        const selectUser = s.HasAssignments ? `,
+                ca.UserID AS CurrentUserID,
+                ${s.HasUserFullName ? "u.FullName" : "CAST(NULL AS NVARCHAR(200))"} AS CurrentUserFullName,
+                ${s.HasUserIsActive ? "u.IsActive" : "CAST(1 AS BIT)"} AS CurrentUserIsActive
+        ` : "";
+        let withCte = "";
+        let deptFilter = "";
+        if (parentCol && dp.HasDeptType) {
+          withCte = `
+                WITH UpTree AS (
+                    SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, 0 AS Lvl,
+                           TRY_CAST([Type] AS INT) AS DType
+                    FROM dbo.Departments
+                    WHERE DepartmentID = @DepartmentID
+                    UNION ALL
+                    SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS PID, u.Lvl + 1,
+                           TRY_CAST(d.[Type] AS INT) AS DType
+                    FROM dbo.Departments d
+                    INNER JOIN UpTree u ON u.PID IS NOT NULL AND d.DepartmentID = u.PID
+                    WHERE u.DType <> 1 OR u.DType IS NULL
+                ),
+                RootID AS (
+                    SELECT COALESCE(
+                        (SELECT TOP 1 DepartmentID FROM UpTree WHERE DType = 1 ORDER BY Lvl ASC),
+                        @DepartmentID
+                    ) AS RootDeptID
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d CROSS JOIN RootID r
+                    WHERE d.DepartmentID = r.RootDeptID
+                    UNION ALL
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d
+                    INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                           AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                    WHERE TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1
+                )
+            `;
+          deptFilter = "EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)";
+        } else if (parentCol) {
+          withCte = `
+                WITH ParentRoot AS (
+                    SELECT COALESCE(
+                        TRY_CAST((SELECT TOP 1 ${parentCol} FROM dbo.Departments WHERE DepartmentID = @DepartmentID AND ${parentCol} IS NOT NULL) AS INT),
+                        @DepartmentID
+                    ) AS RootDeptID
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID FROM dbo.Departments d CROSS JOIN ParentRoot p WHERE d.DepartmentID = p.RootDeptID
+                    UNION ALL
+                    SELECT d.DepartmentID FROM dbo.Departments d
+                    INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                           AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                )
+            `;
+          deptFilter = "EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)";
+        } else {
+          deptFilter = s.HasVacDept ? "jv.DepartmentID = @DepartmentID" : "1 = 0";
+        }
+        const mainSql = `
+            SELECT
+                jv.VacancyID,
+                ${nameCol}     AS Name,
+                ${isActiveCol} AS IsActive,
+                ${s.HasVacDept ? "jv.DepartmentID" : "CAST(NULL AS INT) AS DepartmentID"}
+                ${selectUser}
+            FROM dbo.JobVacancies jv
+            ${assignJoin}
+            WHERE ${deptFilter}
+            ${isActiveFilter}
+            ORDER BY ${s.HasVacName ? "jv.Name" : "jv.VacancyID"}
+            OPTION (MAXRECURSION 100)
+        `;
+        builtQuery = withCte ? `${withCte}
+${mainSql}` : mainSql;
+        const result = await pool.request().input("DepartmentID", sql2.Int, departmentId).query(builtQuery);
+        res.status(200).json(result.recordset || []);
+      } catch (err) {
+        console.error("LIST INDEPENDENT SCOPE ERROR:", err.message);
+        console.error("SQL used:\n", builtQuery);
+        res.status(500).send({ message: "Error fetching independent scope vacancies", detail: err.message });
+      }
+    };
+    exports2.listByUserTransferScope = async (req, res) => {
+      const pool = req.app.locals.db;
+      if (!pool) return res.status(503).send({ message: "Database connection is not available." });
+      const userId = String(req.params.userId || "").trim();
+      if (!userId) return res.status(400).json({ message: "userId is required." });
+      let builtQuery = "";
+      try {
+        const s = await probeVacancySchema(pool);
+        if (!s.HasVacancies) return res.status(200).json([]);
+        if (!s.HasAssignments) return res.status(200).json([]);
+        const assRes = await pool.request().input("UID", sql2.NVarChar(50), userId).query(`
+                SELECT TOP 1
+                    a.VacancyID,
+                    jv.DepartmentID AS VacancyDeptID
+                FROM dbo.Assignments a
+                INNER JOIN dbo.JobVacancies jv ON jv.VacancyID = a.VacancyID
+                WHERE a.UserID = @UID
+                  AND jv.VacancyID IS NOT NULL
+                ORDER BY
+                    ${s.HasAssIsCurrent ? "CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END," : ""}
+                    ${s.HasAssStartDate ? `ISNULL(a.StartDate, '1900-01-01') DESC,` : ""}
+                    a.AssignmentID DESC
+            `);
+        const assRow = assRes.recordset[0];
+        if (!assRow || assRow.VacancyDeptID == null) {
+          return res.status(200).json([]);
+        }
+        const departmentId = parseInt(assRow.VacancyDeptID, 10);
+        const currentVacancyId = parseInt(assRow.VacancyID, 10);
+        const deptProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+                CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
+        `);
+        const dp = deptProbe.recordset[0] || {};
+        const parentCol = dp.HasParentID ? "ParentID" : dp.HasParentDeptID ? "ParentDepartmentID" : null;
+        const nameCol = s.HasVacName ? "jv.Name" : "CAST(jv.VacancyID AS NVARCHAR(50))";
+        const isActiveCol = s.HasVacIsActive ? "jv.IsActive" : "CAST(1 AS BIT)";
+        const isActiveFilter = s.HasVacIsActive ? "AND (jv.IsActive = 1 OR jv.IsActive IS NULL)" : "";
+        const assignJoin = s.HasAssignments ? `
+            OUTER APPLY (
+                SELECT TOP 1 a.UserID, a.VacancyID
+                FROM dbo.Assignments a
+                WHERE a.VacancyID = jv.VacancyID
+                  ${s.HasAssIsCurrent ? "AND a.IsCurrent = 1" : ""}
+                ORDER BY
+                  ${s.HasAssIsCurrent ? "CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END," : ""}
+                  ${s.HasAssStartDate ? `ISNULL(a.StartDate, '1900-01-01') DESC,` : ""}
+                  a.AssignmentID DESC
+            ) ca
+            LEFT JOIN dbo.Users u ON u.UserID = ca.UserID
+        ` : "";
+        const selectUser = s.HasAssignments ? `,
+                ca.UserID AS CurrentUserID,
+                ${s.HasUserFullName ? "u.FullName" : "CAST(NULL AS NVARCHAR(200))"} AS CurrentUserFullName,
+                ${s.HasUserIsActive ? "u.IsActive" : "CAST(1 AS BIT)"} AS CurrentUserIsActive
+        ` : "";
+        let withCte = "";
+        let deptFilter = "";
+        if (parentCol && dp.HasDeptType) {
+          withCte = `
+                WITH UpTree AS (
+                    SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, 0 AS Lvl,
+                           TRY_CAST([Type] AS INT) AS DType
+                    FROM dbo.Departments
+                    WHERE DepartmentID = @DepartmentID
+                    UNION ALL
+                    SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS PID, u.Lvl + 1,
+                           TRY_CAST(d.[Type] AS INT) AS DType
+                    FROM dbo.Departments d
+                    INNER JOIN UpTree u ON u.PID IS NOT NULL AND d.DepartmentID = u.PID
+                    WHERE u.DType <> 1 OR u.DType IS NULL
+                ),
+                RootID AS (
+                    SELECT COALESCE(
+                        (SELECT TOP 1 DepartmentID FROM UpTree WHERE DType = 1 ORDER BY Lvl ASC),
+                        @DepartmentID
+                    ) AS RootDeptID
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d CROSS JOIN RootID r
+                    WHERE d.DepartmentID = r.RootDeptID
+                    UNION ALL
+                    SELECT d.DepartmentID
+                    FROM dbo.Departments d
+                    INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                           AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                    WHERE TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1
+                )
+            `;
+          deptFilter = "EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)";
+        } else if (parentCol) {
+          withCte = `
+                WITH ParentRoot AS (
+                    SELECT COALESCE(
+                        TRY_CAST((SELECT TOP 1 ${parentCol} FROM dbo.Departments WHERE DepartmentID = @DepartmentID AND ${parentCol} IS NOT NULL) AS INT),
+                        @DepartmentID
+                    ) AS RootDeptID
+                ),
+                DeptScope AS (
+                    SELECT d.DepartmentID FROM dbo.Departments d CROSS JOIN ParentRoot p WHERE d.DepartmentID = p.RootDeptID
+                    UNION ALL
+                    SELECT d.DepartmentID FROM dbo.Departments d
+                    INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                                           AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
+                )
+            `;
+          deptFilter = "EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)";
+        } else {
+          deptFilter = s.HasVacDept ? "jv.DepartmentID = @DepartmentID" : "1 = 0";
+        }
+        const mainSql = `
+            SELECT
+                jv.VacancyID,
+                ${nameCol}     AS Name,
+                ${isActiveCol} AS IsActive,
+                ${s.HasVacDept ? "jv.DepartmentID" : "CAST(NULL AS INT) AS DepartmentID"}
+                ${selectUser}
+            FROM dbo.JobVacancies jv
+            ${assignJoin}
+            WHERE ${deptFilter}
+              AND jv.VacancyID <> @CurrentVacancyID
+            ${isActiveFilter}
+            ORDER BY ${s.HasVacName ? "jv.Name" : "jv.VacancyID"}
+            OPTION (MAXRECURSION 100)
+        `;
+        builtQuery = withCte ? `${withCte}
+${mainSql}` : mainSql;
+        const result = await pool.request().input("DepartmentID", sql2.Int, departmentId).input("CurrentVacancyID", sql2.Int, currentVacancyId).query(builtQuery);
+        res.status(200).json(result.recordset || []);
+      } catch (err) {
+        console.error("LIST USER TRANSFER SCOPE ERROR:", err.message);
+        console.error("SQL used:\n", builtQuery);
+        res.status(500).send({ message: "Error fetching user transfer scope", detail: err.message });
       }
     };
     exports2.createVacancy = async (req, res) => {
@@ -103957,17 +104774,30 @@ ${mainSql}` : mainSql;
       if (!Number.isInteger(vacancyId)) {
         return res.status(400).json({ message: "id must be an integer." });
       }
+      const transaction = new sql2.Transaction(pool);
       try {
-        await pool.request().input("VacancyID", sql2.Int, vacancyId).query(`DELETE FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+        const probe = await pool.request().query(`
+            SELECT
+                CASE WHEN OBJECT_ID('dbo.Assignments','U')  IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+                CASE WHEN OBJECT_ID('dbo.VacancyRanks','U') IS NOT NULL THEN 1 ELSE 0 END AS HasVacRanks
+        `);
+        const p = probe.recordset[0] || {};
+        await transaction.begin();
+        if (p.HasVacRanks) {
+          await new sql2.Request(transaction).input("VID", sql2.Int, vacancyId).query(`DELETE FROM dbo.VacancyRanks WHERE VacancyID = @VID`);
+        }
+        if (p.HasAssignments) {
+          await new sql2.Request(transaction).input("VID", sql2.Int, vacancyId).query(`DELETE FROM dbo.Assignments WHERE VacancyID = @VID`);
+        }
+        await new sql2.Request(transaction).input("VID", sql2.Int, vacancyId).query(`DELETE FROM dbo.JobVacancies WHERE VacancyID = @VID`);
+        await transaction.commit();
         res.status(200).json({ message: "Vacancy deleted successfully" });
       } catch (err) {
-        console.error("DELETE VACANCY ERROR:", err);
-        if (err.number === 547) {
-          return res.status(400).send({
-            message: "\u0644\u0627 \u064A\u0645\u0643\u0646 \u062D\u0630\u0641 \u0627\u0644\u0645\u0646\u0635\u0628 \u0644\u0623\u0646\u0647 \u0645\u0631\u062A\u0628\u0637 \u0628\u0625\u0633\u0646\u0627\u062F\u0627\u062A \u0623\u0648 \u0645\u0647\u0627\u0645.",
-            detail: err.message
-          });
+        try {
+          await transaction.rollback();
+        } catch (_) {
         }
+        console.error("DELETE VACANCY ERROR:", err);
         res.status(500).send({ message: "Error deleting vacancy", detail: err.message });
       }
     };
@@ -104262,6 +105092,87 @@ ${mainSql}` : mainSql;
         res.status(500).send({ message: "Error fetching unassigned users", detail: err.message });
       }
     };
+    exports2.checkVacancyUsage = async (req, res) => {
+      const pool = req.app.locals.db;
+      if (!pool) return res.status(503).json({ message: "DB unavailable" });
+      const vacancyId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(vacancyId)) return res.status(400).json({ message: "id must be integer" });
+      try {
+        const probe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Tasks','AssignedToVacancyID')    IS NOT NULL THEN 1 ELSE 0 END AS HasTasksVacID,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubsVacID,
+                CASE WHEN OBJECT_ID('dbo.Assignments','U')                 IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+                CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')        IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent
+        `);
+        const p = probe.recordset[0] || {};
+        let tasks = 0, subtasks = 0, assignments = 0;
+        if (p.HasTasksVacID) {
+          const r = await pool.request().input("VID", sql2.Int, vacancyId).query(`SELECT COUNT(*) AS cnt FROM dbo.Tasks WHERE AssignedToVacancyID = @VID`);
+          tasks = r.recordset[0]?.cnt || 0;
+        }
+        if (p.HasSubsVacID) {
+          const r = await pool.request().input("VID", sql2.Int, vacancyId).query(`SELECT COUNT(*) AS cnt FROM dbo.Subtasks WHERE AssignedToVacancyID = @VID`);
+          subtasks = r.recordset[0]?.cnt || 0;
+        }
+        if (p.HasAssignments) {
+          const activeWhere = p.HasAssIsCurrent ? "AND IsCurrent = 1" : "";
+          const r = await pool.request().input("VID", sql2.Int, vacancyId).query(`SELECT COUNT(*) AS cnt FROM dbo.Assignments WHERE VacancyID = @VID ${activeWhere}`);
+          assignments = r.recordset[0]?.cnt || 0;
+        }
+        const total = tasks + subtasks + assignments;
+        res.status(200).json({ tasks, subtasks, assignments, total, canDelete: tasks === 0 && subtasks === 0 });
+      } catch (err) {
+        console.error("CHECK VACANCY USAGE ERROR:", err);
+        res.status(500).json({ message: "Error checking usage", detail: err.message });
+      }
+    };
+    exports2.transferAndDeleteVacancy = async (req, res) => {
+      const pool = req.app.locals.db;
+      if (!pool) return res.status(503).json({ message: "DB unavailable" });
+      const vacancyId = parseInt(req.params.id, 10);
+      const targetId = parseInt(req.body?.targetVacancyId, 10);
+      if (!Number.isInteger(vacancyId) || !Number.isInteger(targetId))
+        return res.status(400).json({ message: "vacancyId and targetVacancyId must be integers" });
+      if (vacancyId === targetId)
+        return res.status(400).json({ message: "Source and target must be different" });
+      const transaction = new sql2.Transaction(pool);
+      try {
+        const probe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Tasks','AssignedToVacancyID')    IS NOT NULL THEN 1 ELSE 0 END AS HasTasksVacID,
+                CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubsVacID,
+                CASE WHEN OBJECT_ID('dbo.Assignments','U')                 IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+                CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')        IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent,
+                CASE WHEN OBJECT_ID('dbo.VacancyRanks','U')                IS NOT NULL THEN 1 ELSE 0 END AS HasVacRanks
+        `);
+        const p = probe.recordset[0] || {};
+        await transaction.begin();
+        if (p.HasTasksVacID) {
+          await new sql2.Request(transaction).input("SRC", sql2.Int, vacancyId).input("TGT", sql2.Int, targetId).query(`UPDATE dbo.Tasks SET AssignedToVacancyID = @TGT WHERE AssignedToVacancyID = @SRC`);
+        }
+        if (p.HasSubsVacID) {
+          await new sql2.Request(transaction).input("SRC", sql2.Int, vacancyId).input("TGT", sql2.Int, targetId).query(`UPDATE dbo.Subtasks SET AssignedToVacancyID = @TGT WHERE AssignedToVacancyID = @SRC`);
+        }
+        if (p.HasAssignments) {
+          const closeWhere = p.HasAssIsCurrent ? "AND IsCurrent = 1" : "";
+          await new sql2.Request(transaction).input("SRC", sql2.Int, vacancyId).query(`UPDATE dbo.Assignments SET IsCurrent = 0 WHERE VacancyID = @SRC ${closeWhere}`);
+        }
+        if (p.HasVacRanks) {
+          await new sql2.Request(transaction).input("SRC", sql2.Int, vacancyId).query(`DELETE FROM dbo.VacancyRanks WHERE VacancyID = @SRC`);
+        }
+        await new sql2.Request(transaction).input("SRC", sql2.Int, vacancyId).query(`DELETE FROM dbo.JobVacancies WHERE VacancyID = @SRC`);
+        await transaction.commit();
+        res.status(200).json({ message: "Vacancy transferred and deleted successfully" });
+      } catch (err) {
+        try {
+          await transaction.rollback();
+        } catch (_) {
+        }
+        console.error("TRANSFER AND DELETE VACANCY ERROR:", err);
+        res.status(500).json({ message: "Error during transfer", detail: err.message });
+      }
+    };
   }
 });
 
@@ -104272,15 +105183,20 @@ var require_vacancyRoutes = __commonJS({
     var router = express2.Router();
     var vacancyController = require_vacancyController();
     router.get("/ranks", vacancyController.listRanks);
+    router.get("/all", vacancyController.listAllVacancies);
     router.get("/candidates", vacancyController.listCandidates);
     router.get("/unassigned-users", vacancyController.listUnassignedUsers);
+    router.get("/user-scope/:userId", vacancyController.listByUserTransferScope);
     router.get("/department/:departmentId/scope", vacancyController.listByDepartmentScope);
+    router.get("/department/:departmentId/independent-scope", vacancyController.listByIndependentDepartment);
     router.get("/department/:departmentId", vacancyController.listByDepartment);
     router.post("/", vacancyController.createVacancy);
     router.put("/:id", vacancyController.updateVacancy);
     router.get("/:id/rank", vacancyController.getVacancyRank);
     router.put("/:id/rank", vacancyController.setVacancyRank);
     router.delete("/:id/rank", vacancyController.deleteVacancyRank);
+    router.get("/:id/usage", vacancyController.checkVacancyUsage);
+    router.post("/:id/transfer-and-delete", vacancyController.transferAndDeleteVacancy);
     router.delete("/:id", vacancyController.deleteVacancy);
     router.post("/:id/assign", vacancyController.assignUser);
     router.delete("/:id/assign", vacancyController.unassignCurrent);
@@ -104388,9 +105304,27 @@ var require_dbMigrations = __commonJS({
         throw err;
       }
     }
+    async function ensureRegistrationRequestsVacancyID2(pool) {
+      try {
+        const check = await pool.request().query(
+          `SELECT COL_LENGTH('dbo.RegistrationRequests','VacancyID') AS Len`
+        );
+        if (check.recordset[0]?.Len) return { changed: false };
+        await pool.request().query(
+          `IF COL_LENGTH('dbo.RegistrationRequests','VacancyID') IS NULL
+       ALTER TABLE dbo.RegistrationRequests ADD VacancyID INT NULL`
+        );
+        console.log("\u2705 Added VacancyID column to RegistrationRequests.");
+        return { changed: true };
+      } catch (err) {
+        console.error("\u274C Failed ensuring RegistrationRequests.VacancyID:", err);
+        throw err;
+      }
+    }
     module2.exports = {
       ensureSubtasksCalendarFlag: ensureSubtasksCalendarFlag2,
       ensureCommentsCalendarFlag: ensureCommentsCalendarFlag2,
+      ensureRegistrationRequestsVacancyID: ensureRegistrationRequestsVacancyID2,
       // يضمن وجود جدول أحداث التقويم الخاصة بالمستخدم (آمن للتشغيل المتكرر)
       ensurePersonalEventsTable: async function ensurePersonalEventsTable2(pool) {
         try {
@@ -104724,6 +105658,35 @@ var require_dbMigrations = __commonJS({
           console.error("\u274C Failed ensuring EndDate column in Subtasks:", err);
           throw err;
         }
+      },
+      // إنشاء جدول UserRoles إذا لم يكن موجودًا (يخزّن أدوار 1=مدير عام، 2=مدير قسم)
+      ensureUserRolesTable: async function ensureUserRolesTable2(pool) {
+        try {
+          const check = await pool.request().query(`
+        SELECT COUNT(*) AS tableExists
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'UserRoles'
+      `);
+          if (check.recordset[0].tableExists > 0) {
+            console.log("\u2139\uFE0F UserRoles table already exists.");
+            return { changed: false };
+          }
+          await pool.request().query(`
+        CREATE TABLE dbo.UserRoles (
+          UserID NVARCHAR(50) NOT NULL,
+          Role   INT          NOT NULL DEFAULT 0,
+          CONSTRAINT PK_UserRoles PRIMARY KEY (UserID),
+          CONSTRAINT FK_UserRoles_Users FOREIGN KEY (UserID)
+            REFERENCES dbo.Users(UserID) ON DELETE CASCADE ON UPDATE CASCADE,
+          CONSTRAINT CK_UserRoles_Role CHECK (Role IN (0, 1, 2))
+        );
+      `);
+          console.log("\u2705 Created UserRoles table.");
+          return { changed: true };
+        } catch (err) {
+          console.error("\u274C Failed ensuring UserRoles table:", err);
+          throw err;
+        }
       }
     };
   }
@@ -104738,7 +105701,16 @@ var cors = require_lib6();
 var app = express();
 var port = process.env.PORT || 5001;
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "20mb" }));
+app.use((err, req, res, next) => {
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ message: "\u062D\u062C\u0645 \u0627\u0644\u0637\u0644\u0628 \u0643\u0628\u064A\u0631 \u062C\u062F\u0627\u064B" });
+  }
+  if (err.type === "entity.parse.failed") {
+    return res.status(400).json({ message: "\u062A\u0646\u0633\u064A\u0642 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u063A\u064A\u0631 \u0635\u062D\u064A\u062D" });
+  }
+  next(err);
+});
 var exeDir = process.pkg ? path.dirname(process.execPath) : null;
 var candidateStaticDirs = [
   process.env.STATIC_DIR && path.resolve(process.env.STATIC_DIR),
@@ -104786,7 +105758,9 @@ var {
   ensureCheckTaskDelegationPermissionFunction,
   ensureTaskUrlColumn,
   ensureTaskQueryPerformanceIndexes,
-  ensureSubtaskEndDateColumn
+  ensureSubtaskEndDateColumn,
+  ensureUserRolesTable,
+  ensureRegistrationRequestsVacancyID
 } = require_dbMigrations();
 app.use("/api/auth", authRoutes);
 app.use("/api/tasks", taskRoutes);
@@ -104802,8 +105776,15 @@ app.use("/api/calendar", calendarRoutes);
 app.use("/api/delegations", delegationRoutes);
 app.use("/api/vacancies", vacancyRoutes);
 app.use("/api/ranks", ranksRoutes);
+app.all("/api/*", (req, res) => {
+  res.status(404).json({ message: `\u0627\u0644\u0645\u0633\u0627\u0631 ${req.method} ${req.path} \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F` });
+});
 app.get("*", (req, res) => {
   res.sendFile(path.join(distDir, "index.html"));
+});
+app.use((err, req, res, next) => {
+  console.error("SERVER ERROR:", err);
+  res.status(500).json({ message: "\u062E\u0637\u0623 \u0641\u064A \u0627\u0644\u062E\u0627\u062F\u0645", detail: err.message });
 });
 var startServer = async () => {
   try {
@@ -104850,6 +105831,16 @@ var startServer = async () => {
       await ensureSubtaskEndDateColumn(pool);
     } catch (endDateErr) {
       console.error("\u26A0\uFE0F Database migration (Subtasks.EndDate) failed. Server continues running.", endDateErr);
+    }
+    try {
+      await ensureUserRolesTable(pool);
+    } catch (userRolesErr) {
+      console.error("\u26A0\uFE0F Database migration (UserRoles) failed. Server continues running.", userRolesErr);
+    }
+    try {
+      await ensureRegistrationRequestsVacancyID(pool);
+    } catch (regVacErr) {
+      console.error("\u26A0\uFE0F Database migration (RegistrationRequests.VacancyID) failed. Server continues running.", regVacErr);
     }
     app.listen(port, "0.0.0.0", () => {
       console.log(`\u{1F680} Server is running on http://0.0.0.0:${port}`);

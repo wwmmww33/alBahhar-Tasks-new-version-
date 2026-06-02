@@ -51,9 +51,28 @@ async function ensureCommentsCalendarFlag(pool) {
   }
 }
 
+async function ensureRegistrationRequestsVacancyID(pool) {
+  try {
+    const check = await pool.request().query(
+      `SELECT COL_LENGTH('dbo.RegistrationRequests','VacancyID') AS Len`
+    );
+    if (check.recordset[0]?.Len) return { changed: false };
+    await pool.request().query(
+      `IF COL_LENGTH('dbo.RegistrationRequests','VacancyID') IS NULL
+       ALTER TABLE dbo.RegistrationRequests ADD VacancyID INT NULL`
+    );
+    console.log('✅ Added VacancyID column to RegistrationRequests.');
+    return { changed: true };
+  } catch (err) {
+    console.error('❌ Failed ensuring RegistrationRequests.VacancyID:', err);
+    throw err;
+  }
+}
+
 module.exports = {
   ensureSubtasksCalendarFlag,
   ensureCommentsCalendarFlag,
+  ensureRegistrationRequestsVacancyID,
   // يضمن وجود جدول أحداث التقويم الخاصة بالمستخدم (آمن للتشغيل المتكرر)
   ensurePersonalEventsTable: async function ensurePersonalEventsTable(pool) {
     try {

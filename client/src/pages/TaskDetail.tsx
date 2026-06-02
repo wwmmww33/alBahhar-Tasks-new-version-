@@ -4,7 +4,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import UnifiedTimeline from '../components/UnifiedTimeline';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, User, Category, Task, Comment } from '../types';
-import { Trash2, ExternalLink, Copy, Check } from 'lucide-react';
+import { Trash2, ExternalLink, Copy, Check, ArrowRight } from 'lucide-react';
 import { getApiUrl } from '../config/api';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
@@ -373,6 +373,15 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
 
   return (
     <div className="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-md max-w-4xl mx-auto">
+      <div className="mb-4">
+        <button
+          onClick={() => navigate(-1)}
+          className="flex items-center gap-2 text-sm text-gray-500 hover:text-primary dark:text-gray-400 dark:hover:text-primary transition-colors"
+        >
+          <ArrowRight size={16} />
+          رجوع
+        </button>
+      </div>
       <div className="flex justify-between items-start">
         <div>
           {isEditingTitle ? (

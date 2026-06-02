@@ -20,7 +20,7 @@ type Task = {
   AssignedToVacancyID?: number | string | null;
   AssignedToName: string | null;
   DueDate: string;
-  Status: 'open' | 'in-progress' | 'completed' | 'cancelled';
+  Status: 'open' | 'in-progress' | 'completed' | 'cancelled' | 'external';
   Priority: 'normal' | 'urgent' | 'starred';
   subtasks?: Subtask[];
   comments?: Comment[];
@@ -792,6 +792,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   });
 
   const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
+  const externalTasks  = filteredTasks.filter(task => task.Status === 'external');
 
   // المهام المتعلقة بي ولا يوجد فيها إجراء معلق (سواء أنشأتها أو أنهيت جميع مهامي الفرعية)
   // "أنجزت إجرائي فيها": مفتوحة + متعلقة بي + لا توجد مهام فرعية معلقة لي

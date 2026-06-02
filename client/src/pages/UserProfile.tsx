@@ -68,7 +68,7 @@ const UserProfile: React.FC<UserProfileProps> = ({ currentUser, onUserUpdate }) 
     }
   };
 
-  const startUndoCountdown = (transferId: string, result: TransferResult) => {
+  const startUndoCountdown = (_transferId: string, result: TransferResult) => {
     if (undoTimerRef.current) clearInterval(undoTimerRef.current);
     setLastTransfer(result);
     setUndoSecondsLeft(UNDO_TIMEOUT_MS / 1000);
