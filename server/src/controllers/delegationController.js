@@ -138,19 +138,6 @@ exports.createDelegation = async (req, res) => {
   try {
     const cols = await getDelegationColumns(pool);
 
-    // تحقق من أن المستخدمين موجودون (بـ UserID حتى قبل أي تحويل)
-    const usersCheck = await pool.request()
-      .input('DelegatorUserID', sql.NVarChar, currentUserId)
-      .input('DelegateUserID', sql.NVarChar, DelegateID)
-      .query(`SELECT UserID FROM Users WHERE UserID IN (@DelegatorUserID, @DelegateUserID)`);
-    const foundIds = new Set(usersCheck.recordset.map(r => String(r.UserID).trim()));
-    if (!foundIds.has(String(currentUserId).trim())) {
-      return res.status(400).json({ message: 'المفوض غير موجود في قاعدة البيانات.' });
-    }
-    if (!foundIds.has(String(DelegateID).trim())) {
-      return res.status(400).json({ message: 'المفوَّض إليه غير موجود في قاعدة البيانات.' });
-    }
-
     // التحقق من صحة التواريخ
     const start = new Date(StartDate);
     if (isNaN(start.getTime())) {
@@ -168,12 +155,53 @@ exports.createDelegation = async (req, res) => {
       }
     }
 
-    // تحويل إلى VacancyID إن لزم
-    const delegatorPrincipal = await toDelegationPrincipal(pool, currentUserId, cols);
-    const delegatePrincipal = await toDelegationPrincipal(pool, DelegateID, cols);
+    let delegatorPrincipal, delegatePrincipal;
 
-    if (cols.isVacancy && (delegatorPrincipal == null || delegatePrincipal == null)) {
-      return res.status(400).json({ message: 'تعذّر تحديد المنصب (VacancyID) لأحد الطرفين. تأكد من وجود إسناد نشط.' });
+    if (cols.isVacancy) {
+      // المخطط الجديد: DelegateID القادم من الواجهة هو VacancyID مباشرةً
+      // (لأن listByDepartmentScope يُعيد CAST(VacancyID AS NVARCHAR) في حقل UserID)
+
+      // التحقق من وجود المفوِّض في Users
+      const delegatorCheck = await pool.request()
+        .input('UID', sql.NVarChar, currentUserId)
+        .query(`SELECT UserID FROM dbo.Users WHERE UserID = @UID`);
+      if (!delegatorCheck.recordset.length)
+        return res.status(400).json({ message: 'المفوض غير موجود في قاعدة البيانات.' });
+
+      // تحويل UserID المفوِّض → VacancyID عبر Assignments
+      delegatorPrincipal = await resolveVacancyId(pool, currentUserId);
+      if (delegatorPrincipal == null)
+        return res.status(400).json({ message: 'تعذّر تحديد منصبك. تأكد من وجود إسناد نشط لك.' });
+
+      // DelegateID هو VacancyID — تحقق من وجوده في JobVacancies
+      const delegateVid = parseInt(DelegateID, 10);
+      if (isNaN(delegateVid))
+        return res.status(400).json({ message: 'معرّف المفوَّض إليه غير صالح.' });
+      const vacCheck = await pool.request()
+        .input('VID', sql.Int, delegateVid)
+        .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VID`);
+      if (!vacCheck.recordset.length)
+        return res.status(400).json({ message: 'المفوَّض إليه غير موجود في قاعدة البيانات.' });
+
+      delegatePrincipal = delegateVid;
+
+      // لا تفويض لنفس المنصب
+      if (delegatorPrincipal === delegatePrincipal)
+        return res.status(400).json({ message: 'لا يمكن التفويض لنفس المنصب.' });
+
+    } else {
+      // المخطط القديم: كلا الطرفين بـ UserID
+      const usersCheck = await pool.request()
+        .input('DelegatorUserID', sql.NVarChar, currentUserId)
+        .input('DelegateUserID', sql.NVarChar, DelegateID)
+        .query(`SELECT UserID FROM dbo.Users WHERE UserID IN (@DelegatorUserID, @DelegateUserID)`);
+      const foundIds = new Set(usersCheck.recordset.map(r => String(r.UserID).trim()));
+      if (!foundIds.has(String(currentUserId).trim()))
+        return res.status(400).json({ message: 'المفوض غير موجود في قاعدة البيانات.' });
+      if (!foundIds.has(String(DelegateID).trim()))
+        return res.status(400).json({ message: 'المفوَّض إليه غير موجود في قاعدة البيانات.' });
+      delegatorPrincipal = currentUserId;
+      delegatePrincipal  = DelegateID;
     }
 
     // CreatedBy في المخطط الجديد int، في القديم nvarchar
@@ -422,5 +450,240 @@ exports.getDelegationSecretForDelegation = async (req, res) => {
   } catch (err) {
     console.error('GET DELEGATION SECRET (BY DELEGATION) ERROR:', err);
     res.status(500).json({ message: 'Error fetching delegation secret for delegation' });
+  }
+};
+
+// ── المناصب الشاغرة ──────────────────────────────────────────────────────────
+
+// جلب المناصب الشاغرة ضمن نطاق القسم (للاختيار عند التكليف)
+exports.listVacantPositions = async (req, res) => {
+  const pool = req.app.locals.db;
+  if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+
+  const deptId = req.query.departmentId ? parseInt(req.query.departmentId, 10) : null;
+
+  try {
+    const probe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')            IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent,
+        CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID')   IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+        CASE WHEN COL_LENGTH('dbo.Departments','ParentID')             IS NOT NULL THEN 1 ELSE 0 END AS HasParentID
+    `);
+    const p = probe.recordset[0] || {};
+    const isCurrentFilter = p.HasIsCurrent ? 'AND a.IsCurrent = 1' : '';
+    const parentCol = p.HasParentDeptID ? 'ParentDepartmentID' : (p.HasParentID ? 'ParentID' : null);
+
+    const request = pool.request();
+    let query;
+
+    if (deptId && parentCol) {
+      request.input('DeptID', sql.Int, deptId);
+      query = `
+        WITH DeptTree AS (
+          SELECT DepartmentID FROM dbo.Departments WHERE DepartmentID = @DeptID
+          UNION ALL
+          SELECT d.DepartmentID FROM dbo.Departments d
+          INNER JOIN DeptTree t ON d.${parentCol} = t.DepartmentID
+        )
+        SELECT jv.VacancyID, jv.Name AS VacancyName, dept.Name AS DepartmentName
+        FROM dbo.JobVacancies jv
+        JOIN DeptTree dt ON jv.DepartmentID = dt.DepartmentID
+        LEFT JOIN dbo.Assignments a ON a.VacancyID = jv.VacancyID ${isCurrentFilter}
+        LEFT JOIN dbo.Departments dept ON dept.DepartmentID = jv.DepartmentID
+        WHERE a.AssignmentID IS NULL
+        ORDER BY dept.Name, jv.Name
+      `;
+    } else if (deptId) {
+      request.input('DeptID', sql.Int, deptId);
+      query = `
+        SELECT jv.VacancyID, jv.Name AS VacancyName, dept.Name AS DepartmentName
+        FROM dbo.JobVacancies jv
+        LEFT JOIN dbo.Assignments a ON a.VacancyID = jv.VacancyID ${isCurrentFilter}
+        LEFT JOIN dbo.Departments dept ON dept.DepartmentID = jv.DepartmentID
+        WHERE a.AssignmentID IS NULL AND jv.DepartmentID = @DeptID
+        ORDER BY jv.Name
+      `;
+    } else {
+      query = `
+        SELECT jv.VacancyID, jv.Name AS VacancyName, dept.Name AS DepartmentName
+        FROM dbo.JobVacancies jv
+        LEFT JOIN dbo.Assignments a ON a.VacancyID = jv.VacancyID ${isCurrentFilter}
+        LEFT JOIN dbo.Departments dept ON dept.DepartmentID = jv.DepartmentID
+        WHERE a.AssignmentID IS NULL
+        ORDER BY dept.Name, jv.Name
+      `;
+    }
+
+    const result = await request.query(query);
+    res.status(200).json(result.recordset);
+  } catch (err) {
+    console.error('LIST VACANT POSITIONS ERROR:', err);
+    res.status(500).json({ message: 'Error listing vacant positions' });
+  }
+};
+
+// إنشاء تكليف لمنصب شاغر (بواسطة المدير أو مدير النظام)
+exports.createVacantPositionDelegation = async (req, res) => {
+  const pool = req.app.locals.db;
+  if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+
+  const { vacancyId, delegateUserId, startDate, endDate } = req.body || {};
+  if (!vacancyId || !delegateUserId || !startDate)
+    return res.status(400).json({ message: 'vacancyId و delegateUserId و startDate مطلوبة.' });
+
+  try {
+    const cols = await getDelegationColumns(pool);
+
+    // تحقق من وجود المنصب
+    const vacCheck = await pool.request()
+      .input('VID', sql.Int, parseInt(vacancyId))
+      .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VID`);
+    if (!vacCheck.recordset.length)
+      return res.status(404).json({ message: 'المنصب غير موجود.' });
+
+    // التحقق من التواريخ
+    const start = new Date(startDate);
+    if (isNaN(start.getTime())) return res.status(400).json({ message: 'تاريخ البداية غير صالح.' });
+    let end = null;
+    if (endDate) {
+      end = new Date(endDate);
+      if (isNaN(end.getTime())) return res.status(400).json({ message: 'تاريخ النهاية غير صالح.' });
+      if (end < start) return res.status(400).json({ message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية.' });
+    }
+
+    // تحديد معرّف المفوَّض إليه
+    let delegatePrincipal;
+    if (cols.isVacancy) {
+      delegatePrincipal = await resolveVacancyId(pool, delegateUserId);
+      if (delegatePrincipal == null)
+        return res.status(400).json({ message: 'تعذّر تحديد منصب الموظف المكلَّف. تأكد من وجود إسناد نشط له.' });
+    } else {
+      delegatePrincipal = delegateUserId;
+    }
+
+    const delegatorPrincipal = cols.isVacancy ? parseInt(vacancyId) : String(vacancyId);
+
+    const insertResult = await pool.request()
+      .input('Delegator', cols.sqlType, delegatorPrincipal)
+      .input('Delegate', cols.sqlType, delegatePrincipal)
+      .input('StartDate', sql.DateTime, start)
+      .input('EndDate', sql.DateTime, end)
+      .input('CreatedBy', cols.createdByType, delegatorPrincipal)
+      .query(`
+        INSERT INTO dbo.TaskDelegations
+          (${cols.delegatorCol}, ${cols.delegateCol}, DelegationType, StartDate, EndDate, IsActive, CreatedBy)
+        VALUES (@Delegator, @Delegate, 'full', @StartDate, @EndDate, 1, @CreatedBy);
+        SELECT CAST(SCOPE_IDENTITY() AS INT) AS DelegationID;
+      `);
+
+    const newId = insertResult?.recordset?.[0]?.DelegationID || null;
+    res.status(201).json({ DelegationID: newId, message: 'تم إنشاء التكليف بنجاح' });
+  } catch (err) {
+    console.error('CREATE VACANT POSITION DELEGATION ERROR:', err);
+    res.status(500).json({ message: 'Error creating vacant position delegation', detail: err.message });
+  }
+};
+
+// حذف تكليف منصب شاغر (بواسطة المدير أو مدير النظام — لا يشترط أن يكون المستخدم هو المفوِّض)
+exports.deleteVacantPositionDelegation = async (req, res) => {
+  const pool = req.app.locals.db;
+  if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+
+  const { id } = req.params;
+  try {
+    const check = await pool.request()
+      .input('DelegationID', sql.Int, parseInt(id))
+      .query(`SELECT DelegationID FROM dbo.TaskDelegations WHERE DelegationID = @DelegationID`);
+    if (!check.recordset.length)
+      return res.status(404).json({ message: 'التكليف غير موجود.' });
+
+    await pool.request()
+      .input('DelegationID', sql.Int, parseInt(id))
+      .query(`DELETE FROM dbo.TaskDelegations WHERE DelegationID = @DelegationID`);
+
+    res.status(200).json({ message: 'تم حذف التكليف بنجاح.' });
+  } catch (err) {
+    console.error('DELETE VACANT POSITION DELEGATION ERROR:', err);
+    res.status(500).json({ message: 'Error deleting vacant position delegation' });
+  }
+};
+
+// جلب تكليفات المناصب الشاغرة (ضمن نطاق القسم)
+exports.listVacantPositionDelegations = async (req, res) => {
+  const pool = req.app.locals.db;
+  if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+
+  const deptId = req.query.departmentId ? parseInt(req.query.departmentId, 10) : null;
+
+  try {
+    const cols = await getDelegationColumns(pool);
+    if (!cols.isVacancy) return res.status(200).json([]); // مخطط قديم — غير مدعوم
+
+    const probe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')          IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent,
+        CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+        CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID
+    `);
+    const p = probe.recordset[0] || {};
+    const isCurrentFilter = p.HasIsCurrent ? 'AND a.IsCurrent = 1' : '';
+    const parentCol = p.HasParentDeptID ? 'ParentDepartmentID' : (p.HasParentID ? 'ParentID' : null);
+
+    const request = pool.request();
+    let query;
+
+    const selectCols = `
+      td.DelegationID,
+      td.DelegatorVacancyID AS DelegatorPositionID,
+      jvSrc.Name AS DelegatorPositionName,
+      deptSrc.Name AS DepartmentName,
+      td.DelegateVacancyID AS DelegatePositionID,
+      jvDst.Name AS DelegateName,
+      td.StartDate, td.EndDate, td.IsActive, td.CreatedAt
+    `;
+
+    const joins = `
+      FROM dbo.TaskDelegations td
+      JOIN dbo.JobVacancies jvSrc ON jvSrc.VacancyID = td.DelegatorVacancyID
+      LEFT JOIN dbo.Assignments a ON a.VacancyID = td.DelegatorVacancyID ${isCurrentFilter}
+      LEFT JOIN dbo.Departments deptSrc ON deptSrc.DepartmentID = jvSrc.DepartmentID
+      JOIN dbo.JobVacancies jvDst ON jvDst.VacancyID = td.DelegateVacancyID
+    `;
+
+    if (deptId && parentCol) {
+      request.input('DeptID', sql.Int, deptId);
+      query = `
+        WITH DeptTree AS (
+          SELECT DepartmentID FROM dbo.Departments WHERE DepartmentID = @DeptID
+          UNION ALL
+          SELECT d.DepartmentID FROM dbo.Departments d
+          INNER JOIN DeptTree t ON d.${parentCol} = t.DepartmentID
+        )
+        SELECT ${selectCols}
+        ${joins}
+        JOIN DeptTree dt ON jvSrc.DepartmentID = dt.DepartmentID
+        WHERE a.AssignmentID IS NULL
+        ORDER BY td.CreatedAt DESC
+      `;
+    } else if (deptId) {
+      request.input('DeptID', sql.Int, deptId);
+      query = `
+        SELECT ${selectCols} ${joins}
+        WHERE a.AssignmentID IS NULL AND jvSrc.DepartmentID = @DeptID
+        ORDER BY td.CreatedAt DESC
+      `;
+    } else {
+      query = `
+        SELECT ${selectCols} ${joins}
+        WHERE a.AssignmentID IS NULL
+        ORDER BY td.CreatedAt DESC
+      `;
+    }
+
+    const result = await request.query(query);
+    res.status(200).json(result.recordset);
+  } catch (err) {
+    console.error('LIST VACANT POSITION DELEGATIONS ERROR:', err);
+    res.status(500).json({ message: 'Error listing vacant position delegations' });
   }
 };

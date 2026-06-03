@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import UnifiedTimeline from '../components/UnifiedTimeline';
+import RelatedTasksSection from '../components/RelatedTasksSection';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, User, Category, Task, Comment } from '../types';
 import { Trash2, ExternalLink, Copy, Check, ArrowRight } from 'lucide-react';
@@ -373,14 +374,47 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
 
   return (
     <div className="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-md max-w-4xl mx-auto">
-      <div className="mb-4">
+      <div className="mb-4 flex items-center justify-between gap-4">
         <button
           onClick={() => navigate(-1)}
-          className="flex items-center gap-2 text-sm text-gray-500 hover:text-primary dark:text-gray-400 dark:hover:text-primary transition-colors"
+          className="flex items-center gap-2 text-sm text-gray-500 hover:text-primary dark:text-gray-400 dark:hover:text-primary transition-colors flex-shrink-0"
         >
           <ArrowRight size={16} />
           رجوع
         </button>
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <button
+            onClick={() => handleUpdateTaskStatus('completed')}
+            disabled={task.Status === 'completed'}
+            className="text-xs px-3 py-1.5 rounded-full border border-green-500 text-green-600 dark:text-green-400 dark:border-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            إغلاق كمكتملة
+          </button>
+          <button
+            onClick={() => handleUpdateTaskStatus('cancelled')}
+            disabled={task.Status === 'cancelled'}
+            className="text-xs px-3 py-1.5 rounded-full border border-red-400 text-red-500 dark:text-red-400 dark:border-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            إلغاء المهمة
+          </button>
+          {(task.Status === 'completed' || task.Status === 'cancelled') && (
+            <button
+              onClick={() => handleUpdateTaskStatus('open')}
+              className="text-xs px-3 py-1.5 rounded-full border border-gray-400 text-gray-600 dark:text-gray-400 dark:border-gray-500 hover:bg-gray-50 dark:hover:bg-gray-700/40 transition-colors"
+            >
+              إعادة الفتح
+            </button>
+          )}
+          {canDeleteTask && (
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              className="text-xs px-3 py-1.5 rounded-full border border-red-700 text-red-700 dark:text-red-500 dark:border-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-1 transition-colors"
+            >
+              <Trash2 size={12} />
+              حذف نهائياً
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex justify-between items-start">
         <div>
@@ -426,6 +460,8 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             </h1>
           )}
           <div className="flex flex-wrap items-center gap-4 text-content-secondary mb-6">
+            <span className="text-xs font-mono bg-content/5 px-1.5 py-0.5 rounded text-content-secondary"># {task.TaskID}</span>
+            <span className="text-sm">•</span>
             <span>
               المنشيء: {task.CreatedByName || task.CreatedBy}
               {task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}
@@ -438,8 +474,10 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             <span><strong>تاريخ الاستحقاق:</strong> {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG') : 'غير محدد'}</span>
           </div>
           
-          {/* Category Section */}
-          <div className="flex flex-wrap items-center gap-4 text-content-secondary mb-2">
+          {/* Category + URL — سطر واحد */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-content-secondary mb-2">
+
+            {/* التصنيف */}
             <span><strong>التصنيف:</strong></span>
             {isEditingCategory ? (
               <div className="flex items-center gap-2">
@@ -463,10 +501,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                   {isUpdatingCategory ? 'جاري الحفظ...' : 'حفظ'}
                 </button>
                 <button
-                  onClick={() => {
-                    setIsEditingCategory(false);
-                    setSelectedCategoryId(task.CategoryID || null);
-                  }}
+                  onClick={() => { setIsEditingCategory(false); setSelectedCategoryId(task.CategoryID || null); }}
                   className="px-2 py-1 bg-gray-500 text-white rounded-md hover:bg-gray-600 text-sm"
                 >
                   إلغاء
@@ -486,10 +521,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                     </Link>
                     {canEditTaskDetails && (
                       <button
-                        onClick={() => {
-                          setIsEditingCategory(true);
-                          setSelectedCategoryId(task.CategoryID || null);
-                        }}
+                        onClick={() => { setIsEditingCategory(true); setSelectedCategoryId(task.CategoryID || null); }}
                         className="text-sm text-primary hover:underline"
                       >
                         تعديل
@@ -501,10 +533,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                     <span className="text-content-secondary italic">بدون تصنيف</span>
                     {canEditTaskDetails && (
                       <button
-                        onClick={() => {
-                          setIsEditingCategory(true);
-                          setSelectedCategoryId(null);
-                        }}
+                        onClick={() => { setIsEditingCategory(true); setSelectedCategoryId(null); }}
                         className="text-sm text-primary hover:underline"
                       >
                         إضافة تصنيف
@@ -514,13 +543,16 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                 )}
               </div>
             )}
-          </div>
 
-          {/* Task External URL Section */}
-          <div className="flex flex-wrap items-center gap-4 text-content-secondary mb-2">
+            {/* فاصل */}
+            {!isEditingCategory && !isEditingURL && (
+              <span className="text-sm">•</span>
+            )}
+
+            {/* الرابط الخارجي */}
             <span><strong>الرابط الخارجي:</strong></span>
             {isEditingURL ? (
-              <div className="flex items-center gap-2 w-full max-w-xl">
+              <div className="flex items-center gap-2 max-w-xl">
                 <input
                   type="url"
                   value={urlInput}
@@ -545,7 +577,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             ) : (
               <div className="flex items-center gap-2">
                 {(task as any)?.URL ? (
-                  <div className="flex items-center gap-2">
+                  <>
                     <a
                       href={(task as any).URL}
                       target="_blank"
@@ -563,7 +595,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                       {isCopied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
                       <span>{isCopied ? "تم النسخ" : "نسخ الرابط"}</span>
                     </button>
-                  </div>
+                  </>
                 ) : (
                   <span className="text-content-secondary italic">لا يوجد رابط</span>
                 )}
@@ -578,104 +610,74 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
               </div>
             )}
           </div>
-        </div>
-      </div>
-      <div className="mt-6">
-        <h3 className="text-sm font-semibold text-content mb-2">وصف المهمة</h3>
-        {isEditingDescription ? (
-          <div className="space-y-2">
-            <textarea
-              autoFocus
-              value={descriptionInput}
-              onChange={(e) => setDescriptionInput(e.target.value)}
-              onKeyDown={async (e) => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                  e.preventDefault();
-                  await handleUpdateTaskDescription(descriptionInput);
-                } else if (e.key === 'Escape') {
-                  e.preventDefault();
-                  setIsEditingDescription(false);
-                  setDescriptionInput(task.Description || '');
-                }
-              }}
-              className="w-full min-h-[120px] p-3 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-content text-sm whitespace-pre-wrap"
-            />
-            <div className="flex flex-wrap gap-2 justify-end">
-              <button
-                type="button"
-                onClick={() => handleUpdateTaskDescription(descriptionInput)}
-                disabled={isUpdatingDescription}
-                className="px-3 py-1 bg-primary text-white rounded-md hover:bg-primary/90 disabled:bg-gray-400 text-sm"
-              >
-                {isUpdatingDescription ? 'جاري الحفظ...' : 'حفظ الوصف'}
-              </button>
-              <button
-                type="button"
+
+          {/* Description */}
+          <div className="mt-3">
+            <span className="text-sm font-semibold text-content-secondary">الوصف</span>
+            {isEditingDescription ? (
+              <div className="mt-2 space-y-2">
+                <textarea
+                  autoFocus
+                  value={descriptionInput}
+                  onChange={(e) => setDescriptionInput(e.target.value)}
+                  onKeyDown={async (e) => {
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      await handleUpdateTaskDescription(descriptionInput);
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setIsEditingDescription(false);
+                      setDescriptionInput(task.Description || '');
+                    }
+                  }}
+                  className="w-full min-h-[100px] p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-content text-sm"
+                />
+                <div className="flex flex-wrap gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateTaskDescription(descriptionInput)}
+                    disabled={isUpdatingDescription}
+                    className="px-3 py-1 bg-primary text-white rounded-md hover:bg-primary/90 disabled:bg-gray-400 text-sm"
+                  >
+                    {isUpdatingDescription ? 'جاري الحفظ...' : 'حفظ الوصف'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditingDescription(false);
+                      setDescriptionInput(task.Description || '');
+                    }}
+                    className="px-3 py-1 bg-gray-500 text-white rounded-md hover:bg-gray-600 text-sm"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p
+                className="mt-1 text-sm text-content whitespace-pre-wrap cursor-text hover:opacity-80 transition-opacity"
                 onClick={() => {
-                  setIsEditingDescription(false);
+                  setIsEditingDescription(true);
                   setDescriptionInput(task.Description || '');
                 }}
-                className="px-3 py-1 bg-gray-500 text-white rounded-md hover:bg-gray-600 text-sm"
+                title="انقر لتعديل الوصف"
               >
-                إلغاء
-              </button>
-            </div>
+                {task.Description && task.Description.trim().length > 0
+                  ? task.Description
+                  : <span className="italic text-content-secondary">لا يوجد وصف — انقر للإضافة</span>}
+              </p>
+            )}
           </div>
-        ) : (
-          <div
-            className="prose dark:prose-invert max-w-none bg-content/5 rounded-md p-3 cursor-text hover:bg-content/10"
-            onClick={() => {
-              setIsEditingDescription(true);
-              setDescriptionInput(task.Description || '');
-            }}
-            title="انقر لتعديل الوصف"
-          >
-            <p className="whitespace-pre-wrap break-words">
-              {task.Description && task.Description.trim().length > 0
-                ? task.Description
-                : 'لا يوجد وصف لهذه المهمة.'}
-            </p>
-          </div>
-        )}
+        </div>
       </div>
 
-      <div className="mt-6 p-4 bg-content/5 rounded-md flex items-center justify-between flex-wrap gap-2">
-          <p className="font-semibold text-content">إجراءات المهمة الرئيسية:</p>
-          <div className="flex gap-2 flex-wrap">
-              <button
-                onClick={() => handleUpdateTaskStatus('completed')}
-                disabled={task.Status === 'completed'}
-                className="text-sm bg-green-500 text-white px-3 py-1 rounded disabled:bg-gray-400"
-              >
-                إغلاق كمكتملة
-              </button>
-              <button
-                onClick={() => handleUpdateTaskStatus('cancelled')}
-                disabled={task.Status === 'cancelled'}
-                className="text-sm bg-red-500 text-white px-3 py-1 rounded disabled:bg-gray-400"
-              >
-                إلغاء المهمة
-              </button>
-              {(task.Status === 'completed' || task.Status === 'cancelled') && (
-                <button
-                  onClick={() => handleUpdateTaskStatus('open')}
-                  className="text-sm bg-gray-500 text-white px-3 py-1 rounded"
-                >
-                  إعادة الفتح
-                </button>
-              )}
-              {canDeleteTask && (
-                <button 
-                  onClick={() => setShowDeleteConfirm(true)} 
-                  className="text-sm bg-red-700 text-white px-3 py-1 rounded hover:bg-red-800 transition-colors flex items-center gap-1"
-                >
-                  <Trash2 size={14} />
-                  حذف نهائياً
-                </button>
-              )}
-          </div>
-      </div>
-      
+      {/* المهام المرتبطة */}
+      <RelatedTasksSection
+        taskId={task.TaskID}
+        userId={actorId}
+        isAdmin={currentUser.IsAdmin}
+      />
+
 
       <hr className="my-8 border-content/10" />
 

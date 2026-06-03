@@ -12,7 +12,13 @@
       "Bash(Select-Object Name, Length, LastWriteTime)",
       "Bash(node -e \"require\\('xlsx'\\); console.log\\('ok'\\)\")",
       "WebSearch",
-      "PowerShell(Get-ChildItem \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\server\\\\release\\\\\" | Select-Object Name, @{N='Size\\(MB\\)';E={[math]::Round\\($_.Length/1MB,1\\)}})"
+      "PowerShell(Get-ChildItem \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\server\\\\release\\\\\" | Select-Object Name, @{N='Size\\(MB\\)';E={[math]::Round\\($_.Length/1MB,1\\)}})",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\" -Recurse -Directory)",
+      "Bash(Select-Object -First 20)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\client\\\\src\" -Recurse -Name)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\client\\\\src\\\\components\" -Recurse -Name)",
+      "Bash(node -e \"require\\('./src/controllers/taskController.js'\\); console.log\\('OK'\\)\")",
+      "Bash(dir \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\" /b)"
     ]
   }
 }

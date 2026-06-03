@@ -104,7 +104,7 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
             <span>طلبات التسجيل</span>
           </button>
         )}
-        {isSystemAdmin && (
+        {(isSystemAdmin || isDeptManager) && (
           <button onClick={() => setActiveTab('delegations')} className={getTabClassName('delegations')}>
             <UserCheck size={20} />
             <span>إدارة التفويضات</span>
@@ -117,7 +117,7 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
         {activeTab === 'departments' && <DepartmentManagement currentUser={currentUser} />}
         {activeTab === 'users'       && isSystemAdmin && <UserManagement currentUser={currentUser} />}
         {activeTab === 'requests'    && (isSystemAdmin || isDeptManager) && <RegistrationRequests currentUser={currentUser} />}
-        {activeTab === 'delegations' && isSystemAdmin && <DelegationManagement />}
+        {activeTab === 'delegations' && (isSystemAdmin || isDeptManager) && <DelegationManagement currentUser={currentUser} />}
       </div>
     </div>
   );

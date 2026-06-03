@@ -6,6 +6,15 @@ import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
 import { getApiUrl } from '../config/api';
 
+const AUTO_DETECT_KEY = 'autoDetectRelatedTasks';
+
+type SuggestedTask = {
+  TaskID: number;
+  Title: string;
+  Description?: string;
+  Status: string;
+};
+
 // تعريف أنواع البيانات التي سنستخدمها
 type Procedure = {
   ProcedureID: number;
@@ -50,6 +59,13 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [autoDetect, setAutoDetect] = useState<boolean>(() => {
+    try { return localStorage.getItem(AUTO_DETECT_KEY) !== 'false'; } catch { return true; }
+  });
+  const [suggestions, setSuggestions] = useState<SuggestedTask[]>([]);
+  const [selectedSuggestions, setSelectedSuggestions] = useState<Set<number>>(new Set());
+  const [pendingTaskId, setPendingTaskId] = useState<number | null>(null);
+  const [isLinking, setIsLinking] = useState(false);
 
   // جلب قائمة المهام الافتراضية والتصنيفات عند تحميل الصفحة
   useEffect(() => {
@@ -134,13 +150,68 @@ const handleSubmit = async (e: React.FormEvent) => {
     if (!response.ok) {
       throw new Error(result.message || 'فشل في إنشاء المهمة.');
     }
-    navigate(`/task/${result.newTaskId}`);
+    const newId: number = result.newTaskId;
+
+    if (autoDetect && title.trim().length >= 3) {
+      try {
+        const keyword = title.trim().split(/\s+/).filter(w => w.length > 2)[0] || title.trim();
+        const searchRes = await fetch(
+          getApiUrl(`tasks/search?q=${encodeURIComponent(keyword)}&userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}&excludeTaskId=${newId}`)
+        );
+        if (searchRes.ok) {
+          const found: SuggestedTask[] = await searchRes.json();
+          if (found.length > 0) {
+            setSuggestions(found.slice(0, 10));
+            setPendingTaskId(newId);
+            return;
+          }
+        }
+      } catch (_) {}
+    }
+    navigate(`/task/${newId}`);
   } catch (error: any) {
     setMessage({ type: 'error', text: error.message });
   } finally {
     setIsSubmitting(false);
   }
 };
+
+  const handleAutoDetectToggle = (val: boolean) => {
+    setAutoDetect(val);
+    try { localStorage.setItem(AUTO_DETECT_KEY, String(val)); } catch (_) {}
+  };
+
+  const handleConfirmLinks = async () => {
+    if (!pendingTaskId) return;
+    if (selectedSuggestions.size > 0) {
+      setIsLinking(true);
+      const actingUserId = actorId;
+      await Promise.allSettled(
+        Array.from(selectedSuggestions).map(relId =>
+          fetch(getApiUrl(`tasks/${pendingTaskId}/related`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ relatedTaskId: relId, userId: actingUserId }),
+          })
+        )
+      );
+      setIsLinking(false);
+    }
+    navigate(`/task/${pendingTaskId}`);
+  };
+
+  const toggleSuggestion = (id: number) => {
+    setSelectedSuggestions(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const STATUS_LABELS: Record<string, string> = {
+    open: 'مفتوحة', 'in-progress': 'قيد التنفيذ',
+    completed: 'مكتملة', cancelled: 'ملغاة', external: 'خارجية',
+  };
 
   return (
     <div className="max-w-2xl mx-auto bg-white dark:bg-gray-800 p-8 rounded-lg shadow">
@@ -199,11 +270,102 @@ const handleSubmit = async (e: React.FormEvent) => {
           </div>
         )}
 
+        {/* خيار الاكتشاف التلقائي للمهام المرتبطة */}
+        <div className="flex items-center gap-3 p-3 bg-content/5 rounded-md border border-content/10">
+          <input
+            type="checkbox"
+            id="autoDetect"
+            checked={autoDetect}
+            onChange={(e) => handleAutoDetectToggle(e.target.checked)}
+            className="w-4 h-4 accent-primary cursor-pointer"
+          />
+          <label htmlFor="autoDetect" className="text-sm text-content cursor-pointer select-none">
+            اقتراح مهام مرتبطة تلقائياً عند الإنشاء
+            <span className="text-xs text-content-secondary mr-2">(يبحث في المهام الموجودة بناءً على عنوان المهمة)</span>
+          </label>
+        </div>
+
         <button type="submit" disabled={isSubmitting} className="w-full bg-primary text-white py-2 px-4 rounded-md hover:bg-primary-dark disabled:bg-gray-400 transition-colors">
           {isSubmitting ? 'جاري الإنشاء...' : 'إنشاء المهمة'}
         </button>
       </form>
       {message && <div className={`mt-4 p-4 rounded-md text-sm ${message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>{message.text}</div>}
+
+      {/* نافذة اقتراح المهام المرتبطة */}
+      {pendingTaskId && suggestions.length > 0 && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" dir="rtl">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-2xl">
+            <h2 className="text-lg font-bold text-content mb-1">مهام مرتبطة مقترحة</h2>
+            <p className="text-sm text-content-secondary mb-4">
+              وجد النظام مهاماً قد تكون مرتبطة بـ "<span className="font-medium text-content">{title}</span>".<br />
+              اختر المهام التي تريد ربطها ثم اضغط إنشاء، أو اضغط إلغاء للعودة إلى نموذج الإنشاء.
+            </p>
+            <div className="space-y-2 max-h-64 overflow-y-auto mb-5">
+              {suggestions.map(t => (
+                <div
+                  key={t.TaskID}
+                  className={`flex items-center gap-3 p-2 rounded-md border transition-colors ${
+                    selectedSuggestions.has(t.TaskID)
+                      ? 'border-primary bg-primary/5'
+                      : 'border-content/10 bg-content/5'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedSuggestions.has(t.TaskID)}
+                    onChange={() => toggleSuggestion(t.TaskID)}
+                    className="w-4 h-4 accent-primary flex-shrink-0 cursor-pointer"
+                  />
+                  <span
+                    className="flex-1 min-w-0 cursor-pointer select-none"
+                    onClick={() => toggleSuggestion(t.TaskID)}
+                  >
+                    <span className="block text-sm text-content truncate">{t.Title}</span>
+                    {t.Description?.trim() && (
+                      <span className="block text-xs text-content-secondary truncate">
+                        {t.Description.trim().slice(0, 80)}{t.Description.trim().length > 80 ? '...' : ''}
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-xs text-content-secondary flex-shrink-0">
+                    {STATUS_LABELS[t.Status] || t.Status}
+                  </span>
+                  <a
+                    href={`/task/${t.TaskID}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-primary hover:underline flex-shrink-0"
+                    title="فتح المهمة في تبويب جديد"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    عرض ↗
+                  </a>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setPendingTaskId(null);
+                  setSuggestions([]);
+                  setSelectedSuggestions(new Set());
+                }}
+                disabled={isLinking}
+                className="px-4 py-2 text-sm text-content bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50 transition-colors"
+              >
+                إلغاء
+              </button>
+              <button
+                onClick={handleConfirmLinks}
+                disabled={isLinking}
+                className="px-4 py-2 text-sm bg-primary text-white rounded hover:bg-primary/90 disabled:bg-gray-400 transition-colors"
+              >
+                {isLinking ? 'جاري الإنشاء...' : 'إنشاء'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

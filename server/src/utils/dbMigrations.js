@@ -454,5 +454,37 @@ module.exports = {
       console.error('❌ Failed ensuring UserRoles table:', err);
       throw err;
     }
+  },
+
+  // إنشاء جدول TaskRelations للمهام المرتبطة ببعضها
+  ensureTaskRelationsTable: async function ensureTaskRelationsTable(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'TaskRelations'
+      `);
+      if (check.recordset[0].cnt > 0) {
+        console.log('ℹ️ TaskRelations table already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        CREATE TABLE dbo.TaskRelations (
+          RelationID  INT IDENTITY(1,1) PRIMARY KEY,
+          TaskID1     INT NOT NULL,
+          TaskID2     INT NOT NULL,
+          CreatedBy   NVARCHAR(50) NULL,
+          CreatedAt   DATETIME NOT NULL CONSTRAINT DF_TaskRelations_CreatedAt DEFAULT(GETDATE()),
+          CONSTRAINT UQ_TaskRelations UNIQUE (TaskID1, TaskID2),
+          CONSTRAINT CHK_TaskRelations_Order CHECK (TaskID1 < TaskID2)
+        );
+        CREATE INDEX IX_TaskRelations_Task1 ON dbo.TaskRelations(TaskID1);
+        CREATE INDEX IX_TaskRelations_Task2 ON dbo.TaskRelations(TaskID2);
+      `);
+      console.log('✅ Created TaskRelations table.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring TaskRelations table:', err);
+      throw err;
+    }
   }
 };

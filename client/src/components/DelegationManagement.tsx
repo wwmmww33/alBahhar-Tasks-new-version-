@@ -1,7 +1,8 @@
 // src/components/DelegationManagement.tsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { Edit, Trash2, Plus, CheckCircle, XCircle } from 'lucide-react';
+import { Edit, Trash2, Plus, CheckCircle, XCircle, Building2 } from 'lucide-react';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
+import type { CurrentUser } from '../types';
 
 type VacancyOption = {
   UserID: string;               // VacancyID as string — used as DelegateID
@@ -30,7 +31,30 @@ type NewDelegation = {
   DelegationPassword?: string;
 };
 
-const DelegationManagement = () => {
+type VacantPosition = {
+  VacancyID: number;
+  VacancyName: string;
+  DepartmentName: string;
+};
+
+type VacantDelegation = {
+  DelegationID: number;
+  DelegatorPositionID: number;
+  DelegatorPositionName: string;
+  DepartmentName: string;
+  DelegatePositionID: number;
+  DelegateName: string;
+  StartDate: string;
+  EndDate: string | null;
+  IsActive: boolean;
+  CreatedAt: string;
+};
+
+const DelegationManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
+  const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
+  const isManager = userRole === 1 || userRole === 2; // مدير النظام أو مدير القسم
+  const managerDeptId = currentUser?.DepartmentID;
+
   const [delegations, setDelegations] = useState<Delegation[]>([]);
   const [users, setUsers] = useState<VacancyOption[]>([]);
   const [editingDelegation, setEditingDelegation] = useState<Delegation | null>(null);
@@ -44,52 +68,54 @@ const DelegationManagement = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // حالات المناصب الشاغرة
+  const [vacantPositions, setVacantPositions]     = useState<VacantPosition[]>([]);
+  const [vacantDelegations, setVacantDelegations] = useState<VacantDelegation[]>([]);
+  const [showVacantForm, setShowVacantForm]       = useState(false);
+  const [vacantForm, setVacantForm] = useState({ vacancyId: '', delegateUserId: '', startDate: '', endDate: '' });
+  const [vacantError, setVacantError] = useState<string | null>(null);
+  const [vacantLoading, setVacantLoading] = useState(false);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     const storedUser = localStorage.getItem('albahar-user');
     const parsedUser = storedUser ? JSON.parse(storedUser) : null;
     const userId = resolveCurrentActorId(parsedUser) || parsedUser?.UserID || '';
-
     const deptId = parsedUser?.DepartmentID;
+
+    // جلب قائمة المستخدمين ضمن النطاق
     try {
       if (deptId) {
         const scopeRes = await fetch(`/api/vacancies/department/${deptId}/scope`);
-        if (scopeRes.ok) {
-          const scopeData: VacancyOption[] = await scopeRes.json();
-          setUsers(scopeData);
-        } else {
-          setUsers([]);
-        }
-      } else {
-        setUsers([]);
-      }
-    } catch (e) {
-      setUsers([]);
-    }
+        if (scopeRes.ok) setUsers(await scopeRes.json());
+        else setUsers([]);
+      } else setUsers([]);
+    } catch { setUsers([]); }
 
+    // جلب تفويضاتي (كمفوِّض)
     try {
       if (userId) {
-        const headers = { 'user-id': userId, 'Content-Type': 'application/json' };
-        const delegationsRes = await fetch('/api/delegations', { headers });
-        if (delegationsRes.ok) {
-          const delegationsData = await delegationsRes.json();
-          setDelegations(delegationsData);
-          setError(null);
-        } else {
-          setDelegations([]);
-          setError('فشل في جلب التفويضات، قائمة الأسماء متاحة');
-        }
-      } else {
-        setDelegations([]);
-        setError(null);
-      }
-    } catch (error) {
-      console.error('Failed to fetch delegations:', error);
-      setError('فشل في جلب التفويضات، قائمة الأسماء متاحة');
-    } finally {
-      setLoading(false);
+        const res = await fetch('/api/delegations', { headers: { 'user-id': userId } });
+        if (res.ok) { setDelegations(await res.json()); setError(null); }
+        else { setDelegations([]); setError('فشل في جلب التفويضات'); }
+      } else setDelegations([]);
+    } catch { setError('فشل في جلب التفويضات'); }
+
+    // جلب بيانات المناصب الشاغرة (للمديرين فقط)
+    if (isManager) {
+      const deptParam = managerDeptId ? `?departmentId=${managerDeptId}` : '';
+      try {
+        const [vpRes, vdRes] = await Promise.all([
+          fetch(`/api/delegations/vacant-positions/list${deptParam}`),
+          fetch(`/api/delegations/vacant-positions/delegations${deptParam}`),
+        ]);
+        if (vpRes.ok) setVacantPositions(await vpRes.json()); else setVacantPositions([]);
+        if (vdRes.ok) setVacantDelegations(await vdRes.json()); else setVacantDelegations([]);
+      } catch { setVacantPositions([]); setVacantDelegations([]); }
     }
-  }, []);
+
+    setLoading(false);
+  }, [isManager, managerDeptId]);
 
   useEffect(() => {
     fetchData();
@@ -214,6 +240,40 @@ const DelegationManagement = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleCreateVacant = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!vacantForm.vacancyId || !vacantForm.delegateUserId || !vacantForm.startDate) return;
+    setVacantLoading(true);
+    setVacantError(null);
+    try {
+      const res = await fetch('/api/delegations/vacant-positions/delegations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vacancyId: parseInt(vacantForm.vacancyId),
+          delegateUserId: vacantForm.delegateUserId,
+          startDate: vacantForm.startDate,
+          endDate: vacantForm.endDate || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'فشل الإنشاء');
+      setVacantForm({ vacancyId: '', delegateUserId: '', startDate: '', endDate: '' });
+      setShowVacantForm(false);
+      fetchData();
+    } catch (err: any) {
+      setVacantError(err.message);
+    } finally {
+      setVacantLoading(false);
+    }
+  };
+
+  const handleDeleteVacant = async (id: number) => {
+    if (!confirm('هل أنت متأكد من حذف هذا التكليف؟')) return;
+    await fetch(`/api/delegations/vacant-positions/delegations/${id}`, { method: 'DELETE' });
+    fetchData();
   };
 
   const formatDate = (dateString: string) => {
@@ -416,6 +476,141 @@ const DelegationManagement = () => {
           </table>
         </div>
       </div>
+
+      {/* ── قسم المناصب الشاغرة (للمديرين فقط) ── */}
+      {isManager && (
+        <div className="space-y-4 mt-8">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Building2 size={20} className="text-orange-500" />
+              <h2 className="text-xl font-semibold text-content">تكليفات المناصب الشاغرة</h2>
+            </div>
+            <button
+              onClick={() => setShowVacantForm(true)}
+              className="flex items-center gap-2 bg-orange-500 text-white px-4 py-2 rounded-md hover:bg-orange-600 text-sm"
+            >
+              <Plus size={15} /> تكليف جديد
+            </button>
+          </div>
+
+          {vacantError && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{vacantError}</div>
+          )}
+
+          {/* نموذج إنشاء تكليف لمنصب شاغر */}
+          {showVacantForm && (
+            <div className="bg-orange-50 dark:bg-gray-800 border border-orange-200 p-5 rounded-lg">
+              <h3 className="font-semibold text-content mb-4">تكليف موظف لإدارة منصب شاغر</h3>
+              <form onSubmit={handleCreateVacant} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-content mb-1">المنصب الشاغر</label>
+                  <select
+                    value={vacantForm.vacancyId}
+                    onChange={e => setVacantForm({ ...vacantForm, vacancyId: e.target.value })}
+                    required
+                    className="w-full p-2 border rounded bg-bkg border-content/20 text-content"
+                  >
+                    <option value="">-- اختر المنصب الشاغر --</option>
+                    {vacantPositions.map(v => (
+                      <option key={v.VacancyID} value={v.VacancyID}>
+                        {v.VacancyName} — {v.DepartmentName}
+                      </option>
+                    ))}
+                  </select>
+                  {vacantPositions.length === 0 && (
+                    <p className="text-xs text-gray-400 mt-1">لا توجد مناصب شاغرة في نطاق قسمك</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-content mb-1">الموظف المكلَّف</label>
+                  <select
+                    value={vacantForm.delegateUserId}
+                    onChange={e => setVacantForm({ ...vacantForm, delegateUserId: e.target.value })}
+                    required
+                    className="w-full p-2 border rounded bg-bkg border-content/20 text-content"
+                  >
+                    <option value="">-- اختر الموظف --</option>
+                    {users.map(u => (
+                      <option key={u.UserID} value={u.UserID}>{u.FullName}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-content mb-1">تاريخ البداية</label>
+                    <input type="date" required value={vacantForm.startDate}
+                      onChange={e => setVacantForm({ ...vacantForm, startDate: e.target.value })}
+                      className="w-full p-2 border rounded bg-bkg border-content/20 text-content" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-content mb-1">تاريخ النهاية (اختياري)</label>
+                    <input type="date" value={vacantForm.endDate}
+                      onChange={e => setVacantForm({ ...vacantForm, endDate: e.target.value })}
+                      className="w-full p-2 border rounded bg-bkg border-content/20 text-content" />
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <button type="submit" disabled={vacantLoading}
+                    className="bg-orange-500 text-white px-4 py-2 rounded hover:bg-orange-600 disabled:opacity-50 text-sm">
+                    {vacantLoading ? 'جاري الإنشاء...' : 'إنشاء التكليف'}
+                  </button>
+                  <button type="button"
+                    onClick={() => { setShowVacantForm(false); setVacantError(null); setVacantForm({ vacancyId: '', delegateUserId: '', startDate: '', endDate: '' }); }}
+                    className="border border-content/20 text-content px-4 py-2 rounded hover:bg-content/5 text-sm">
+                    إلغاء
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* جدول التكليفات الحالية */}
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-sm">
+                <thead className="bg-orange-50 dark:bg-gray-700 border-b border-content/10">
+                  <tr>
+                    <th className="p-3 font-semibold text-content">الحالة</th>
+                    <th className="p-3 font-semibold text-content">المنصب الشاغر</th>
+                    <th className="p-3 font-semibold text-content">القسم</th>
+                    <th className="p-3 font-semibold text-content">الموظف المكلَّف</th>
+                    <th className="p-3 font-semibold text-content">تاريخ البداية</th>
+                    <th className="p-3 font-semibold text-content">تاريخ النهاية</th>
+                    <th className="p-3 font-semibold text-content">إجراءات</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {vacantDelegations.length === 0 ? (
+                    <tr><td colSpan={7} className="p-6 text-center text-content-secondary">لا توجد تكليفات للمناصب الشاغرة</td></tr>
+                  ) : vacantDelegations.map(vd => (
+                    <tr key={vd.DelegationID} className="border-b border-content/10 hover:bg-content/5">
+                      <td className="p-3">
+                        <span className={`text-xs px-2 py-1 rounded ${vd.IsActive && !isExpired(vd.EndDate) ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                          {vd.IsActive && !isExpired(vd.EndDate) ? 'نشط' : 'غير نشط'}
+                        </span>
+                      </td>
+                      <td className="p-3 text-content font-medium">{vd.DelegatorPositionName}</td>
+                      <td className="p-3 text-content-secondary">{vd.DepartmentName}</td>
+                      <td className="p-3 text-content">{vd.DelegateName}</td>
+                      <td className="p-3 text-content">{formatDate(vd.StartDate)}</td>
+                      <td className="p-3 text-content">{vd.EndDate ? formatDate(vd.EndDate) : 'غير محدد'}</td>
+                      <td className="p-3">
+                        <button onClick={() => handleDeleteVacant(vd.DelegationID)}
+                          className="text-red-500 hover:text-red-700" title="حذف">
+                          <Trash2 size={15} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* نموذج التعديل */}
       {editingDelegation && (

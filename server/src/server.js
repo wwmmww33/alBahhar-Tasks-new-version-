@@ -5,6 +5,15 @@ const fs = require('fs');
 const sql = require('mssql');
 const cors = require('cors');
 
+// تحميل .env من مجلد الـ EXE (عند التشغيل كملف pkg) أو من جذر المشروع
+const exeDir = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '../..');
+const envPath = path.join(exeDir, '.env');
+if (fs.existsSync(envPath)) {
+  require('dotenv').config({ path: envPath });
+} else {
+  require('dotenv').config();
+}
+
 const app = express();
 const port = process.env.PORT || 5001;
 
@@ -104,6 +113,7 @@ const {
   ensureSubtaskEndDateColumn,
   ensureUserRolesTable,
   ensureRegistrationRequestsVacancyID,
+  ensureTaskRelationsTable,
 } = require('./utils/dbMigrations');
 
 
@@ -219,6 +229,13 @@ const startServer = async () => {
       await ensureRegistrationRequestsVacancyID(pool);
     } catch (regVacErr) {
       console.error('⚠️ Database migration (RegistrationRequests.VacancyID) failed. Server continues running.', regVacErr);
+    }
+
+    // --- جدول المهام المرتبطة ---
+    try {
+      await ensureTaskRelationsTable(pool);
+    } catch (relErr) {
+      console.error('⚠️ Database migration (TaskRelations) failed. Server continues running.', relErr);
     }
     
     app.listen(port, '0.0.0.0', () => {

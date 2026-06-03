@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const taskController = require('../controllers/taskController');
+const taskRelationController = require('../controllers/taskRelationController');
 
 // --- الترتيب الصحيح للمسارات ---
 
@@ -19,6 +20,9 @@ router.get('/completed', taskController.getCompletedTasks);
 
 // GET /api/tasks/completed/search (للبحث في المهام المكتملة/الملغاة في قاعدة البيانات)
 router.get('/completed/search', taskController.searchCompletedTasks);
+
+// GET /api/tasks/search (بحث في المهام النشطة — لاستخدامه في ربط المهام)
+router.get('/search', taskController.searchActiveTasks);
 
 // GET /api/tasks/assignment-notifications (للحصول على إشعارات الإسناد)
 router.get('/assignment-notifications', taskController.getAssignmentNotifications);
@@ -70,5 +74,10 @@ router.get('/:id/comments', taskController.getCommentsForTask);
 
 // DELETE /api/tasks/1 (لحذف مهمة كاملة مع مهامها الفرعية)
 router.delete('/:id', taskController.deleteTask);
+
+// المهام المرتبطة
+router.get('/:id/related', taskRelationController.getRelatedTasks);
+router.post('/:id/related', taskRelationController.addRelatedTask);
+router.delete('/:id/related/:relatedId', taskRelationController.removeRelatedTask);
 
 module.exports = router;

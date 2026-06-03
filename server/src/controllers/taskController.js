@@ -2116,3 +2116,140 @@ exports.searchCompletedTasks = async (req, res) => {
         res.status(500).send({ message: 'Error searching completed tasks' });
     }
 };
+
+// GET /api/tasks/search?q=...&userId=...&isAdmin=...&excludeTaskId=...
+// بحث في جميع المهام (نشطة + مكتملة): العنوان + الوصف + المهام الفرعية + التعليقات
+exports.searchActiveTasks = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { userId, isAdmin, q, excludeTaskId } = req.query;
+    if (!userId) return res.status(401).json({ message: 'User identification is required.' });
+    if (!q || !q.trim() || q.trim().length < 2) return res.json([]);
+
+    try {
+        const ctx = await buildCompletedTasksContext(pool);
+        const isAdminBool = isAdmin === 'true' || isAdmin === true;
+        const excludeId = excludeTaskId ? parseInt(excludeTaskId, 10) : null;
+        const term = q.trim().toLowerCase();
+
+        // --- استعلام مشترك لجميع المهام (نشطة + مكتملة) ---
+        let allTasksQuery;
+        const request = pool.request();
+
+        if (isAdminBool) {
+            allTasksQuery = `
+                SELECT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate
+                FROM dbo.Tasks t
+                ORDER BY t.CreatedAt DESC
+            `;
+        } else {
+            const principal = await resolvePrincipalForCompletedSearch(pool, userId, ctx);
+            const scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, userId);
+
+            if (principal == null && scopeDepartmentIds.length === 0) {
+                return res.json([]);
+            }
+
+            const accessClauses = [];
+            if (principal != null) {
+                request.input('UserID', ctx.sqlIdType, principal);
+                accessClauses.push(`t.${ctx.taskCreatedCol} = @UserID`);
+                accessClauses.push(`EXISTS (SELECT 1 FROM dbo.Subtasks s WHERE s.TaskID = t.TaskID AND s.${ctx.subAssignedCol} = @UserID)`);
+                accessClauses.push(`EXISTS (SELECT 1 FROM dbo.Comments c WHERE c.TaskID = t.TaskID AND c.${ctx.commentAuthorCol} = @UserID)`);
+            }
+            if (scopeDepartmentIds.length > 0) {
+                scopeDepartmentIds.forEach((dId, i) => {
+                    request.input(`DeptID${i}`, sql.Int, parseInt(dId, 10));
+                });
+                accessClauses.push(`t.DepartmentID IN (${scopeDepartmentIds.map((_, i) => `@DeptID${i}`).join(',')})`);
+            }
+
+            allTasksQuery = `
+                SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate
+                FROM dbo.Tasks t
+                WHERE (${accessClauses.join(' OR ')})
+                ORDER BY t.CreatedAt DESC
+            `;
+        }
+
+        const rawResult = await request.query(allTasksQuery);
+
+        // فك تشفير العنوان والوصف وتصفية المستثنى
+        const tasks = rawResult.recordset
+            .filter(t => !excludeId || t.TaskID !== excludeId)
+            .map(t => {
+                if (t.Title)       { try { t.Title       = encryptionConfig.decrypt(t.Title);       } catch (_) {} }
+                if (t.Description) { try { t.Description = encryptionConfig.decrypt(t.Description); } catch (_) {} }
+                return t;
+            });
+
+        // المرحلة الأولى: مطابقة العنوان والوصف
+        const taskFieldMatches = new Set();
+        for (const t of tasks) {
+            if (
+                (t.Title       && t.Title.toLowerCase().includes(term)) ||
+                (t.Description && t.Description.toLowerCase().includes(term))
+            ) {
+                taskFieldMatches.add(t.TaskID);
+            }
+        }
+
+        // المرحلة الثانية: بحث في المهام الفرعية والتعليقات للمهام غير المطابقة
+        const unresolvedIds = tasks
+            .map(t => Number(t.TaskID))
+            .filter(id => Number.isFinite(id) && !taskFieldMatches.has(id));
+
+        const subtaskHits = new Set();
+        const commentHits = new Set();
+
+        if (unresolvedIds.length > 0) {
+            const idList = unresolvedIds.join(',');
+
+            const subResult = await pool.request()
+                .input('TaskIDs', sql.NVarChar(sql.MAX), idList)
+                .query(`
+                    SELECT TaskID, Title FROM dbo.Subtasks
+                    WHERE TaskID IN (
+                        SELECT TRY_CAST(value AS INT) FROM STRING_SPLIT(@TaskIDs, ',')
+                        WHERE TRY_CAST(value AS INT) IS NOT NULL
+                    )
+                `);
+            for (const s of subResult.recordset) {
+                let txt = s.Title || '';
+                try { txt = encryptionConfig.decrypt(txt); } catch (_) {}
+                if (txt.toLowerCase().includes(term)) subtaskHits.add(s.TaskID);
+            }
+
+            const cmtResult = await pool.request()
+                .input('TaskIDs', sql.NVarChar(sql.MAX), idList)
+                .query(`
+                    SELECT TaskID, Content FROM dbo.Comments
+                    WHERE TaskID IN (
+                        SELECT TRY_CAST(value AS INT) FROM STRING_SPLIT(@TaskIDs, ',')
+                        WHERE TRY_CAST(value AS INT) IS NOT NULL
+                    )
+                `);
+            for (const c of cmtResult.recordset) {
+                let txt = c.Content || '';
+                try { txt = encryptionConfig.decrypt(txt); } catch (_) {}
+                if (txt.toLowerCase().includes(term)) commentHits.add(c.TaskID);
+            }
+        }
+
+        const matched = tasks
+            .filter(t => taskFieldMatches.has(t.TaskID) || subtaskHits.has(t.TaskID) || commentHits.has(t.TaskID))
+            .slice(0, 20)
+            .map(t => ({
+                TaskID:      t.TaskID,
+                Title:       t.Title       || '',
+                Description: t.Description || '',
+                Status:      t.Status      || '',
+                Priority:    t.Priority    || '',
+                DueDate:     t.DueDate     || null
+            }));
+
+        res.json(matched);
+    } catch (err) {
+        console.error('searchActiveTasks error:', err.message, err.stack);
+        res.status(500).json({ message: err.message || 'خطأ في البحث' });
+    }
+};

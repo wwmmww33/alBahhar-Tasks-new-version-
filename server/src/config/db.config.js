@@ -1,5 +1,13 @@
 // src/config/db.config.js
-require('dotenv').config(); // تحميل متغيرات .env (سيتم استخدامها فقط في التطوير)
+const path = require('path');
+const fs = require('fs');
+const exeDir = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '../../..');
+const envPath = path.join(exeDir, '.env');
+if (fs.existsSync(envPath)) {
+  require('dotenv').config({ path: envPath });
+} else {
+  require('dotenv').config();
+}
 
 const config = {
   // --- إعدادات الإنتاج (Production) ---
