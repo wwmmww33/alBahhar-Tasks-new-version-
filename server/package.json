@@ -19,10 +19,7 @@
   },
   "pkg": {
     "assets": [
-      "dist/**/*",
-      "node_modules/@typespec/**/*",
-      "node_modules/mssql/**/*",
-      "node_modules/tedious/**/*"
+      "dist/**/*"
     ],
     "targets": "node18-win-x64",
     "outputPath": "release",

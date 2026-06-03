@@ -512,32 +512,66 @@ exports.encryptExistingPasswords = async (req, res) => {
 exports.getRegistrationRequests = async (req, res) => {
     const pool = req.app.locals.db;
     if (!pool) return res.status(503).send({ message: 'Database connection is not available.' });
+
+    const managerDeptId = req.query.departmentId ? parseInt(req.query.departmentId, 10) : null;
+
     try {
-        // فحص الأعمدة الاختيارية في RegistrationRequests
         const colProbe = await pool.request().query(`
             SELECT
-                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','VacancyName') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyName,
-                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','Rank')        IS NOT NULL THEN 1 ELSE 0 END AS HasRank,
-                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','RequestDate') IS NOT NULL THEN 1 ELSE 0 END AS HasRequestDate
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','VacancyName')  IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyName,
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','Rank')         IS NOT NULL THEN 1 ELSE 0 END AS HasRank,
+                CASE WHEN COL_LENGTH('dbo.RegistrationRequests','RequestDate')  IS NOT NULL THEN 1 ELSE 0 END AS HasRequestDate,
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID')    IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+                CASE WHEN COL_LENGTH('dbo.Departments','ParentID')              IS NOT NULL THEN 1 ELSE 0 END AS HasParentID
         `);
         const cp = colProbe.recordset[0] || {};
 
-        const vacancyNameSel = cp.HasVacancyName
-            ? 'r.VacancyName'
-            : "CAST(NULL AS NVARCHAR(200)) AS VacancyName";
-        const rankSel = cp.HasRank
-            ? 'r.Rank'
-            : "CAST(NULL AS NVARCHAR(200)) AS Rank";
-        const orderBy = cp.HasRequestDate ? 'r.RequestDate DESC' : 'r.RequestID DESC';
+        const vacancyNameSel = cp.HasVacancyName ? 'r.VacancyName' : "CAST(NULL AS NVARCHAR(200)) AS VacancyName";
+        const rankSel        = cp.HasRank        ? 'r.Rank'        : "CAST(NULL AS NVARCHAR(200)) AS Rank";
+        const orderBy        = cp.HasRequestDate ? 'r.RequestDate DESC' : 'r.RequestID DESC';
+        const parentCol      = cp.HasParentDeptID ? 'ParentDepartmentID' : (cp.HasParentID ? 'ParentID' : null);
 
-        const result = await pool.request().query(`
-            SELECT r.RequestID, r.UserID, r.FullName, r.DepartmentID, d.Name as DepartmentName,
-                   ${vacancyNameSel}, ${rankSel}
-            FROM RegistrationRequests r
-            JOIN Departments d ON r.DepartmentID = d.DepartmentID
-            WHERE r.Status = 'Pending'
-            ORDER BY ${orderBy}
-        `);
+        const selectCols = `r.RequestID, r.UserID, r.FullName, r.DepartmentID, d.Name as DepartmentName, ${vacancyNameSel}, ${rankSel}`;
+        const request = pool.request();
+        let query;
+
+        if (managerDeptId && parentCol) {
+            request.input('ManagerDeptID', sql.Int, managerDeptId);
+            query = `
+                WITH DeptTree AS (
+                    SELECT DepartmentID FROM dbo.Departments WHERE DepartmentID = @ManagerDeptID
+                    UNION ALL
+                    SELECT d2.DepartmentID FROM dbo.Departments d2
+                    INNER JOIN DeptTree t ON d2.${parentCol} = t.DepartmentID
+                )
+                SELECT ${selectCols}
+                FROM dbo.RegistrationRequests r
+                JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
+                JOIN DeptTree dt       ON r.DepartmentID = dt.DepartmentID
+                WHERE r.Status = 'Pending'
+                ORDER BY ${orderBy}
+            `;
+        } else if (managerDeptId) {
+            // fallback: no parent column — filter by direct dept only
+            request.input('ManagerDeptID', sql.Int, managerDeptId);
+            query = `
+                SELECT ${selectCols}
+                FROM dbo.RegistrationRequests r
+                JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
+                WHERE r.Status = 'Pending' AND r.DepartmentID = @ManagerDeptID
+                ORDER BY ${orderBy}
+            `;
+        } else {
+            query = `
+                SELECT ${selectCols}
+                FROM dbo.RegistrationRequests r
+                JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
+                WHERE r.Status = 'Pending'
+                ORDER BY ${orderBy}
+            `;
+        }
+
+        const result = await request.query(query);
         res.status(200).json(result.recordset);
     } catch (error) {
         console.error('GET REGISTRATION REQUESTS ERROR:', error);

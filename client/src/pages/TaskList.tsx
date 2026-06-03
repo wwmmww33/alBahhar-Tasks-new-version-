@@ -46,6 +46,14 @@ type ActivityItem = {
   AssignedToName: string | null;
 };
 
+type ActivityGroup = {
+  TaskID: number;
+  TaskTitle: string;
+  TaskStatus: Task['Status'];
+  items: ActivityItem[];
+  latestAt: string;
+};
+
 type TaskListProps = { currentUser: CurrentUser; };
 
 const TaskList = ({ currentUser }: TaskListProps) => {
@@ -243,6 +251,21 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     }
     fetchActivity(activityPage + 1);
   };
+
+  // تجميع التحديثات المتتالية لنفس المهمة في مربع واحد
+  const groupedActivity = useMemo<ActivityGroup[]>(() => {
+    const groups: ActivityGroup[] = [];
+    for (const item of activityItems) {
+      const last = groups[groups.length - 1];
+      if (last && last.TaskID === item.TaskID) {
+        last.items.push(item);
+        if (new Date(item.CreatedAt) > new Date(last.latestAt)) last.latestAt = item.CreatedAt;
+      } else {
+        groups.push({ TaskID: item.TaskID, TaskTitle: item.TaskTitle, TaskStatus: item.TaskStatus, items: [item], latestAt: item.CreatedAt });
+      }
+    }
+    return groups;
+  }, [activityItems]);
 
   const exportActivityLog = () => {
     if (activityItems.length === 0) {
@@ -1237,94 +1260,112 @@ const TaskList = ({ currentUser }: TaskListProps) => {
             </div>
           ) : activityError ? (
             <p className="text-red-500 text-center py-4">{activityError}</p>
-          ) : activityItems.length > 0 ? (
+          ) : groupedActivity.length > 0 ? (
             <div className="space-y-4">
-              {activityItems.map((item) => {
-                const key = `${item.ItemType}-${item.SubtaskID ?? item.CommentID ?? item.TaskID}-${item.CreatedAt}`;
-                
-                let icon = <ClipboardList className="text-blue-500" size={20} />;
-                let label = 'مهمة جديدة';
-                let bgColor = 'bg-blue-50 dark:bg-blue-900/10';
-
-                if (item.ItemType === 'subtask') {
-                  icon = <CheckSquare className="text-purple-500" size={20} />;
-                  label = 'مهمة فرعية جديدة';
-                  bgColor = 'bg-purple-50 dark:bg-purple-900/10';
-                } else if (item.ItemType === 'comment') {
-                  icon = <MessageCircle className="text-green-500" size={20} />;
-                  label = 'تعليق جديد';
-                  bgColor = 'bg-green-50 dark:bg-green-900/10';
-                }
-
-                const actor = item.ActorName || item.ActorID || 'مستخدم غير معروف';
-                const isCompleted = item.TaskStatus === 'completed';
+              {groupedActivity.map((group) => {
+                const isCompleted = group.TaskStatus === 'completed';
+                const isMulti = group.items.length > 1;
 
                 return (
                   <div
-                    key={key}
-                    className={`p-4 border rounded-lg shadow-sm transition-all hover:shadow-md ${bgColor} border-content/10`}
+                    key={`group-${group.TaskID}-${group.latestAt}`}
+                    className="border rounded-lg shadow-sm transition-all hover:shadow-md bg-white dark:bg-gray-800 border-content/10 overflow-hidden"
                   >
-                    <div className="flex items-start gap-4">
-                      <div className="mt-1 flex-shrink-0 bg-white dark:bg-gray-800 p-2 rounded-full shadow-sm">
-                        {icon}
-                      </div>
-                      
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2 mb-1">
-                          <span className="font-bold text-content text-lg">{label}</span>
-                          <span className="text-xs text-content-secondary flex items-center gap-1 bg-white dark:bg-gray-800 px-2 py-1 rounded-full shadow-sm">
-                            <Clock size={12} />
-                            {new Date(item.CreatedAt).toLocaleString('ar-EG')}
+                    {/* رأس المجموعة — عنوان المهمة + أحدث وقت */}
+                    <div className="flex items-center justify-between gap-2 px-4 py-3 bg-gray-50 dark:bg-gray-700/50 border-b border-content/10">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <ClipboardList size={16} className="text-blue-500 flex-shrink-0" />
+                        <Link
+                          to={`/task/${group.TaskID}`}
+                          className={`font-semibold text-sm hover:underline truncate ${isCompleted ? 'text-gray-400 line-through' : 'text-primary'}`}
+                        >
+                          {group.TaskTitle}
+                        </Link>
+                        {isCompleted && (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-green-600 bg-green-100 dark:bg-green-900/30 px-2 py-0.5 rounded-full flex-shrink-0">
+                            <CheckCircle size={10} />
+                            مكتملة
                           </span>
-                        </div>
-
-                        <div className="text-sm text-content mb-2">
-                          <span className="text-content-secondary">في المهمة: </span>
-                          <Link 
-                            to={`/task/${item.TaskID}`} 
-                            className={`font-medium hover:underline ${isCompleted ? 'text-gray-500 line-through decoration-gray-400' : 'text-primary'}`}
-                          >
-                            {item.TaskTitle}
-                          </Link>
-                          {isCompleted && (
-                            <span className="inline-flex items-center gap-1 mr-2 text-xs font-medium text-green-600 bg-green-100 dark:bg-green-900/30 px-2 py-0.5 rounded-full">
-                              <CheckCircle size={10} />
-                              مكتملة
-                            </span>
-                          )}
-                        </div>
-
-                        {item.ItemType === 'subtask' && item.SubtaskTitle && (
-                          <div className="bg-white/60 dark:bg-black/20 p-3 rounded-md border border-content/5 mb-2">
-                            <div className="flex items-center gap-2 text-content font-medium">
-                              <CheckSquare size={16} className="text-content-secondary" />
-                              {item.SubtaskTitle}
-                            </div>
-                          </div>
                         )}
-
-                        {item.ItemType === 'comment' && item.CommentContent && (
-                          <div className="bg-white/60 dark:bg-black/20 p-3 rounded-md border border-content/5 mb-2">
-                            <div className="text-content whitespace-pre-wrap text-sm leading-relaxed">
-                              "{item.CommentContent}"
-                            </div>
-                          </div>
+                        {isMulti && (
+                          <span className="text-xs text-content-secondary bg-gray-200 dark:bg-gray-600 px-2 py-0.5 rounded-full flex-shrink-0">
+                            {group.items.length} تحديثات
+                          </span>
                         )}
-
-                        <div className="flex items-center gap-2 mt-2 text-xs text-content-secondary flex-wrap">
-                          <div className="flex items-center gap-1 bg-white dark:bg-gray-800 px-2 py-1 rounded-full border border-content/10">
-                            <User size={12} />
-                            <span>بواسطة: <span className="font-medium text-content">{actor}</span></span>
-                          </div>
-
-                          {item.AssignedToName && (
-                            <div className="flex items-center gap-1 bg-white dark:bg-gray-800 px-2 py-1 rounded-full border border-content/10">
-                              <Users size={12} />
-                              <span>مسند إلى: <span className="font-medium text-content">{item.AssignedToName}</span></span>
-                            </div>
-                          )}
-                        </div>
                       </div>
+                      <span className="text-xs text-content-secondary flex items-center gap-1 flex-shrink-0">
+                        <Clock size={11} />
+                        {new Date(group.latestAt).toLocaleString('ar-EG')}
+                      </span>
+                    </div>
+
+                    {/* قائمة التحديثات داخل المجموعة */}
+                    <div className={isMulti ? 'divide-y divide-content/5' : ''}>
+                      {group.items.map((item) => {
+                        const itemKey = `${item.ItemType}-${item.SubtaskID ?? item.CommentID ?? item.TaskID}-${item.CreatedAt}`;
+                        const actor = item.ActorName || item.ActorID || 'مستخدم غير معروف';
+
+                        let icon = <ClipboardList className="text-blue-500 flex-shrink-0" size={16} />;
+                        let label = 'مهمة جديدة';
+                        let rowBg = '';
+
+                        if (item.ItemType === 'subtask') {
+                          icon = <CheckSquare className="text-purple-500 flex-shrink-0" size={16} />;
+                          label = 'مهمة فرعية';
+                          rowBg = isMulti ? 'bg-purple-50/40 dark:bg-purple-900/5' : 'bg-purple-50 dark:bg-purple-900/10';
+                        } else if (item.ItemType === 'comment') {
+                          icon = <MessageCircle className="text-green-500 flex-shrink-0" size={16} />;
+                          label = 'تعليق';
+                          rowBg = isMulti ? 'bg-green-50/40 dark:bg-green-900/5' : 'bg-green-50 dark:bg-green-900/10';
+                        } else {
+                          rowBg = isMulti ? '' : 'bg-blue-50 dark:bg-blue-900/10';
+                        }
+
+                        return (
+                          <div key={itemKey} className={`px-4 py-3 ${rowBg}`}>
+                            <div className="flex items-start gap-3">
+                              <div className="mt-0.5">{icon}</div>
+                              <div className="flex-1 min-w-0">
+                                {/* نوع التحديث + الوقت في حالة مجموعة متعددة */}
+                                <div className="flex items-center justify-between gap-2 mb-1">
+                                  <span className="text-xs font-semibold text-content-secondary uppercase tracking-wide">{label}</span>
+                                  {isMulti && (
+                                    <span className="text-xs text-content-secondary flex items-center gap-1">
+                                      <Clock size={10} />
+                                      {new Date(item.CreatedAt).toLocaleString('ar-EG')}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {item.ItemType === 'subtask' && item.SubtaskTitle && (
+                                  <div className="text-sm text-content font-medium mb-1">
+                                    {item.SubtaskTitle}
+                                  </div>
+                                )}
+
+                                {item.ItemType === 'comment' && item.CommentContent && (
+                                  <div className="text-sm text-content whitespace-pre-wrap leading-relaxed mb-1 break-all">
+                                    "{item.CommentContent}"
+                                  </div>
+                                )}
+
+                                <div className="flex items-center gap-2 text-xs text-content-secondary flex-wrap">
+                                  <div className="flex items-center gap-1">
+                                    <User size={11} />
+                                    <span className="font-medium text-content">{actor}</span>
+                                  </div>
+                                  {item.AssignedToName && (
+                                    <div className="flex items-center gap-1">
+                                      <Users size={11} />
+                                      <span>→ <span className="font-medium text-content">{item.AssignedToName}</span></span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );

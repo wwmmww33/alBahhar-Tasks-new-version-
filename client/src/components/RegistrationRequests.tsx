@@ -1,6 +1,7 @@
 // src/components/RegistrationRequests.tsx
 import { useState, useEffect, useCallback } from 'react';
 import { Check, Trash2 } from 'lucide-react';
+import type { CurrentUser } from '../types';
 
 type Request = {
   RequestID: number;
@@ -11,14 +12,21 @@ type Request = {
   Rank?: string | number | null;
 };
 
-const RegistrationRequests = () => {
+const RegistrationRequests = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const [requests, setRequests] = useState<Request[]>([]);
 
+  const isDeptManager = (currentUser?.Role ?? 0) === 2;
+  const managerDeptId = isDeptManager ? currentUser?.DepartmentID : null;
+
   const fetchRequests = useCallback(async () => {
-    const res = await fetch('/api/users/requests');
+    const url = managerDeptId
+      ? `/api/users/requests?departmentId=${managerDeptId}`
+      : '/api/users/requests';
+    const res = await fetch(url);
+    if (!res.ok) return;
     const data = await res.json();
     setRequests(data);
-  }, []);
+  }, [managerDeptId]);
 
   useEffect(() => {
     fetchRequests();

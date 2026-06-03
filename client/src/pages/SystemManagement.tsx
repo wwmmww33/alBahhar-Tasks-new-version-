@@ -12,6 +12,7 @@ type AdminTab = 'departments' | 'users' | 'requests' | 'delegations';
 const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
   const isSystemAdmin = userRole === 1;
+  const isDeptManager  = userRole === 2;
 
   const [activeTab, setActiveTab] = useState<AdminTab>('departments');
   const [bootstrapMsg, setBootstrapMsg] = useState<string | null>(null);
@@ -95,15 +96,19 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
               <Users size={20} />
               <span>إدارة المستخدمين</span>
             </button>
-            <button onClick={() => setActiveTab('requests')} className={getTabClassName('requests')}>
-              <UserPlus size={20} />
-              <span>طلبات التسجيل</span>
-            </button>
-            <button onClick={() => setActiveTab('delegations')} className={getTabClassName('delegations')}>
-              <UserCheck size={20} />
-              <span>إدارة التفويضات</span>
-            </button>
           </>
+        )}
+        {(isSystemAdmin || isDeptManager) && (
+          <button onClick={() => setActiveTab('requests')} className={getTabClassName('requests')}>
+            <UserPlus size={20} />
+            <span>طلبات التسجيل</span>
+          </button>
+        )}
+        {isSystemAdmin && (
+          <button onClick={() => setActiveTab('delegations')} className={getTabClassName('delegations')}>
+            <UserCheck size={20} />
+            <span>إدارة التفويضات</span>
+          </button>
         )}
       </div>
 
@@ -111,7 +116,7 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
       <div className="animate-fade-in">
         {activeTab === 'departments' && <DepartmentManagement currentUser={currentUser} />}
         {activeTab === 'users'       && isSystemAdmin && <UserManagement currentUser={currentUser} />}
-        {activeTab === 'requests'    && isSystemAdmin && <RegistrationRequests />}
+        {activeTab === 'requests'    && (isSystemAdmin || isDeptManager) && <RegistrationRequests currentUser={currentUser} />}
         {activeTab === 'delegations' && isSystemAdmin && <DelegationManagement />}
       </div>
     </div>

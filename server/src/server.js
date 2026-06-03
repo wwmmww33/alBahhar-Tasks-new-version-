@@ -22,31 +22,56 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-// تهيئة خدمة الملفات الثابتة للواجهة الأمامية (dist) بمسارات احتياطية مرنة
-const exeDir = process.pkg ? path.dirname(process.execPath) : null;
-const candidateStaticDirs = [
-  process.env.STATIC_DIR && path.resolve(process.env.STATIC_DIR),
-  exeDir && path.join(exeDir, 'dist'),          // مجلد dist بجانب الـ exe
-  path.join(__dirname, '..', 'dist'),
-  path.join(__dirname, '..', 'client', 'dist'),
-  path.resolve(process.cwd(), 'dist'),
-].filter(Boolean);
+// ── تهيئة الواجهة الأمامية ────────────────────────────────────────────────
+// في وضع الـ exe (process.pkg): الملفات مضمّنة كـ base64 داخل الكود
+// في وضع التطوير:              express.static من مجلد dist على الملفات
 
-let distDir = candidateStaticDirs.find((dir) => {
+let inlinedDist = null; // خريطة { 'path': [Buffer, mimeType] }
+let distDir     = null; // للوضع الاعتيادي فقط
+
+if (process.pkg) {
   try {
-    return fs.existsSync(dir) && fs.existsSync(path.join(dir, 'index.html'));
-  } catch {
-    return false;
+    const raw = require('./inlinedDist.generated');
+    // حوّل base64 strings إلى Buffers مرة واحدة عند التشغيل
+    inlinedDist = {};
+    for (const [k, [b64, mime]] of Object.entries(raw)) {
+      inlinedDist[k] = [Buffer.from(b64, 'base64'), mime];
+    }
+    console.log('📦 Frontend: embedded in exe (' + Object.keys(inlinedDist).length + ' files)');
+  } catch (e) {
+    console.warn('⚠️  Embedded dist not found, falling back to external dist/', e.message);
   }
-});
-
-if (!distDir) {
-  // إذا لم نعثر على مجلد dist، استخدم أول مرشح كافتراضي (قد يؤدي إلى 404)
-  distDir = candidateStaticDirs[0];
 }
 
-console.log('📦 Static frontend directory:', distDir);
-app.use(express.static(distDir));
+if (!inlinedDist) {
+  // وضع التطوير أو الـ exe بدون ملفات مضمّنة — ابحث على الملفات
+  const exeDir = process.pkg ? path.dirname(process.execPath) : null;
+  const candidates = [
+    process.env.STATIC_DIR && path.resolve(process.env.STATIC_DIR),
+    exeDir && path.join(exeDir, 'dist'),
+    path.join(__dirname, '..', 'dist'),
+    path.join(__dirname, '..', 'client', 'dist'),
+    path.resolve(process.cwd(), 'dist'),
+  ].filter(Boolean);
+
+  distDir = candidates.find(d => {
+    try { return fs.existsSync(path.join(d, 'index.html')); } catch { return false; }
+  }) || candidates[0];
+
+  console.log('📦 Frontend: filesystem at', distDir);
+  app.use(express.static(distDir));
+} else {
+  // middleware يخدم الملفات الثابتة المضمّنة (يُوضع قبل مسارات API)
+  app.use((req, res, next) => {
+    const rel = req.path === '/' ? 'index.html' : req.path.replace(/^\//, '');
+    const entry = inlinedDist[rel];
+    if (!entry) return next();
+    const [buf, mime] = entry;
+    if (rel.startsWith('assets/')) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Type', mime);
+    res.send(buf);
+  });
+}
 
 
 // --- 1. استيراد كل ملفات التوجيه (Routes) ---
@@ -107,6 +132,11 @@ app.all('/api/*', (req, res) => {
 
 // --- 4. المسار الشامل للـ SPA ---
 app.get('*', (req, res) => {
+  if (inlinedDist) {
+    const [buf, mime] = inlinedDist['index.html'];
+    res.setHeader('Content-Type', mime);
+    return res.send(buf);
+  }
   res.sendFile(path.join(distDir, 'index.html'));
 });
 

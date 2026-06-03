@@ -10,7 +10,9 @@
       "Bash(cmd /c build.bat)",
       "Bash(Get-Item \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\server\\\\release\\\\bahar.exe\")",
       "Bash(Select-Object Name, Length, LastWriteTime)",
-      "Bash(node -e \"require\\('xlsx'\\); console.log\\('ok'\\)\")"
+      "Bash(node -e \"require\\('xlsx'\\); console.log\\('ok'\\)\")",
+      "WebSearch",
+      "PowerShell(Get-ChildItem \"c:\\\\Users\\\\RNO\\\\Desktop\\\\NewTask - V10 url - Copy \\(3\\) - cluade\\\\server\\\\release\\\\\" | Select-Object Name, @{N='Size\\(MB\\)';E={[math]::Round\\($_.Length/1MB,1\\)}})"
     ]
   }
 }
