@@ -1,59 +1,57 @@
 @echo off
-chcp 65001 > nul
 echo.
 echo ==========================================
 echo   Bahar - Build EXE
 echo ==========================================
 echo.
 
-:: التحقق من وجود Node.js
+:: Check Node.js
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [خطأ] Node.js غير مثبت. حمّله من https://nodejs.org
+    echo [ERROR] Node.js is not installed.
     pause
     exit /b 1
 )
 
-:: ===== الخطوة 1: بناء الواجهة الأمامية =====
-echo [1/3] بناء الواجهة الأمامية (React)...
+:: ===== Step 1: Build Frontend =====
+echo [1/3] Building frontend (React)...
 cd /d "%~dp0client"
 if not exist node_modules (
-    echo     تثبيت الحزم...
+    echo     Installing packages...
     call npm install
-    if errorlevel 1 ( echo [خطأ] فشل npm install في client & pause & exit /b 1 )
+    if errorlevel 1 ( echo [ERROR] npm install failed in client & pause & exit /b 1 )
 )
 call npm run build
-if errorlevel 1 ( echo [خطأ] فشل بناء الواجهة & pause & exit /b 1 )
-echo     تم بناء الواجهة بنجاح.
+if errorlevel 1 ( echo [ERROR] Frontend build failed & pause & exit /b 1 )
+echo     Frontend built successfully.
 echo.
 
-:: ===== الخطوة 2: تجميع الخادم =====
-echo [2/3] تجميع الخادم (Node.js)...
+:: ===== Step 2: Bundle Server =====
+echo [2/3] Bundling server (Node.js)...
 cd /d "%~dp0server"
 if not exist node_modules (
-    echo     تثبيت الحزم...
+    echo     Installing packages...
     call npm install
-    if errorlevel 1 ( echo [خطأ] فشل npm install في server & pause & exit /b 1 )
+    if errorlevel 1 ( echo [ERROR] npm install failed in server & pause & exit /b 1 )
 )
 call node build.mjs
-if errorlevel 1 ( echo [خطأ] فشل تجميع الخادم & pause & exit /b 1 )
-echo     تم التجميع بنجاح.
+if errorlevel 1 ( echo [ERROR] Server bundle failed & pause & exit /b 1 )
+echo     Server bundled successfully.
 echo.
 
-:: ===== الخطوة 3: إنشاء EXE =====
-echo [3/3] إنشاء ملف bahar.exe...
+:: ===== Step 3: Create EXE =====
+echo [3/3] Creating bahar.exe...
 call npx @yao-pkg/pkg bundle.js --targets node18-win-x64 --output release/bahar.exe
-if errorlevel 1 ( echo [خطأ] فشل إنشاء EXE & pause & exit /b 1 )
-echo     تم إنشاء EXE بنجاح.
+if errorlevel 1 ( echo [ERROR] EXE creation failed & pause & exit /b 1 )
+echo     bahar.exe created successfully.
 echo.
 
 echo ==========================================
-echo   النتيجة:
+echo   Output:
 echo   server\release\bahar.exe
-echo   server\release\dist\
 echo   server\release\.env
 echo.
-echo   انقل مجلد release\ إلى أي جهاز وشغّل bahar.exe
+echo   Copy the release\ folder to any machine and run bahar.exe
 echo ==========================================
 echo.
 pause
