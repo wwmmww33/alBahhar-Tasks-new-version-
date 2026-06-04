@@ -95,3 +95,19 @@ git reset --hard 1234567
 
 ما أنصحك تبدأ بهالطريقة الآن، الأفضل تجرب الحالة 2 (فرع جديد من النسخة القديمة) لين ترتاح مع Git.
 
+
+
+
+
+خطوات بناء التطبيق
+cd client
+npm run build
+
+cd server
+npm run build
+
+
+
+
+
+taskkill /f /im node.exe

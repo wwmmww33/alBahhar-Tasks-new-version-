@@ -69,10 +69,43 @@ async function ensureRegistrationRequestsVacancyID(pool) {
   }
 }
 
+async function ensureTaskAssignmentNotificationsColumns(pool) {
+  try {
+    const check = await pool.request().query(
+      `SELECT OBJECT_ID('dbo.TaskAssignmentNotifications','U') AS Obj`
+    );
+    if (!check.recordset[0]?.Obj) {
+      console.log('ℹ️  TaskAssignmentNotifications table not found — skipping column migration.');
+      return { changed: false };
+    }
+
+    await pool.request().query(`
+      IF COL_LENGTH('dbo.TaskAssignmentNotifications','IsRead') IS NULL
+        ALTER TABLE dbo.TaskAssignmentNotifications
+          ADD IsRead BIT NOT NULL CONSTRAINT DF_TAN_IsRead DEFAULT(0);
+
+      IF COL_LENGTH('dbo.TaskAssignmentNotifications','CreatedAt') IS NULL
+        ALTER TABLE dbo.TaskAssignmentNotifications
+          ADD CreatedAt DATETIME NOT NULL CONSTRAINT DF_TAN_CreatedAt DEFAULT(GETDATE());
+
+      IF COL_LENGTH('dbo.TaskAssignmentNotifications','NotificationID') IS NULL
+        ALTER TABLE dbo.TaskAssignmentNotifications
+          ADD NotificationID INT IDENTITY(1,1) NOT NULL;
+    `);
+
+    console.log('✅ TaskAssignmentNotifications columns ensured (IsRead, CreatedAt, NotificationID).');
+    return { changed: true };
+  } catch (err) {
+    console.error('⚠️  Failed ensuring TaskAssignmentNotifications columns:', err.message);
+    throw err;
+  }
+}
+
 module.exports = {
   ensureSubtasksCalendarFlag,
   ensureCommentsCalendarFlag,
   ensureRegistrationRequestsVacancyID,
+  ensureTaskAssignmentNotificationsColumns,
   // يضمن وجود جدول أحداث التقويم الخاصة بالمستخدم (آمن للتشغيل المتكرر)
   ensurePersonalEventsTable: async function ensurePersonalEventsTable(pool) {
     try {

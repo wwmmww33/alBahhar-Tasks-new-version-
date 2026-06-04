@@ -946,11 +946,39 @@ exports.listRanks = async (req, res) => {
     if (!pool) return res.status(503).json({ message: 'DB unavailable' });
     try {
         const s = await probeRanksSchema(pool);
-        if (!s.HasTable || !s.rankValueCol) return res.status(200).json([]);
-        const result = await pool.request().query(
-            `SELECT * FROM dbo.VacancyRanks ORDER BY ${s.pkCol || '(SELECT NULL)'}`
-        );
-        res.status(200).json(result.recordset || []);
+        if (!s.HasTable) return res.status(200).json([]);
+
+        if (s.rankValueCol) {
+            // النص محفوظ مباشرة في عمود Rank أو Name
+            const result = await pool.request().query(
+                `SELECT * FROM dbo.VacancyRanks ORDER BY ${s.pkCol || '(SELECT NULL)'}`
+            );
+            return res.status(200).json(result.recordset || []);
+        }
+
+        if (s.HasRankID && s.HasVacancyID) {
+            // RankID كـ FK — نجمع مع جدول Ranks للحصول على الاسم
+            const rp = await pool.request().query(`
+                SELECT CASE WHEN OBJECT_ID('dbo.Ranks','U')       IS NOT NULL THEN 1 ELSE 0 END AS HasRanks,
+                       CASE WHEN COL_LENGTH('dbo.Ranks','Name')    IS NOT NULL THEN 1 ELSE 0 END AS HasName,
+                       CASE WHEN COL_LENGTH('dbo.Ranks','RankName')IS NOT NULL THEN 1 ELSE 0 END AS HasRankName
+            `);
+            const rd = rp.recordset[0] || {};
+            const nameCol = rd.HasName ? 'Name' : (rd.HasRankName ? 'RankName' : null);
+            if (rd.HasRanks && nameCol) {
+                const result = await pool.request().query(`
+                    SELECT vr.VacancyID, vr.RankID,
+                           r.${nameCol} AS Rank,
+                           r.${nameCol} AS Name
+                    FROM dbo.VacancyRanks vr
+                    JOIN dbo.Ranks r ON r.RankID = vr.RankID
+                    ORDER BY vr.VacancyID
+                `);
+                return res.status(200).json(result.recordset || []);
+            }
+        }
+
+        res.status(200).json([]);
     } catch (err) {
         console.error('LIST RANKS ERROR:', err);
         res.status(500).json({ message: 'Error fetching ranks', detail: err.message });
@@ -977,38 +1005,99 @@ exports.getVacancyRank = async (req, res) => {
 };
 
 // ---- PUT /api/vacancies/:id/rank ----
-// Body: { Rank: string }
+// Body: { Rank: string (rank name), RankID?: number }
 exports.setVacancyRank = async (req, res) => {
     const pool = req.app.locals.db;
     if (!pool) return res.status(503).json({ message: 'DB unavailable' });
     const vacancyId = parseInt(req.params.id, 10);
     if (!Number.isInteger(vacancyId)) return res.status(400).json({ message: 'id must be integer' });
-    const rankVal = String((req.body && req.body.Rank) || '').trim();
-    if (!rankVal) return res.status(400).json({ message: 'Rank is required' });
+
+    const rankVal      = String((req.body && req.body.Rank) || '').trim();
+    const rankIdFromBody = req.body?.RankID != null ? parseInt(req.body.RankID, 10) : NaN;
+    if (!rankVal && !Number.isFinite(rankIdFromBody)) {
+        return res.status(400).json({ message: 'Rank or RankID is required' });
+    }
+
     try {
+        // ── 1. حل RankID (integer) من جدول Ranks بحسب الاسم ──────────────────
+        let resolvedRankId = Number.isFinite(rankIdFromBody) ? rankIdFromBody : null;
+        if (resolvedRankId == null && rankVal) {
+            try {
+                const rp = await pool.request().query(`
+                    SELECT CASE WHEN OBJECT_ID('dbo.Ranks','U')        IS NOT NULL THEN 1 ELSE 0 END AS HasRanks,
+                           CASE WHEN COL_LENGTH('dbo.Ranks','Name')     IS NOT NULL THEN 1 ELSE 0 END AS HasName,
+                           CASE WHEN COL_LENGTH('dbo.Ranks','RankName') IS NOT NULL THEN 1 ELSE 0 END AS HasRankName
+                `);
+                const rd = rp.recordset[0] || {};
+                const nameCol = rd.HasName ? 'Name' : (rd.HasRankName ? 'RankName' : null);
+                if (rd.HasRanks && nameCol) {
+                    const lookup = await pool.request()
+                        .input('RankName', sql.NVarChar(200), rankVal)
+                        .query(`SELECT TOP 1 RankID FROM dbo.Ranks WHERE ${nameCol} = @RankName`);
+                    resolvedRankId = lookup.recordset[0]?.RankID ?? null;
+                }
+            } catch (_) {}
+        }
+
+        let saved = false;
+
+        // ── 2. تحديث JobVacancies.Rank مباشرةً (الأكثر موثوقية) ─────────────
+        if (resolvedRankId != null) {
+            try {
+                const vp = await pool.request().query(`
+                    SELECT CASE WHEN COL_LENGTH('dbo.JobVacancies','Rank') IS NOT NULL THEN 1 ELSE 0 END AS HasRankCol
+                `);
+                if (vp.recordset[0]?.HasRankCol) {
+                    await pool.request()
+                        .input('VacancyID', sql.Int, vacancyId)
+                        .input('RankID',    sql.Int, resolvedRankId)
+                        .query(`UPDATE dbo.JobVacancies SET Rank = @RankID WHERE VacancyID = @VacancyID`);
+                    saved = true;
+                }
+            } catch (_) {}
+        }
+
+        // ── 3. أيضاً upsert في VacancyRanks إن وُجد ─────────────────────────
         const s = await probeRanksSchema(pool);
-        if (!s.HasTable || !s.rankValueCol) {
-            return res.status(200).json({ message: 'VacancyRanks not available, rank not stored' });
-        }
-        if (s.HasVacancyID) {
-            const existing = await pool.request()
-                .input('VacancyID', sql.Int, vacancyId)
-                .query(`SELECT TOP 1 ${s.pkCol} FROM dbo.VacancyRanks WHERE VacancyID = @VacancyID`);
-            if (existing.recordset[0]) {
-                await pool.request()
+        if (s.HasTable && s.HasVacancyID) {
+            if (s.rankValueCol) {
+                // عمود نصي Rank أو Name
+                const existing = await pool.request()
                     .input('VacancyID', sql.Int, vacancyId)
-                    .input('RankVal', sql.NVarChar(200), rankVal)
-                    .query(`UPDATE dbo.VacancyRanks SET ${s.rankValueCol} = @RankVal WHERE VacancyID = @VacancyID`);
-            } else {
-                await pool.request()
+                    .query(`SELECT TOP 1 1 AS X FROM dbo.VacancyRanks WHERE VacancyID = @VacancyID`);
+                if (existing.recordset[0]) {
+                    await pool.request()
+                        .input('VacancyID', sql.Int, vacancyId)
+                        .input('RankVal',   sql.NVarChar(200), rankVal)
+                        .query(`UPDATE dbo.VacancyRanks SET ${s.rankValueCol} = @RankVal WHERE VacancyID = @VacancyID`);
+                } else {
+                    await pool.request()
+                        .input('VacancyID', sql.Int, vacancyId)
+                        .input('RankVal',   sql.NVarChar(200), rankVal)
+                        .query(`INSERT INTO dbo.VacancyRanks (VacancyID, ${s.rankValueCol}) VALUES (@VacancyID, @RankVal)`);
+                }
+                saved = true;
+            } else if (s.HasRankID && resolvedRankId != null) {
+                // عمود FK إلى جدول Ranks
+                const existing = await pool.request()
                     .input('VacancyID', sql.Int, vacancyId)
-                    .input('RankVal', sql.NVarChar(200), rankVal)
-                    .query(`INSERT INTO dbo.VacancyRanks (VacancyID, ${s.rankValueCol}) VALUES (@VacancyID, @RankVal)`);
+                    .query(`SELECT TOP 1 1 AS X FROM dbo.VacancyRanks WHERE VacancyID = @VacancyID`);
+                if (existing.recordset[0]) {
+                    await pool.request()
+                        .input('VacancyID', sql.Int, vacancyId)
+                        .input('RankID',    sql.Int, resolvedRankId)
+                        .query(`UPDATE dbo.VacancyRanks SET RankID = @RankID WHERE VacancyID = @VacancyID`);
+                } else {
+                    await pool.request()
+                        .input('VacancyID', sql.Int, vacancyId)
+                        .input('RankID',    sql.Int, resolvedRankId)
+                        .query(`INSERT INTO dbo.VacancyRanks (VacancyID, RankID) VALUES (@VacancyID, @RankID)`);
+                }
+                saved = true;
             }
-        } else {
-            return res.status(200).json({ message: 'VacancyRanks has no VacancyID column, rank not linked' });
         }
-        res.status(200).json({ message: 'Rank saved' });
+
+        res.status(200).json({ message: saved ? 'Rank saved' : 'Rank storage not configured on this server' });
     } catch (err) {
         console.error('SET VACANCY RANK ERROR:', err);
         res.status(500).json({ message: 'Error saving rank', detail: err.message });
@@ -1022,11 +1111,26 @@ exports.deleteVacancyRank = async (req, res) => {
     const vacancyId = parseInt(req.params.id, 10);
     if (!Number.isInteger(vacancyId)) return res.status(400).json({ message: 'id must be integer' });
     try {
+        // مسح JobVacancies.Rank
+        try {
+            const vp = await pool.request().query(`
+                SELECT CASE WHEN COL_LENGTH('dbo.JobVacancies','Rank') IS NOT NULL THEN 1 ELSE 0 END AS HasRankCol
+            `);
+            if (vp.recordset[0]?.HasRankCol) {
+                await pool.request()
+                    .input('VacancyID', sql.Int, vacancyId)
+                    .query(`UPDATE dbo.JobVacancies SET Rank = NULL WHERE VacancyID = @VacancyID`);
+            }
+        } catch (_) {}
+
+        // مسح VacancyRanks
         const s = await probeRanksSchema(pool);
-        if (!s.HasTable || !s.HasVacancyID) return res.status(200).json({ message: 'Nothing to delete' });
-        await pool.request()
-            .input('VacancyID', sql.Int, vacancyId)
-            .query(`DELETE FROM dbo.VacancyRanks WHERE VacancyID = @VacancyID`);
+        if (s.HasTable && s.HasVacancyID) {
+            await pool.request()
+                .input('VacancyID', sql.Int, vacancyId)
+                .query(`DELETE FROM dbo.VacancyRanks WHERE VacancyID = @VacancyID`);
+        }
+
         res.status(200).json({ message: 'Rank deleted' });
     } catch (err) {
         console.error('DELETE VACANCY RANK ERROR:', err);

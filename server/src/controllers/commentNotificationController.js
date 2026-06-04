@@ -67,9 +67,8 @@ async function resolveActorId(pool, rawUserId, prefersVacancy) {
 // جلب إشعارات التعليقات للمستخدم
 const getCommentNotifications = async (req, res) => {
     try {
-        const { userId } = req.params;
         const { unreadOnly = false } = req.query;
-        
+
         const pool = await sql.connect(dbConfig);
         const schema = await pool.request().query(`
             SELECT
@@ -82,7 +81,10 @@ const getCommentNotifications = async (req, res) => {
         const identityTable = s.HasCommentedByVacancy ? 'JobVacancies' : 'Users';
         const identityKey = s.HasCommentedByVacancy ? 'VacancyID' : 'UserID';
         const identityName = s.HasCommentedByVacancy ? 'Name' : 'FullName';
-        const actorId = await resolveActorId(pool, userId, !!s.HasNotifyVacancy);
+        // استخدام هوية المستخدم المصادَق عليه مباشرةً — يمنع الوصول لإشعارات المستخدمين الآخرين
+        const actorId = (s.HasNotifyVacancy && req.user.vacancyId != null && String(req.user.vacancyId).trim() !== '')
+            ? String(req.user.vacancyId).trim()
+            : String(req.user.userId).trim();
         
         let query = `
             SELECT 
@@ -143,14 +145,15 @@ const getCommentNotifications = async (req, res) => {
 // عدد الإشعارات غير المقروءة
 const getUnreadNotificationsCount = async (req, res) => {
     try {
-        const { userId } = req.params;
-        
         const pool = await sql.connect(dbConfig);
         const schema = await pool.request().query(`
             SELECT CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy
         `);
-        const notifyCol = schema.recordset[0]?.HasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
-        const actorId = await resolveActorId(pool, userId, !!schema.recordset[0]?.HasNotifyVacancy);
+        const hasNotifyVacancy = !!schema.recordset[0]?.HasNotifyVacancy;
+        const notifyCol = hasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
+        const actorId = (hasNotifyVacancy && req.user.vacancyId != null && String(req.user.vacancyId).trim() !== '')
+            ? String(req.user.vacancyId).trim()
+            : String(req.user.userId).trim();
         const request = pool.request();
         request.input('userId', sql.NVarChar, actorId);
         
@@ -208,14 +211,15 @@ const markNotificationAsRead = async (req, res) => {
 // تحديد جميع الإشعارات كمقروءة
 const markAllNotificationsAsRead = async (req, res) => {
     try {
-        const { userId } = req.params;
-        
         const pool = await sql.connect(dbConfig);
         const schema = await pool.request().query(`
             SELECT CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy
         `);
-        const notifyCol = schema.recordset[0]?.HasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
-        const actorId = await resolveActorId(pool, userId, !!schema.recordset[0]?.HasNotifyVacancy);
+        const hasNotifyVacancy = !!schema.recordset[0]?.HasNotifyVacancy;
+        const notifyCol = hasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
+        const actorId = (hasNotifyVacancy && req.user.vacancyId != null && String(req.user.vacancyId).trim() !== '')
+            ? String(req.user.vacancyId).trim()
+            : String(req.user.userId).trim();
         const request = pool.request();
         request.input('userId', sql.NVarChar, actorId);
         
@@ -243,14 +247,17 @@ const markAllNotificationsAsRead = async (req, res) => {
 // عدد الإشعارات غير المقروءة لمهمة معينة
 const getUnreadNotificationsCountForTask = async (req, res) => {
     try {
-        const { taskId, userId } = req.params;
-        
+        const { taskId } = req.params;
+
         const pool = await sql.connect(dbConfig);
         const schema = await pool.request().query(`
             SELECT CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy
         `);
-        const notifyCol = schema.recordset[0]?.HasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
-        const actorId = await resolveActorId(pool, userId, !!schema.recordset[0]?.HasNotifyVacancy);
+        const hasNotifyVacancy = !!schema.recordset[0]?.HasNotifyVacancy;
+        const notifyCol = hasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
+        const actorId = (hasNotifyVacancy && req.user.vacancyId != null && String(req.user.vacancyId).trim() !== '')
+            ? String(req.user.vacancyId).trim()
+            : String(req.user.userId).trim();
         const request = pool.request();
         request.input('taskId', sql.Int, taskId);
         request.input('userId', sql.NVarChar, actorId);
@@ -279,14 +286,17 @@ const getUnreadNotificationsCountForTask = async (req, res) => {
 // تحديد جميع إشعارات التعليقات كمقروءة لمهمة معينة ومستخدم معين
 const markTaskCommentNotificationsAsRead = async (req, res) => {
     try {
-        const { taskId, userId } = req.params;
-        
+        const { taskId } = req.params;
+
         const pool = await sql.connect(dbConfig);
         const schema = await pool.request().query(`
             SELECT CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy
         `);
-        const notifyCol = schema.recordset[0]?.HasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
-        const actorId = await resolveActorId(pool, userId, !!schema.recordset[0]?.HasNotifyVacancy);
+        const hasNotifyVacancy = !!schema.recordset[0]?.HasNotifyVacancy;
+        const notifyCol = hasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
+        const actorId = (hasNotifyVacancy && req.user.vacancyId != null && String(req.user.vacancyId).trim() !== '')
+            ? String(req.user.vacancyId).trim()
+            : String(req.user.userId).trim();
         const request = pool.request();
         request.input('taskId', sql.Int, taskId);
         request.input('userId', sql.NVarChar, actorId);

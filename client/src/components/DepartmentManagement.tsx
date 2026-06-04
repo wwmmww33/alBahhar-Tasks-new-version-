@@ -1085,7 +1085,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                 {hasHolder && (
                                   <button onClick={() => handleUnassign(v.VacancyID)} className="text-orange-600 hover:text-orange-800" title="تفريغ المنصب"><UserMinus size={16}/></button>
                                 )}
-                                <button onClick={() => { setEditingVacancy(v); setEditingVacancyRank(ranksMap.get(v.VacancyID) || ''); }} className="text-blue-500 hover:text-blue-700" title="تعديل"><Edit size={16}/></button>
+                                <button onClick={() => { setEditingVacancy(v); setEditingVacancyRank(ranksMap.get(v.VacancyID) || v.RankName || ''); }} className="text-blue-500 hover:text-blue-700" title="تعديل"><Edit size={16}/></button>
                                 {isSystemAdmin && <button onClick={() => handleDeleteVacancy(v.VacancyID, v.Name)} className="text-red-500 hover:text-red-700" title="حذف"><Trash2 size={16}/></button>}
                               </>
                             )}

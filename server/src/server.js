@@ -98,6 +98,7 @@ const calendarRoutes = require('./routes/calendarRoutes');
 const delegationRoutes = require('./routes/delegationRoutes');
 const vacancyRoutes = require('./routes/vacancyRoutes');
 const ranksRoutes = require('./routes/ranksRoutes');
+const myNotificationsRoutes = require('./routes/myNotificationsRoutes');
 const {
   ensureSubtasksCalendarFlag,
   ensureCommentsCalendarFlag,
@@ -114,6 +115,7 @@ const {
   ensureUserRolesTable,
   ensureRegistrationRequestsVacancyID,
   ensureTaskRelationsTable,
+  ensureTaskAssignmentNotificationsColumns,
 } = require('./utils/dbMigrations');
 
 
@@ -133,6 +135,7 @@ app.use('/api/calendar', calendarRoutes);
 app.use('/api/delegations', delegationRoutes);
 app.use('/api/vacancies', vacancyRoutes);
 app.use('/api/ranks', ranksRoutes);
+app.use('/api/my-notifications', myNotificationsRoutes);
 
 
 // --- 3. 404 لمسارات الـ API غير الموجودة ---
@@ -236,6 +239,13 @@ const startServer = async () => {
       await ensureTaskRelationsTable(pool);
     } catch (relErr) {
       console.error('⚠️ Database migration (TaskRelations) failed. Server continues running.', relErr);
+    }
+
+    // --- أعمدة إشعارات إسناد المهام الفرعية ---
+    try {
+      await ensureTaskAssignmentNotificationsColumns(pool);
+    } catch (tanErr) {
+      console.error('⚠️ Database migration (TaskAssignmentNotifications) failed. Server continues running.', tanErr);
     }
     
     app.listen(port, '0.0.0.0', () => {
