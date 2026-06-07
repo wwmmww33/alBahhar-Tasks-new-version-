@@ -268,53 +268,57 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   }, [activityItems]);
 
   const exportActivityLog = () => {
-    if (activityItems.length === 0) {
-      return;
-    }
+    if (activityItems.length === 0) return;
 
     const formatDate = (dateString: string) => {
-      return new Date(dateString).toLocaleString('ar-EG');
+      const d = new Date(dateString);
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const yyyy = d.getFullYear();
+      const hh = String(d.getHours()).padStart(2, '0');
+      const min = String(d.getMinutes()).padStart(2, '0');
+      return `${dd}.${mm}.${yyyy} ${hh}:${min}`;
     };
 
-    let content = `=== تقرير آخر التحديثات ===\n`;
-    content += `تاريخ التصدير: ${new Date().toLocaleString('ar-EG')}\n`;
-    content += `عدد التحديثات المعروضة: ${activityItems.length}\n\n`;
+    // تجميع كل تحديثات المهمة معاً (بغض النظر عن الترتيب المتتالي)
+    const taskOrder: number[] = [];
+    const taskMap = new Map<number, { title: string; items: ActivityItem[] }>();
+    for (const item of activityItems) {
+      if (!taskMap.has(item.TaskID)) {
+        taskOrder.push(item.TaskID);
+        taskMap.set(item.TaskID, { title: item.TaskTitle, items: [] });
+      }
+      taskMap.get(item.TaskID)!.items.push(item);
+    }
 
-    activityItems.forEach((item) => {
-      const date = formatDate(item.CreatedAt);
-      const actor = item.ActorName || item.ActorID || 'مستخدم غير معروف';
-      
-      let actionType = 'مهمة جديدة';
-      let details = '';
-      
-      if (item.ItemType === 'subtask') {
-        actionType = 'مهمة فرعية جديدة';
-        details = item.SubtaskTitle || '';
-      } else if (item.ItemType === 'comment') {
-        actionType = 'تعليق جديد';
-        details = item.CommentContent || '';
-      } else {
-        // item.ItemType === 'task'
-        actionType = 'مهمة جديدة';
-        details = item.TaskTitle;
+    let content = '';
+    for (const taskId of taskOrder) {
+      const group = taskMap.get(taskId)!;
+      content += `#${taskId} ${group.title}\n`;
+      for (const item of group.items) {
+        const actor = item.ActorName || item.ActorID || 'مستخدم غير معروف';
+        const date = formatDate(item.CreatedAt);
+        // 📋 مهمة فرعية جديدة  |  💬 تعليق  |  ✦ مهمة جديدة
+        let symbol: string;
+        let detail: string;
+        let nameInParens: string;
+        if (item.ItemType === 'subtask') {
+          symbol = '📋';
+          detail = item.SubtaskTitle || '';
+          nameInParens = item.AssignedToName || actor;
+        } else if (item.ItemType === 'comment') {
+          symbol = '💬';
+          detail = item.CommentContent ? item.CommentContent.trim() : '';
+          nameInParens = actor;
+        } else {
+          symbol = '✦';
+          detail = item.TaskTitle;
+          nameInParens = actor;
+        }
+        content += `${date} ${symbol} ${detail} (${nameInParens})\n`;
       }
-
-      content += `[${date}] - بواسطة: ${actor}\n`;
-      content += `النوع: ${actionType}\n`;
-      
-      if (item.ItemType === 'task') {
-          content += `المهمة: ${item.TaskTitle}\n`;
-      } else {
-          content += `التفاصيل: ${details}\n`;
-          content += `في المهمة: ${item.TaskTitle}\n`;
-      }
-      
-      if (item.AssignedToName) {
-        content += `مسند إلى: ${item.AssignedToName}\n`;
-      }
-      
-      content += `----------------------------------------\n`;
-    });
+      content += '- - - - - - - - - - - - - - - - - - - -\n\n';
+    }
 
     setExportText(content);
   };
@@ -1108,16 +1112,29 @@ const TaskList = ({ currentUser }: TaskListProps) => {
             <div className="mt-4 flex justify-end gap-2">
               <button onClick={() => {
                 const printWindow = window.open('', '_blank');
-                if (printWindow) {
+                if (printWindow && exportText) {
+                  // تحويل النص إلى كتل HTML — كل فقرة فارغة تفصل بين مهمة وأخرى
+                  const escape = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                  const blocks = exportText.split(/\n?- - -[- ]*\n\n/).map(b => b.trim()).filter(b => b);
+                  const blocksHtml = blocks.map(block => {
+                    const lines = block.split('\n').filter(l => l.trim());
+                    if (lines.length === 0) return '';
+                    const [title, ...rest] = lines;
+                    const rowsHtml = rest.map(l => `<div class="row">${escape(l)}</div>`).join('');
+                    return `<div class="task-box"><div class="task-title">${escape(title)}</div>${rowsHtml}</div>`;
+                  }).join('');
                   printWindow.document.write(`
                     <html dir="rtl">
                       <head>
                         <title>طباعة التقرير</title>
                         <style>
-                          body { font-family: sans-serif; padding: 20px; white-space: pre-wrap; line-height: 1.5; }
+                          body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 24px; background:#f5f5f5; }
+                          .task-box { background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px 16px; margin-bottom:14px; page-break-inside:avoid; }
+                          .task-title { font-weight:bold; font-size:15px; border-bottom:1px solid #eee; padding-bottom:6px; margin-bottom:8px; }
+                          .row { font-size:13px; line-height:1.8; color:#333; }
                         </style>
                       </head>
-                      <body>${exportText}</body>
+                      <body>${blocksHtml}</body>
                     </html>
                   `);
                   printWindow.document.close();

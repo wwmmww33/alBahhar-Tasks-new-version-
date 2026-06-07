@@ -54,7 +54,9 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
   // جلب عدد إشعارات التعليقات غير المقروءة
   const fetchCommentUnreadCount = useCallback(async () => {
     try {
-      const response = await fetch(`/api/comment-notifications/user/${userId}/unread-count`);
+      const response = await fetch(`/api/comment-notifications/user/${userId}/unread-count`, {
+        headers: { 'user-id': userId }
+      });
       if (!response.ok) return;
       try {
         const data = await response.json();
@@ -90,7 +92,9 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
   // جلب إشعارات التعليقات (غير المقروءة فقط)
   const fetchCommentNotifications = async () => {
     try {
-      const response = await fetch(`/api/comment-notifications/user/${userId}?unreadOnly=true`);
+      const response = await fetch(`/api/comment-notifications/user/${userId}?unreadOnly=true`, {
+        headers: { 'user-id': userId }
+      });
       if (!response.ok) return;
       try {
         const data = await response.json();
@@ -153,7 +157,8 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
   const markCommentAsRead = async (notificationId: number) => {
     try {
       const response = await fetch(`/api/comment-notifications/${notificationId}/read`, {
-        method: 'PUT'
+        method: 'PUT',
+        headers: { 'user-id': userId }
       });
       if (!response.ok) return;
       try {
@@ -209,7 +214,8 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
   const markAllCommentsAsRead = async () => {
     try {
       const response = await fetch(`/api/comment-notifications/user/${userId}/mark-all-read`, {
-        method: 'PUT'
+        method: 'PUT',
+        headers: { 'user-id': userId }
       });
       if (!response.ok) return;
       try {

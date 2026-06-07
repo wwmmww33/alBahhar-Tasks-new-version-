@@ -35,7 +35,9 @@ const CommentNotifications: React.FC<CommentNotificationsProps> = ({
   // جلب عدد الإشعارات غير المقروءة
   const fetchUnreadCount = async () => {
     try {
-      const response = await fetch(`/api/comment-notifications/user/${userId}/unread-count`);
+      const response = await fetch(`/api/comment-notifications/user/${userId}/unread-count`, {
+        headers: { 'user-id': userId }
+      });
       if (!response.ok) return;
       try {
         const data = await response.json();
@@ -54,7 +56,9 @@ const CommentNotifications: React.FC<CommentNotificationsProps> = ({
   const fetchNotifications = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`/api/comment-notifications/user/${userId}`);
+      const response = await fetch(`/api/comment-notifications/user/${userId}`, {
+        headers: { 'user-id': userId }
+      });
       if (!response.ok) return;
       try {
         const data = await response.json();
@@ -75,7 +79,8 @@ const CommentNotifications: React.FC<CommentNotificationsProps> = ({
   const markAsRead = async (notificationId: number) => {
     try {
       const response = await fetch(`/api/comment-notifications/${notificationId}/read`, {
-        method: 'PUT'
+        method: 'PUT',
+        headers: { 'user-id': userId }
       });
       if (!response.ok) return;
       try {
@@ -110,7 +115,8 @@ const CommentNotifications: React.FC<CommentNotificationsProps> = ({
   const markAllAsRead = async () => {
     try {
       const response = await fetch(`/api/comment-notifications/user/${userId}/mark-all-read`, {
-        method: 'PUT'
+        method: 'PUT',
+        headers: { 'user-id': userId }
       });
       if (!response.ok) return;
       try {

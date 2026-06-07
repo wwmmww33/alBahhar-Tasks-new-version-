@@ -38,23 +38,21 @@ app.use((err, req, res, next) => {
 let inlinedDist = null; // خريطة { 'path': [Buffer, mimeType] }
 let distDir     = null; // للوضع الاعتيادي فقط
 
-if (process.pkg) {
-  try {
-    const raw = require('./inlinedDist.generated');
-    // حوّل base64 strings إلى Buffers مرة واحدة عند التشغيل
-    inlinedDist = {};
-    for (const [k, [b64, mime]] of Object.entries(raw)) {
-      inlinedDist[k] = [Buffer.from(b64, 'base64'), mime];
-    }
-    console.log('📦 Frontend: embedded in exe (' + Object.keys(inlinedDist).length + ' files)');
-  } catch (e) {
-    console.warn('⚠️  Embedded dist not found, falling back to external dist/', e.message);
+// حاول تحميل الواجهة المضمّنة دائماً — تعمل في وضع SEA وpkg والتطوير
+try {
+  const raw = require('./inlinedDist.generated');
+  inlinedDist = {};
+  for (const [k, [b64, mime]] of Object.entries(raw)) {
+    inlinedDist[k] = [Buffer.from(b64, 'base64'), mime];
   }
+  console.log('📦 Frontend: embedded (' + Object.keys(inlinedDist).length + ' files)');
+} catch {
+  // لم يُعثر على الملفات المضمّنة — ستُستخدم الملفات من القرص
 }
 
 if (!inlinedDist) {
-  // وضع التطوير أو الـ exe بدون ملفات مضمّنة — ابحث على الملفات
-  const exeDir = process.pkg ? path.dirname(process.execPath) : null;
+  // وضع التطوير بدون ملفات مضمّنة — ابحث على الملفات
+  const exeDir = (!!process.pkg || (typeof process.isSea === 'function' && process.isSea())) ? path.dirname(process.execPath) : null;
   const candidates = [
     process.env.STATIC_DIR && path.resolve(process.env.STATIC_DIR),
     exeDir && path.join(exeDir, 'dist'),

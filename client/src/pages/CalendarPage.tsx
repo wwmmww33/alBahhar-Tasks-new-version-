@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Calendar as CalendarIcon, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { CurrentUser } from '../types';
+import { resolveCurrentActorId } from '../utils/actorIdentity';
 
 type CalendarItem = {
   SubtaskID: number;
@@ -10,6 +11,7 @@ type CalendarItem = {
   DueDate: string;
   EndDate?: string | null;
   AssignedToName?: string;
+  AssignedToID?: string | null;
 };
 
 type SpanPos = 'single' | 'start' | 'middle' | 'end';
@@ -31,7 +33,7 @@ type CalendarCommentItem = {
 };
 
 type ViewMode = 'month' | 'week' | 'day';
-type ViewFilter = 'both' | 'shared' | 'personal';
+type ViewFilter = 'both' | 'shared' | 'vacancy' | 'personal';
 type ViewLayout = 'list' | 'grid';
 
 type CalendarPageProps = {
@@ -39,6 +41,7 @@ type CalendarPageProps = {
 };
 
 const CalendarPage = ({ currentUser }: CalendarPageProps) => {
+  const actorId = resolveCurrentActorId(currentUser) || currentUser.UserID;
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [personalEvents, setPersonalEvents] = useState<PersonalEventItem[]>([]);
   const [commentEvents, setCommentEvents] = useState<CalendarCommentItem[]>([]);
@@ -214,9 +217,15 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     return daysArr;
   }, [viewMode, currentDate]);
 
+  const displayItems = useMemo(() => {
+    if (viewFilter === 'personal') return [];
+    if (viewFilter === 'vacancy') return items.filter(it => String(it.AssignedToID) === String(actorId));
+    return items;
+  }, [items, viewFilter, actorId]);
+
   const itemsByDay = useMemo(() => {
     const map: Record<string, CalendarItemWithSpan[]> = {};
-    for (const it of items) {
+    for (const it of displayItems) {
       const due = new Date(it.DueDate);
       const dueNorm = new Date(due.getFullYear(), due.getMonth(), due.getDate());
       const endRaw = it.EndDate ? new Date(it.EndDate) : null;
@@ -242,7 +251,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
       }
     }
     return map;
-  }, [items]);
+  }, [displayItems]);
 
   const personalByDay = useMemo(() => {
     const map: Record<string, PersonalEventItem[]> = {};
@@ -536,7 +545,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
         <div className="text-lg font-semibold text-right">{rangeLabel}</div>
       </div>
 
-      <div className="flex items-center gap-2 justify-end">
+      <div className="flex items-center gap-2 justify-end flex-wrap">
         <span className="text-xs text-content-secondary">عرض الأحداث:</span>
         <button
           type="button"
@@ -546,9 +555,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
               ? 'bg-primary text-white border-primary'
               : 'bg-white dark:bg-gray-700 text-content border-content/20'
           }`}
-        >
-          مشترك + خاص
-        </button>
+        >الكل</button>
         <button
           type="button"
           onClick={() => setViewFilter('shared')}
@@ -557,20 +564,25 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
               ? 'bg-primary text-white border-primary'
               : 'bg-white dark:bg-gray-700 text-content border-content/20'
           }`}
-        >
-          مشترك فقط
-        </button>
+        >القسم</button>
+        <button
+          type="button"
+          onClick={() => setViewFilter('vacancy')}
+          className={`px-2 py-1 text-xs rounded border ${
+            viewFilter === 'vacancy'
+              ? 'bg-primary text-white border-primary'
+              : 'bg-white dark:bg-gray-700 text-content border-content/20'
+          }`}
+        >المنصب</button>
         <button
           type="button"
           onClick={() => setViewFilter('personal')}
           className={`px-2 py-1 text-xs rounded border ${
             viewFilter === 'personal'
-              ? 'bg-primary text-white border-primary'
-              : 'bg-white dark:bg-gray-700 text-content border-content/20'
+              ? 'bg-emerald-600 text-white border-emerald-600'
+              : 'bg-white dark:bg-gray-700 text-emerald-700 dark:text-emerald-300 border-emerald-400'
           }`}
-        >
-          خاص فقط
-        </button>
+        >الخاص</button>
       </div>
 
       {loading ? (
@@ -628,10 +640,10 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                   for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, Math.min(i + 7, cells.length)));
 
                   // الأحداث الممتدة (بتاريخ انتهاء) - للأشرطة
-                  const spanItems = viewFilter !== 'personal' ? items.filter(it => !!it.EndDate) : [];
+                  const spanItems = displayItems.filter(it => !!it.EndDate);
                   // الأحداث ليوم واحد - للخلايا
                   const singleDayMap: Record<string, CalendarItem[]> = {};
-                  for (const it of items.filter(it => !it.EndDate)) {
+                  for (const it of displayItems.filter(it => !it.EndDate)) {
                     const key = toLocalYMD(new Date(it.DueDate));
                     if (!singleDayMap[key]) singleDayMap[key] = [];
                     singleDayMap[key].push(it);
@@ -688,7 +700,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                               return (
                               <div
                                 key={bar.item.SubtaskID}
-                                title={`${bar.item.SubtaskTitle} — ضمن: ${bar.item.TaskTitle}`}
+                                title={`${bar.item.SubtaskTitle}${bar.item.AssignedToName ? ` (${bar.item.AssignedToName})` : ''} — ضمن: ${bar.item.TaskTitle}`}
                                 style={{
                                   position: 'absolute',
                                   top:   `${bar.lane * 22 + 2}px`,
@@ -716,9 +728,9 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             }
                             const key = toLocalYMD(cell.date);
                             const isToday = key === todayKey;
-                            const sharedForDay   = viewFilter !== 'personal' ? (singleDayMap[key] || []) : [];
-                            const personalForDay = viewFilter !== 'shared'   ? (personalByDay[key] || []) : [];
-                            const commentsForDay = viewFilter !== 'shared'   ? (commentsByDay[key] || []) : [];
+                            const sharedForDay   = singleDayMap[key] || [];
+                            const personalForDay = (viewFilter === 'both' || viewFilter === 'personal') ? (personalByDay[key] || []) : [];
+                            const commentsForDay = viewFilter !== 'personal' ? (commentsByDay[key] || []) : [];
                             const hasBarOnDay    = bars.some(b => b.startCol <= colIdx && b.endCol >= colIdx);
                             const spanStartBars  = bars.filter(b => b.startCol === colIdx && b.isFirst);
                             const hasEvents = sharedForDay.length > 0 || personalForDay.length > 0 || commentsForDay.length > 0 || hasBarOnDay;
@@ -750,7 +762,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                                       onClick={() => openTaskInNewTab(bar.item.TaskID)}
                                       style={{ color: getSpanColor(bar.item.SubtaskID) }}
                                       className="text-[10px] text-right font-semibold hover:underline w-full truncate block"
-                                      title={`${bar.item.SubtaskTitle} — ضمن: ${bar.item.TaskTitle}`}
+                                      title={`${bar.item.SubtaskTitle}${bar.item.AssignedToName ? ` (${bar.item.AssignedToName})` : ''} — ضمن: ${bar.item.TaskTitle}`}
                                     >
                                       {bar.item.SubtaskTitle}{bar.item.AssignedToName ? ` (${bar.item.AssignedToName})` : ''}
                                     </button>
@@ -792,9 +804,9 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                 const sharedForDay = itemsByDay[d.key] || [];
                 const personalForDay = personalByDay[d.key] || [];
                 const commentsForDay = commentsByDay[d.key] || [];
-                const visibleShared = viewFilter !== 'personal' ? sharedForDay : [];
-                const visiblePersonal = viewFilter !== 'shared' ? personalForDay : [];
-                const visibleComments = viewFilter !== 'shared' ? commentsForDay : [];
+                const visibleShared = sharedForDay;
+                const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? personalForDay : [];
+                const visibleComments = viewFilter !== 'personal' ? commentsForDay : [];
                 // hasEvents = true فقط للأيام التى تحتوى على محتوى حقيقي
                 // (أيام الامتداد middle/end لا تُلوَّن — يكفيها الخط)
                 const hasEvents =

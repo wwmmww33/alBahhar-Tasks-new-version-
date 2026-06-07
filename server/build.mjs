@@ -2,6 +2,9 @@ import { build } from 'esbuild';
 import { cpSync, rmSync, existsSync, mkdirSync, copyFileSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join, dirname, extname, relative } from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -81,4 +84,52 @@ if (existsSync(envSrc)) {
   console.log('✅ .env copied to release/.env');
 }
 
-console.log('\n📦 Ready — dist is inlined in bundle.js. Exe will be fully standalone.');
+console.log('\n📦 Bundle ready — starting SEA packaging...\n');
+
+// ── 5. Create EXE via Node.js SEA ────────────────────────────────────────────
+const seaConfigPath = join(__dirname, 'sea-config.json');
+const seaBlobPath   = join(__dirname, 'sea-prep.blob');
+const exePath       = join(releaseDir, 'bahar.exe');
+
+// Write SEA config
+writeFileSync(seaConfigPath, JSON.stringify({
+  main: 'bundle.js',
+  output: 'sea-prep.blob',
+  disableExperimentalSEAWarning: true,
+}, null, 2));
+
+// Generate blob
+execSync('node --experimental-sea-config sea-config.json', { cwd: __dirname, stdio: 'inherit' });
+console.log('✅ SEA blob generated');
+
+// Inject blob into a copy of node.exe using resedit (pure JS, no WASM/signtool needed)
+const { NtExecutable, NtExecutableResource } = require('resedit');
+const exeData = readFileSync(process.execPath);
+const exe = NtExecutable.from(exeData, { ignoreCert: true });
+const res = NtExecutableResource.from(exe);
+
+const blob = readFileSync(seaBlobPath);
+const blobBuf = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+res.entries.push({ type: 10, id: 'NODE_SEA_BLOB', lang: 1033, bin: blobBuf });
+res.outputResource(exe);
+
+const outData = exe.generate({ ignoreCert: true });
+const exeBuf = Buffer.from(outData);
+
+// Flip the sentinel fuse: Node.js reads this byte at startup to decide
+// whether to enter SEA mode. postject normally does this; we must do it
+// manually since we replaced postject with resedit.
+const FUSE_OFF = Buffer.from('NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2:0');
+const fuseIdx = exeBuf.indexOf(FUSE_OFF);
+if (fuseIdx === -1) throw new Error('❌ SEA sentinel fuse not found — is process.execPath really a Node.js binary?');
+exeBuf[fuseIdx + FUSE_OFF.length - 1] = 0x31; // '0' → '1'  (enable SEA)
+console.log(`✅ SEA sentinel fuse flipped at 0x${fuseIdx.toString(16)}`);
+
+writeFileSync(exePath, exeBuf);
+console.log('✅ SEA blob injected into bahar.exe');
+
+// Cleanup temp files
+try { rmSync(seaConfigPath); } catch {}
+try { rmSync(seaBlobPath);   } catch {}
+
+console.log('\n📦 Done — release/bahar.exe is ready (Node.js SEA).');

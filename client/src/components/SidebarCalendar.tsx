@@ -13,8 +13,10 @@ type CalendarItem = {
   DueDate: string;
   EndDate?: string | null;
   AssignedToName?: string;
+  AssignedToID?: string | null;
 };
 
+type PersonalEventItem = { EventID: number; Title: string; EventDate: string };
 type SpanPos = 'single' | 'start' | 'middle' | 'end';
 type CalendarItemWithSpan = CalendarItem & { _spanPos: SpanPos };
 
@@ -42,7 +44,6 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   const personalUserId = currentUser.UserID;
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [extraItems, setExtraItems] = useState<CalendarItem[]>([]);
-  type PersonalEventItem = { EventID: number; Title: string; EventDate: string };
   const [personalEvents, setPersonalEvents] = useState<PersonalEventItem[]>([]);
   const [extraPersonalEvents, setExtraPersonalEvents] = useState<PersonalEventItem[]>([]);
   const [commentEvents, setCommentEvents] = useState<CalendarCommentItem[]>([]);
@@ -50,7 +51,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   const [loading, setLoading] = useState(true);
   const [newEventTitle, setNewEventTitle] = useState('');
   // وضع الفلترة للتقويم: مشترك، خاص، أو كلاهما
-  const [viewFilter, setViewFilter] = useState<'both' | 'shared' | 'personal'>('both');
+  const [viewFilter, setViewFilter] = useState<'both' | 'shared' | 'vacancy' | 'personal'>('both');
   const getTodayStr = () => {
     const d = new Date();
     const y = d.getFullYear();
@@ -336,23 +337,27 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
         </button>
         <p className="text-xs text-content-secondary mt-1">يعرض الأحداث خلال 30 يوماً القادمة.</p>
         {/* عناصر التحكم بالفلترة */}
-        <div className="flex items-center gap-1 mt-2">
-          <span className="text-xs text-content-secondary">عرض:</span>
+        <div className="flex items-center gap-1 mt-2 flex-wrap">
           <button
             type="button"
             onClick={() => setViewFilter('both')}
             className={`px-2 py-1 text-xs rounded border ${viewFilter === 'both' ? 'bg-primary text-white border-primary' : 'bg-white dark:bg-gray-700 text-content border-content/20'}`}
-          >مشترك + خاص</button>
+          >الكل</button>
           <button
             type="button"
             onClick={() => setViewFilter('shared')}
             className={`px-2 py-1 text-xs rounded border ${viewFilter === 'shared' ? 'bg-primary text-white border-primary' : 'bg-white dark:bg-gray-700 text-content border-content/20'}`}
-          >مشترك فقط</button>
+          >القسم</button>
+          <button
+            type="button"
+            onClick={() => setViewFilter('vacancy')}
+            className={`px-2 py-1 text-xs rounded border ${viewFilter === 'vacancy' ? 'bg-primary text-white border-primary' : 'bg-white dark:bg-gray-700 text-content border-content/20'}`}
+          >المنصب</button>
           <button
             type="button"
             onClick={() => setViewFilter('personal')}
-            className={`px-2 py-1 text-xs rounded border ${viewFilter === 'personal' ? 'bg-primary text-white border-primary' : 'bg-white dark:bg-gray-700 text-content border-content/20'}`}
-          >خاص فقط</button>
+            className={`px-2 py-1 text-xs rounded border ${viewFilter === 'personal' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white dark:bg-gray-700 text-emerald-700 dark:text-emerald-300 border-emerald-400'}`}
+          >الخاص</button>
         </div>
       </div>
       {/* نموذج إضافة حدث خاص */}
@@ -436,9 +441,11 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                 return key === d.key;
               });
               const dayComments = commentsByDay[d.key] || [];
-              const visibleShared = viewFilter !== 'personal' ? dayItems : [];
-              const visiblePersonal = viewFilter !== 'shared' ? dayPersonal : [];
-              const visibleComments = viewFilter !== 'shared' ? dayComments : [];
+              const visibleShared = viewFilter === 'personal' ? []
+                : viewFilter === 'vacancy' ? dayItems.filter(it => String(it.AssignedToID) === String(actorId))
+                : dayItems;
+              const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? dayPersonal : [];
+              const visibleComments = viewFilter !== 'personal' ? dayComments : [];
               // hasEvents = true فقط عندما يوجد محتوى حقيقي يُعرض في المربع
               // (أيام الامتداد الوسطى والنهائية لا تُلوَّن — يكفيها الخط الجانبي)
               const hasEvents =
@@ -610,58 +617,79 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
           </div>
 
           {((viewFilter !== 'personal' && extraItems.length > 0) ||
-            (viewFilter !== 'shared' && (extraPersonalEvents.length > 0 || extraCommentEvents.length > 0))) && (
-            <div>
-              <h3 className="text-sm font-bold text-content mb-2">أحداث بعد 30 يوم</h3>
-              <ul className="space-y-2">
-                {viewFilter !== 'personal' && extraItems.map((item) => (
-                  <li key={item.SubtaskID} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
-                    <div className="text-xs text-content-secondary mb-1">
-                      {new Date(item.DueDate).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' })}
-                    </div>
-                    <div className="text-xs">
-                      <button
-                        type="button"
-                        className="font-semibold text-blue-800 dark:text-blue-200 hover:underline cursor-pointer text-right"
-                        onClick={() => openTaskInNewTab(item.TaskID)}
-                      >
-                        {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
-                      </button>
-                      <div className="text-blue-600 dark:text-blue-300">ضمن: {item.TaskTitle}</div>
-                    </div>
-                  </li>
-                ))}
-                {viewFilter !== 'shared' && extraPersonalEvents.map((pe) => (
-                  <li key={pe.EventID} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
-                    <div className="text-xs text-content-secondary mb-1">
-                      {new Date(pe.EventDate).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' })}
-                    </div>
-                    <div className="text-xs">
-                      <span className="font-semibold text-green-800 dark:text-green-200 text-right">{pe.Title}</span>
-                      <span className="ml-1 inline-block text-[10px] text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 px-1 py-[1px] rounded">(خاص)</span>
-                    </div>
-                  </li>
-                ))}
-                {viewFilter !== 'shared' && extraCommentEvents.map((comment) => (
-                  <li key={comment.CommentID} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
-                    <div className="text-xs text-content-secondary mb-1">
-                      {new Date(comment.CreatedAt).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' })}
-                    </div>
-                    <div className="text-xs">
-                      <button
-                        type="button"
-                        onClick={() => openTaskInNewTab(comment.TaskID)}
-                        className="font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
-                      >
-                        {comment.Content}
-                        <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+            ((viewFilter === 'both' || viewFilter === 'personal') && (extraPersonalEvents.length > 0)) ||
+            (viewFilter !== 'personal' && extraCommentEvents.length > 0)) && (() => {
+            type ExtraEntry =
+              | { kind: 'subtask';  date: string; item: CalendarItem }
+              | { kind: 'personal'; date: string; pe: PersonalEventItem }
+              | { kind: 'comment';  date: string; comment: CalendarCommentItem };
+
+            const filteredExtraItems = viewFilter === 'personal' ? []
+              : viewFilter === 'vacancy' ? extraItems.filter(it => String(it.AssignedToID) === String(actorId))
+              : extraItems;
+            const merged: ExtraEntry[] = [
+              ...filteredExtraItems.map(item => ({ kind: 'subtask'  as const, date: item.DueDate,       item })),
+              ...((viewFilter === 'both' || viewFilter === 'personal') ? extraPersonalEvents.map(pe => ({ kind: 'personal' as const, date: pe.EventDate,   pe })) : []),
+              ...(viewFilter !== 'personal' ? extraCommentEvents.map(comment => ({ kind: 'comment' as const, date: comment.CreatedAt, comment })) : []),
+            ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+            return (
+              <div>
+                <h3 className="text-sm font-bold text-content mb-2">أحداث بعد 30 يوم</h3>
+                <ul className="space-y-2">
+                  {merged.map((entry) => {
+                    const dateLabel = new Date(entry.date).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' });
+                    if (entry.kind === 'subtask') {
+                      const item = entry.item;
+                      return (
+                        <li key={`s-${item.SubtaskID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
+                          <div className="text-xs text-content-secondary mb-1">{dateLabel}</div>
+                          <div className="text-xs">
+                            <button
+                              type="button"
+                              className="font-semibold text-blue-800 dark:text-blue-200 hover:underline cursor-pointer text-right"
+                              onClick={() => openTaskInNewTab(item.TaskID)}
+                            >
+                              {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                            </button>
+                            <div className="text-blue-600 dark:text-blue-300">ضمن: {item.TaskTitle}</div>
+                          </div>
+                        </li>
+                      );
+                    } else if (entry.kind === 'personal') {
+                      const pe = entry.pe;
+                      return (
+                        <li key={`p-${pe.EventID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
+                          <div className="text-xs text-content-secondary mb-1">{dateLabel}</div>
+                          <div className="text-xs">
+                            <span className="font-semibold text-green-800 dark:text-green-200 text-right">{pe.Title}</span>
+                            <span className="ml-1 inline-block text-[10px] text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 px-1 py-[1px] rounded">(خاص)</span>
+                          </div>
+                        </li>
+                      );
+                    } else {
+                      const comment = entry.comment;
+                      return (
+                        <li key={`c-${comment.CommentID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
+                          <div className="text-xs text-content-secondary mb-1">{dateLabel}</div>
+                          <div className="text-xs">
+                            <button
+                              type="button"
+                              onClick={() => openTaskInNewTab(comment.TaskID)}
+                              className="font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
+                            >
+                              {comment.Content}
+                              <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    }
+                  })}
+                </ul>
+              </div>
+            );
+          })()}
 
         </div>
       )}

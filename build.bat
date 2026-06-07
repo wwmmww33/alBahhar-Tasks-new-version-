@@ -1,7 +1,7 @@
 @echo off
 echo.
 echo ==========================================
-echo   Bahar - Build EXE
+echo   Bahar - Build EXE (Node.js SEA)
 echo ==========================================
 echo.
 
@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 :: ===== Step 1: Build Frontend =====
-echo [1/3] Building frontend (React)...
+echo [1/2] Building frontend (React)...
 cd /d "%~dp0client"
 if not exist node_modules (
     echo     Installing packages...
@@ -26,24 +26,16 @@ if errorlevel 1 ( echo [ERROR] Frontend build failed & pause & exit /b 1 )
 echo     Frontend built successfully.
 echo.
 
-:: ===== Step 2: Bundle Server =====
-echo [2/3] Bundling server (Node.js)...
+:: ===== Step 2: Bundle Server + Create EXE =====
+echo [2/2] Bundling server and creating bahar.exe (Node.js SEA)...
 cd /d "%~dp0server"
 if not exist node_modules (
     echo     Installing packages...
     call npm install
     if errorlevel 1 ( echo [ERROR] npm install failed in server & pause & exit /b 1 )
 )
-call node build.mjs
-if errorlevel 1 ( echo [ERROR] Server bundle failed & pause & exit /b 1 )
-echo     Server bundled successfully.
-echo.
-
-:: ===== Step 3: Create EXE =====
-echo [3/3] Creating bahar.exe...
-call npx @yao-pkg/pkg bundle.js --targets node18-win-x64 --output release/bahar.exe
-if errorlevel 1 ( echo [ERROR] EXE creation failed & pause & exit /b 1 )
-echo     bahar.exe created successfully.
+call node --max-old-space-size=4096 build.mjs
+if errorlevel 1 ( echo [ERROR] Build or EXE creation failed & pause & exit /b 1 )
 echo.
 
 echo ==========================================
