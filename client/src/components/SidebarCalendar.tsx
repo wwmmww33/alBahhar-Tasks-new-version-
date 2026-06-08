@@ -469,82 +469,64 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
 
               return (
                 <div key={d.key}>
-                  {/* شريط الامتداد + [الأحداث المتجاوزة + مربع اليوم] في صف واحد */}
-                  <div className="flex items-stretch" dir="ltr">
-                    {/* شريط خطوط الامتداد — يمتد عبر صفوف الأحداث المتجاوزة والمربع معاً */}
+                  {/* كل حدث متجاوز في مربع مستقل: خط ملون على اليسار + نص كامل حر */}
+                  {carryOverItems.map((item) => {
+                    const color = getSpanColor(item.SubtaskID);
+                    const startLabel = new Date(item.DueDate).toLocaleDateString('ar-EG', {
+                      day: 'numeric', month: 'short', year: 'numeric',
+                    });
+                    return (
+                      <div
+                        key={item.SubtaskID}
+                        dir="rtl"
+                        className="py-0.5 mb-0.5 text-xs min-w-0"
+                        style={{ borderLeft: `3px solid ${color}`, paddingLeft: '6px' }}
+                      >
+                        <button
+                          type="button"
+                          style={{ color }}
+                          className="font-semibold hover:underline break-words text-right w-full block min-w-0"
+                          onClick={() => openTaskInNewTab(item.TaskID)}
+                        >
+                          {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                        </button>
+                        <div className="text-[10px] text-content-secondary text-right">
+                          (بدأ: {startLabel})
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* مربع اليوم مع شريط الامتداد الزمني */}
+                  <div
+                    className="flex items-stretch"
+                    dir="ltr"
+                    style={{ marginTop: carryOverItems.length > 0 ? '4px' : undefined }}
+                  >
                     {stripWidth > 0 && (
                       <div className="relative flex-shrink-0" style={{ width: `${stripWidth}px` }}>
-                        {uniqueSpanItems.map((item) => {
-                          const pos = item._spanPos;
-                          const color = getSpanColor(item.SubtaskID);
-                          const lane = laneMap.get(item.SubtaskID) ?? 0;
-                          const isCarryOver = carryOverItems.some(c => c.SubtaskID === item.SubtaskID);
-                          const carryOverIndex = carryOverItems.findIndex(c => c.SubtaskID === item.SubtaskID);
-                          const ROW_HEIGHT = 20;
-
-                          let top: string;
-                          let bottom: string;
-
-                          if (isCarryOver) {
-                            // الخط ينطلق من منتصف سطر هذا الحدث في منطقة الأحداث المتجاوزة
-                            top = `${carryOverIndex * ROW_HEIGHT + ROW_HEIGHT / 2}px`;
-                            bottom = '-4px';
-                          } else if (pos === 'start') {
-                            // الخط ينطلق من أعلى مربع اليوم (بعد صفوف الأحداث المتجاوزة)
-                            top = `${carryOverItems.length * ROW_HEIGHT}px`;
-                            bottom = '-4px';
-                          } else if (pos === 'end') {
-                            top = '-4px';
-                            bottom = '0';
-                          } else {
-                            top = '-4px';
-                            bottom = '-4px';
-                          }
-
+                        {uniqueSpanItems.map((si) => {
+                          const siLane = laneMap.get(si.SubtaskID) ?? 0;
+                          const siColor = getSpanColor(si.SubtaskID);
+                          const isCarryOverItem = carryOverItems.some(c => c.SubtaskID === si.SubtaskID);
+                          const pos = si._spanPos;
+                          // أحداث متجاوزة وأحداث بادئة اليوم: الخط ينطلق من أعلى المربع
+                          // أحداث وسطى: الخط يمتد من أعلى (-4px) للتواصل مع اليوم السابق
+                          const top = (isCarryOverItem || pos === 'start') ? '0' : '-4px';
+                          const bottom = pos === 'end' ? '0' : '-4px';
                           return (
-                            <div
-                              key={item.SubtaskID}
-                              className="absolute rounded-full"
-                              style={{
-                                left: `${lane * 7 + 2}px`,
-                                width: '3px',
-                                backgroundColor: color,
-                                top,
-                                bottom,
-                                zIndex: 1,
-                              }}
-                            />
+                            <div key={si.SubtaskID} className="absolute rounded-full" style={{
+                              left: `${siLane * 7 + 2}px`,
+                              width: '3px',
+                              top,
+                              bottom,
+                              backgroundColor: siColor,
+                            }} />
                           );
                         })}
                       </div>
                     )}
-
-                    {/* العمود الأيمن: الأحداث المتجاوزة (يسار) + مربع اليوم */}
                     <div className="flex-1 min-w-0">
-                      {/* أحداث بدأت قبل النطاق — محاذاة يسار، ارتفاع ثابت 20px لكل سطر */}
-                      {carryOverItems.map((item) => {
-                        const color = getSpanColor(item.SubtaskID);
-                        const startLabel = new Date(item.DueDate).toLocaleDateString('ar-EG', {
-                          day: 'numeric', month: 'short', year: 'numeric',
-                        });
-                        return (
-                          <div key={item.SubtaskID} className="flex items-center h-5 gap-1 text-xs overflow-hidden pl-1">
-                            <button
-                              type="button"
-                              style={{ color }}
-                              className="font-semibold hover:underline break-words text-left"
-                              onClick={() => openTaskInNewTab(item.TaskID)}
-                            >
-                              {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
-                            </button>
-                            <span className="text-[10px] text-content-secondary shrink-0 whitespace-nowrap">
-                              (بدأ: {startLabel})
-                            </span>
-                          </div>
-                        );
-                      })}
-
-                      {/* مربع محتوى اليوم */}
                       <div
                         dir="rtl"
                         className={

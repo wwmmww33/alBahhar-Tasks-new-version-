@@ -251,7 +251,10 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     }
   };
 
-  useEffect(() => { 
+  // التمرير للأعلى عند فتح صفحة التفاصيل من أي موضع
+  useEffect(() => { window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior }); }, []);
+
+  useEffect(() => {
     fetchAllDetails();
     updateTaskView();
   }, [fetchAllDetails]);

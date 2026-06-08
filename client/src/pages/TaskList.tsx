@@ -1,5 +1,5 @@
 // src/pages/TaskList.tsx
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import TaskCard from '../components/TaskCard';
 import SearchBar from '../components/SearchBar';
@@ -83,17 +83,31 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     window.addEventListener('tasks:layout-changed', onLayoutChange as any);
     return () => window.removeEventListener('tasks:layout-changed', onLayoutChange as any);
   }, []);
+
+  // حفظ موضع التمرير في sessionStorage عند كل تمرير
+  useEffect(() => {
+    const saveScroll = () => {
+      sessionStorage.setItem('taskList.scrollY', String(window.scrollY));
+      sessionStorage.setItem('taskList.scrollAt', String(Date.now()));
+    };
+    window.addEventListener('scroll', saveScroll, { passive: true });
+    return () => window.removeEventListener('scroll', saveScroll);
+  }, []);
   
   // 2. حالة جديدة للفلتر
   const [filterMode, setFilterMode] = useState<'all' | 'my-created'>('all');
   
-  // 3. حالة جديدة للبحث
-  const [searchTerm, setSearchTerm] = useState<string>('');
+  // 3. حالة جديدة للبحث — تُعاد من sessionStorage عند العودة
+  const [searchTerm, setSearchTerm] = useState<string>(
+    () => sessionStorage.getItem('taskList.search') || ''
+  );
   // 3.1 إضافة فلتر الأشخاص (اختياري)
   const [assigneeFilterUserId, setAssigneeFilterUserId] = useState<string | null>(null);
   
-  // 4. حالة جديدة للتبويبات
-  const [activeTab, setActiveTab] = useState<'active' | 'completed' | 'actioned' | 'updates'>('active');
+  // 4. حالة جديدة للتبويبات — تُعاد من sessionStorage عند العودة من صفحة تفاصيل المهمة
+  const [activeTab, setActiveTab] = useState<'active' | 'completed' | 'actioned' | 'updates'>(
+    () => (sessionStorage.getItem('taskList.tab') as 'active' | 'completed' | 'actioned' | 'updates') || 'active'
+  );
 
   const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
   const [isLoadingActivity, setIsLoadingActivity] = useState(false);
@@ -229,7 +243,9 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     }
   }, [actorId, isAdminFlag]);
 
+  // حفظ التبويب النشط في sessionStorage عند كل تغيير
   useEffect(() => {
+    sessionStorage.setItem('taskList.tab', activeTab);
     if (activeTab === 'updates') {
       // Reset and fetch first page — فقط عند تبديل التبويب فعلياً
       setActivityPage(0);
@@ -443,12 +459,46 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
   useEffect(() => {
     fetchTasksAndSubtasks();
-    
+
     // تسجيل دالة تحديث المهام في NotificationContext
     setRefreshTasks(fetchTasksAndSubtasks);
-    
+
     // تم تعطيل تحديث قائمة المهام عند عودة التركيز إلى النافذة
   }, [fetchTasksAndSubtasks]);
+
+  // حفظ searchTerm في sessionStorage عند كل تغيير
+  useEffect(() => {
+    sessionStorage.setItem('taskList.search', searchTerm);
+  }, [searchTerm]);
+
+  // استعادة الحالة (بحث + تمرير) بعد انتهاء التحميل — مرة واحدة فقط عند العودة
+  const _didRestore = useRef(false);
+  useEffect(() => {
+    if (isLoading || _didRestore.current) return;
+    _didRestore.current = true;
+
+    const savedAt = Number(sessionStorage.getItem('taskList.scrollAt') || 0);
+    const isRecent = savedAt > 0 && Date.now() - savedAt < 10 * 60 * 1000;
+    if (!isRecent) return;
+
+    // إعادة تشغيل البحث في المهام المكتملة إن كان التبويب مكتملة وهناك مصطلح بحث
+    const restoredSearch = sessionStorage.getItem('taskList.search') || '';
+    const restoredTab = sessionStorage.getItem('taskList.tab') || '';
+    if (restoredTab === 'completed' && restoredSearch.trim()) {
+      searchCompletedTasksInDb();
+    }
+
+    // استعادة موضع التمرير — ننتظر رسمتين لضمان تصيير جميع بطاقات المهام
+    const savedY = Number(sessionStorage.getItem('taskList.scrollY') || 0);
+    if (savedY > 0) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+        });
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading]);
 
   // حالة وتتبع تحميل المهام المكتملة على دفعات
   const [completedPage, setCompletedPage] = useState(1);
