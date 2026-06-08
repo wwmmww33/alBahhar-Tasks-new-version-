@@ -819,7 +819,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   });
 
   const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
-  const externalTasks  = filteredTasks.filter(task => task.Status === 'external');
 
   // المهام المتعلقة بي ولا يوجد فيها إجراء معلق (سواء أنشأتها أو أنهيت جميع مهامي الفرعية)
   // "أنجزت إجرائي فيها": مفتوحة + متعلقة بي + لا توجد مهام فرعية معلقة لي
@@ -1023,12 +1022,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                   className="w-full text-right px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                 >
                   ⚡ المهام النشطة
-                </button>
-                <button
-                  onClick={() => startExport(externalTasks, 'المهام الخارجية')}
-                  className="w-full text-right px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                >
-                  🏢 المهام الخارجية
                 </button>
                 <button
                   onClick={() => startExport(actionedTasks, 'المهام التي أنجزت إجرائي فيها')}

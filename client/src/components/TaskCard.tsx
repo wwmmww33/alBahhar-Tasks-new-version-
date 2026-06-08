@@ -1,8 +1,9 @@
 // src/components/TaskCard.tsx
 import { useNavigate } from 'react-router-dom';
-import { User, Calendar, Flag, AlertTriangle, CheckSquare, ExternalLink } from 'lucide-react';
+import { User, Calendar, Flag, AlertTriangle, CheckSquare, ExternalLink, FileDown } from 'lucide-react';
 // import { useNotification } from '../contexts/NotificationContext';
 import type { Subtask } from '../types';
+import { exportTaskToPdf } from '../utils/taskPdfExport';
 
 // تعريف Task محلي مع Status إضافي
 type TaskCardTask = {
@@ -21,7 +22,10 @@ type TaskCardTask = {
   DueDate: string | null;
   Status: string;
   Priority: string;
+  CategoryName?: string | null;
+  URL?: string | null;
   subtasks?: Subtask[];
+  comments?: { CommentID?: number; Content: string; UserName?: string | null; UserID?: string; CreatedAt: string }[];
   HasNewSubtasks?: boolean;
   HasAssignmentNotifications?: number;
   HasCommentNotifications?: number;
@@ -255,6 +259,30 @@ const TaskCard: React.FC<TaskCardProps> = ({
                 </button>
               </div>
             )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                exportTaskToPdf({
+                  TaskID: task.TaskID,
+                  Title: task.Title,
+                  Description: task.Description,
+                  Status: task.Status,
+                  Priority: task.Priority,
+                  CreatedByName: task.CreatedByName,
+                  CreatedBy: task.CreatedBy,
+                  AssignedToName: task.AssignedToName,
+                  DueDate: task.DueDate,
+                  CategoryName: task.CategoryName,
+                  URL: task.URL,
+                  subtasks: task.subtasks,
+                  comments: task.comments,
+                });
+              }}
+              className="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:text-red-400 dark:hover:bg-red-900/20 transition-colors"
+              title="تصدير كـ PDF"
+            >
+              <FileDown size={13} />
+            </button>
             <button
               onClick={(e) => {
                 e.stopPropagation();

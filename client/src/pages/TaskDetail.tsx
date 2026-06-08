@@ -5,10 +5,11 @@ import UnifiedTimeline from '../components/UnifiedTimeline';
 import RelatedTasksSection from '../components/RelatedTasksSection';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, User, Category, Task, Comment } from '../types';
-import { Trash2, ExternalLink, Copy, Check, ArrowRight } from 'lucide-react';
+import { Trash2, ExternalLink, Copy, Check, ArrowRight, FileDown } from 'lucide-react';
 import { getApiUrl } from '../config/api';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
+import { exportTaskToPdf } from '../utils/taskPdfExport';
 
 type TaskDetailProps = { currentUser: CurrentUser; };
 
@@ -383,6 +384,40 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
           رجوع
         </button>
         <div className="flex items-center gap-2 flex-wrap justify-end">
+          <button
+            onClick={() => exportTaskToPdf({
+              TaskID: task.TaskID,
+              Title: task.Title,
+              Description: task.Description,
+              Status: task.Status,
+              Priority: task.Priority,
+              CreatedByName: (task as any).CreatedByName,
+              CreatedBy: task.CreatedBy,
+              AssignedToName: task.AssignedToName,
+              DueDate: task.DueDate,
+              CategoryName: (task as any).CategoryName,
+              URL: (task as any).URL,
+              subtasks: subtasks.map(s => ({
+                SubtaskID: s.SubtaskID,
+                Title: s.Title,
+                IsCompleted: s.IsCompleted,
+                AssignedToName: s.AssignedToName,
+                EndDate: (s as any).EndDate,
+              })),
+              comments: comments.map(c => ({
+                CommentID: c.CommentID,
+                Content: c.Content,
+                UserName: c.UserName,
+                UserID: c.UserID,
+                CreatedAt: c.CreatedAt,
+              })),
+            })}
+            className="text-xs px-3 py-1.5 rounded-full border border-red-400 text-red-500 dark:text-red-400 dark:border-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-1 transition-colors"
+            title="تصدير كـ PDF"
+          >
+            <FileDown size={12} />
+            تصدير PDF
+          </button>
           <button
             onClick={() => handleUpdateTaskStatus('completed')}
             disabled={task.Status === 'completed'}
