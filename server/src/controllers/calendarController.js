@@ -462,7 +462,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
     res.status(200).json(decrypted);
   } catch (error) {
     console.error('Error fetching calendar subtasks:', error);
-    res.status(500).json({ message: 'Error fetching calendar subtasks' });
+    res.status(500).json({ message: 'Error fetching calendar subtasks', detail: error.message, stack: error.stack });
   }
 };
 

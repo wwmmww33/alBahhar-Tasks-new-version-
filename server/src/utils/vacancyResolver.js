@@ -171,6 +171,27 @@ async function resolveActorContext(pool, rawUserId) {
   try {
     const schema = await detectSchema(pool);
 
+    // إذا كان المدخل رقماً (VacancyID محتمل)، نحل UserID الحقيقي أولاً عبر Assignments
+    // هذا يتفادى مشكلة LEFT JOIN + IsCurrent حيث يكون a.VacancyID = NULL
+    let effectiveUid = uid;
+    if (isNumericInt(uid) && schema.hasAssignments && schema.hasJobVacancies) {
+      try {
+        const r = await pool.request()
+          .input('VacancyID', sql.Int, parseInt(uid, 10))
+          .query(`
+            SELECT TOP 1 a.UserID
+            FROM dbo.Assignments a
+            WHERE a.VacancyID = @VacancyID
+            ORDER BY
+              CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,
+              a.AssignmentID DESC
+          `);
+        if (r.recordset[0]?.UserID) {
+          effectiveUid = String(r.recordset[0].UserID).trim();
+        }
+      } catch (_) {}
+    }
+
     const whereParts = [`LTRIM(RTRIM(u.UserID)) = @UserID`];
     if (schema.hasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @UserID`);
     if (schema.hasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @UserID`);
@@ -207,9 +228,8 @@ async function resolveActorContext(pool, rawUserId) {
         AND u.IsActive = 1
     `;
 
-    const result = await pool.request()
-      .input('UserID', sql.NVarChar(50), uid)
-      .query(query);
+    const request = pool.request().input('UserID', sql.NVarChar(50), effectiveUid);
+    const result = await request.query(query);
 
     const row = result.recordset[0];
     if (!row) return null;

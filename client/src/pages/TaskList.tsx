@@ -641,6 +641,26 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     }
   };
 
+  // دالة لتغيير حالة المهمة (إغلاق كمكتملة، إلخ)
+  const updateTaskStatus = async (taskId: number, newStatus: string) => {
+    try {
+      const response = await fetch(`/api/tasks/${taskId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ Status: newStatus }),
+      });
+      if (response.ok) {
+        setTasks(prevTasks =>
+          prevTasks.map(task =>
+            task.TaskID === taskId ? { ...task, Status: newStatus as Task['Status'] } : task
+          )
+        );
+      }
+    } catch (error) {
+      console.error('Error updating task status:', error);
+    }
+  };
+
   // دالة لتحديث أولوية المهمة
   const updateTaskPriority = async (taskId: number, newPriority: 'normal' | 'urgent' | 'starred') => {
     try {
@@ -1485,6 +1505,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     key={task.TaskID} 
                     task={task} 
                     onPriorityChange={updateTaskPriority}
+                    onStatusChange={updateTaskStatus}
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
@@ -1499,6 +1520,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     key={task.TaskID} 
                     task={task} 
                     onPriorityChange={updateTaskPriority}
+                    onStatusChange={updateTaskStatus}
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
@@ -1541,6 +1563,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     key={task.TaskID} 
                     task={task} 
                     onPriorityChange={updateTaskPriority}
+                    onStatusChange={updateTaskStatus}
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
@@ -1555,6 +1578,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     key={task.TaskID} 
                     task={task} 
                     onPriorityChange={updateTaskPriority}
+                    onStatusChange={updateTaskStatus}
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
@@ -1631,6 +1655,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     key={task.TaskID} 
                     task={task} 
                     onPriorityChange={updateTaskPriority}
+                    onStatusChange={updateTaskStatus}
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}
@@ -1645,6 +1670,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     key={task.TaskID} 
                     task={task} 
                     onPriorityChange={updateTaskPriority}
+                    onStatusChange={updateTaskStatus}
                     isSelectionMode={isSelectionMode}
                     isSelected={selectedTasks.has(task.TaskID)}
                     onToggleSelection={toggleTaskSelection}

@@ -81,7 +81,8 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
       // تحديث إشعارات التعليقات كمقروءة
       try {
         await fetch(getApiUrl(`comment-notifications/task/${taskId}/user/${actingUserId}/mark-read`), {
-          method: 'PUT'
+          method: 'PUT',
+          headers: { 'user-id': String(actingUserId) }
         });
         // تحديث قائمة المهام لإخفاء الإشعارات
         refreshTasks();

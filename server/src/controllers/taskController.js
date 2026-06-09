@@ -2,7 +2,7 @@
 const sql = require('mssql');
 const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission, hasActiveDelegation } = require('../utils/delegationUtils');
 const encryptionConfig = require('../config/encryption.config');
-const { detectSchema, resolveVacancyId, ensureVacancyId } = require('../utils/vacancyResolver');
+const { detectSchema, resolveVacancyId, ensureVacancyId, resolveActorContext } = require('../utils/vacancyResolver');
 
 async function resolveEffectiveActorId(pool, rawUserId) {
     const loginId = String(rawUserId || '').trim();
@@ -2145,7 +2145,18 @@ exports.searchActiveTasks = async (req, res) => {
             const principal = await resolvePrincipalForCompletedSearch(pool, userId, ctx);
             const scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, userId);
 
-            if (principal == null && scopeDepartmentIds.length === 0) {
+            // Fallback: إذا لم يُعثر على أقسام المديرية، استخدم القسم المباشر للمستخدم
+            let fallbackDeptId = null;
+            if (scopeDepartmentIds.length === 0) {
+                try {
+                    const actorCtx = await resolveActorContext(pool, userId);
+                    if (actorCtx?.departmentId != null) {
+                        fallbackDeptId = actorCtx.departmentId;
+                    }
+                } catch (_) {}
+            }
+
+            if (principal == null && scopeDepartmentIds.length === 0 && fallbackDeptId == null) {
                 return res.json([]);
             }
 
@@ -2161,10 +2172,13 @@ exports.searchActiveTasks = async (req, res) => {
                     request.input(`DeptID${i}`, sql.Int, parseInt(dId, 10));
                 });
                 accessClauses.push(`t.DepartmentID IN (${scopeDepartmentIds.map((_, i) => `@DeptID${i}`).join(',')})`);
+            } else if (fallbackDeptId != null) {
+                request.input('FallbackDeptID', sql.Int, fallbackDeptId);
+                accessClauses.push(`t.DepartmentID = @FallbackDeptID`);
             }
 
             allTasksQuery = `
-                SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate
+                SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                 FROM dbo.Tasks t
                 WHERE (${accessClauses.join(' OR ')})
                 ORDER BY t.CreatedAt DESC

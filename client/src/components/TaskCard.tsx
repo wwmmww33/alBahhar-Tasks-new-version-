@@ -1,6 +1,6 @@
 // src/components/TaskCard.tsx
 import { useNavigate } from 'react-router-dom';
-import { User, Calendar, Flag, AlertTriangle, CheckSquare, ExternalLink, FileDown } from 'lucide-react';
+import { User, Calendar, Flag, AlertTriangle, CheckSquare, ExternalLink, FileDown, CheckCircle } from 'lucide-react';
 // import { useNotification } from '../contexts/NotificationContext';
 import type { Subtask } from '../types';
 import { exportTaskToPdf } from '../utils/taskPdfExport';
@@ -44,6 +44,7 @@ interface TaskCardProps {
   isSelected?: boolean;
   onToggleSelection?: (taskId: number) => void;
   onPriorityChange?: (taskId: number, newPriority: 'normal' | 'urgent' | 'starred') => Promise<void>;
+  onStatusChange?: (taskId: number, newStatus: string) => Promise<void>;
   isMySubtask?: (subtask: Subtask) => boolean;
 }
 
@@ -53,6 +54,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
   isSelected = false,
   onToggleSelection,
   onPriorityChange,
+  onStatusChange,
   isMySubtask
 }) => {
   const style = statusStyles[task.Status] || statusStyles.open;
@@ -293,6 +295,15 @@ const TaskCard: React.FC<TaskCardProps> = ({
             >
               <ExternalLink size={13} />
             </button>
+            {task.Status !== 'completed' && task.Status !== 'cancelled' && onStatusChange && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onStatusChange(task.TaskID, 'completed'); }}
+                className="p-1 rounded text-gray-400 hover:text-green-600 hover:bg-green-50 dark:hover:text-green-400 dark:hover:bg-green-900/20 transition-colors"
+                title="إغلاق كمكتملة"
+              >
+                <CheckCircle size={13} />
+              </button>
+            )}
             <span className={`px-3 py-1 text-xs font-semibold rounded-full ${style.bg} ${style.text}`}>
               {style.label}
             </span>
