@@ -3,9 +3,10 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import UnifiedTimeline from '../components/UnifiedTimeline';
 import RelatedTasksSection from '../components/RelatedTasksSection';
+import MergeTaskModal from '../components/MergeTaskModal';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, User, Category, Task, Comment } from '../types';
-import { Trash2, ExternalLink, Copy, Check, ArrowRight, FileDown } from 'lucide-react';
+import { Trash2, ExternalLink, Copy, Check, ArrowRight, FileDown, GitMerge } from 'lucide-react';
 import { getApiUrl } from '../config/api';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
@@ -40,6 +41,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   const [titleInput, setTitleInput] = useState<string>('');
   const [isUpdatingTitle, setIsUpdatingTitle] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
+  const [showMergeModal, setShowMergeModal] = useState(false);
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   // في وضع التفويض: actorId = معرّف المفوِّض؛ ActedBy يجب أن يحمل معرّف المفوَّض له
   const _tdAccount = getActiveAccount();
@@ -389,6 +391,14 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         </button>
         <div className="flex items-center gap-2 flex-wrap justify-end">
           <button
+            onClick={() => setShowMergeModal(true)}
+            className="text-xs px-3 py-1.5 rounded-full border border-purple-400 text-purple-600 dark:text-purple-400 dark:border-purple-500 hover:bg-purple-50 dark:hover:bg-purple-900/20 flex items-center gap-1 transition-colors"
+            title="دمج مهمة أخرى مع هذه المهمة"
+          >
+            <GitMerge size={12} />
+            دمج مهمة
+          </button>
+          <button
             onClick={() => exportTaskToPdf({
               TaskID: task.TaskID,
               Title: task.Title,
@@ -733,6 +743,18 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         onCommentsUpdate={fetchAllDetails}
       />
       
+      {/* Merge Task Modal */}
+      {showMergeModal && task && (
+        <MergeTaskModal
+          targetTaskId={task.TaskID}
+          targetTaskTitle={task.Title}
+          userId={String(actorId)}
+          isAdmin={!!currentUser.IsAdmin}
+          onClose={() => setShowMergeModal(false)}
+          onMerged={() => { setShowMergeModal(false); fetchAllDetails(); refreshTasks(); }}
+        />
+      )}
+
       {/* Delete Confirmation Modal */}
       {showDeleteConfirm && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setShowDeleteConfirm(false)}>

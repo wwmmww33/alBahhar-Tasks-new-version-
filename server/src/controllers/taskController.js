@@ -393,9 +393,42 @@ exports.getTaskActivity = async (req, res) => {
         if (taskAssignedCol) {
             accessClauses.splice(1, 0, `t.${taskAssignedCol} = @UserID`);
         }
-        const accessCondition = (isAdmin === 'true')
-            ? '1=1'
-            : `(${accessClauses.join(' OR ')})`;
+
+        // فلتر القسم — يُطبَّق دائماً بما فيه حساب المدير العام
+        // (المدير العام يتبع قسماً محدداً فلا يجب أن يرى مهام المديريات الأخرى في تبويب التحديثات)
+        let scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, userId);
+        let fallbackDeptId = null;
+        if (scopeDepartmentIds.length === 0) {
+            try {
+                const actorCtx = await resolveActorContext(pool, userId);
+                if (actorCtx?.departmentId != null) {
+                    fallbackDeptId = actorCtx.departmentId;
+                }
+            } catch (_) {}
+        }
+
+        const deptClauses = [];
+        if (scopeDepartmentIds.length > 0) {
+            const scopeParams = scopeDepartmentIds.map((_, i) => `@ActDeptID${i}`).join(', ');
+            deptClauses.push(`t.DepartmentID IN (${scopeParams})`);
+        } else if (fallbackDeptId != null) {
+            deptClauses.push(`t.DepartmentID = @ActFallbackDeptID`);
+        }
+
+        // المدير بلا قسم: لا يرى أي مهام (دوره إداري بحت لا تشغيلي)
+        if (deptClauses.length === 0 && isAdmin === 'true') {
+            return res.json([]);
+        }
+
+        // المدير: يرى مهام قسمه فقط. المستخدم العادي: مهام قسمه + مهامه الشخصية.
+        let accessCondition;
+        if (deptClauses.length === 0) {
+            accessCondition = `(${accessClauses.join(' OR ')})`;
+        } else if (isAdmin === 'true') {
+            accessCondition = `(${deptClauses.join(' OR ')})`;
+        } else {
+            accessCondition = `(${[...accessClauses, ...deptClauses].join(' OR ')})`;
+        }
 
         const taskAssignedIdExpr = taskAssignedCol ? `t.${taskAssignedCol}` : 'CAST(NULL as nvarchar(50))';
         const taskAssignedNameExpr = taskAssignedCol ? `assignee.${identityName}` : 'CAST(NULL as nvarchar(100))';
@@ -407,6 +440,13 @@ exports.getTaskActivity = async (req, res) => {
             .input('UserID', sql.NVarChar, effectiveActorId)
             .input('PageIndex', sql.Int, pageIndex)
             .input('DaysCount', sql.Int, daysCount);
+
+        scopeDepartmentIds.forEach((dId, i) => {
+            request.input(`ActDeptID${i}`, sql.Int, parseInt(dId, 10));
+        });
+        if (fallbackDeptId != null) {
+            request.input('ActFallbackDeptID', sql.Int, fallbackDeptId);
+        }
 
         const query = `
             DECLARE @EndDate DateTime = DATEADD(day, -(@PageIndex * @DaysCount), GETDATE());
@@ -2123,24 +2163,35 @@ exports.searchActiveTasks = async (req, res) => {
     const pool = req.app.locals.db;
     const { userId, isAdmin, q, excludeTaskId } = req.query;
     if (!userId) return res.status(401).json({ message: 'User identification is required.' });
-    if (!q || !q.trim() || q.trim().length < 2) return res.json([]);
+    const trimmedQ = (q || '').trim();
+    // السماح بالبحث برقم المعرف (رقم واحد) أو بنص بطول 2+
+    const isNumericQuery = /^\d+$/.test(trimmedQ);
+    if (!trimmedQ || (!isNumericQuery && trimmedQ.length < 2)) return res.json([]);
 
     try {
         const ctx = await buildCompletedTasksContext(pool);
         const isAdminBool = isAdmin === 'true' || isAdmin === true;
         const excludeId = excludeTaskId ? parseInt(excludeTaskId, 10) : null;
-        const term = q.trim().toLowerCase();
+        const term = trimmedQ.toLowerCase();
 
         // --- استعلام مشترك لجميع المهام (نشطة + مكتملة) ---
         let allTasksQuery;
         const request = pool.request();
 
+        // إذا كان البحث برقم معرف مباشر — أضف شرط TaskID صراحةً
+        if (isNumericQuery) {
+            request.input('SearchTaskID', sql.Int, parseInt(term, 10));
+        }
+
         if (isAdminBool) {
-            allTasksQuery = `
-                SELECT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate
-                FROM dbo.Tasks t
-                ORDER BY t.CreatedAt DESC
-            `;
+            allTasksQuery = isNumericQuery
+                ? `SELECT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                   FROM dbo.Tasks t
+                   WHERE t.TaskID = @SearchTaskID
+                   ORDER BY t.CreatedAt DESC`
+                : `SELECT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                   FROM dbo.Tasks t
+                   ORDER BY t.CreatedAt DESC`;
         } else {
             const principal = await resolvePrincipalForCompletedSearch(pool, userId, ctx);
             const scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, userId);
@@ -2177,10 +2228,14 @@ exports.searchActiveTasks = async (req, res) => {
                 accessClauses.push(`t.DepartmentID = @FallbackDeptID`);
             }
 
+            const whereClause = isNumericQuery
+                ? `(t.TaskID = @SearchTaskID OR (${accessClauses.join(' OR ')}))`
+                : `(${accessClauses.join(' OR ')})`;
+
             allTasksQuery = `
                 SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                 FROM dbo.Tasks t
-                WHERE (${accessClauses.join(' OR ')})
+                WHERE ${whereClause}
                 ORDER BY t.CreatedAt DESC
             `;
         }
@@ -2249,8 +2304,9 @@ exports.searchActiveTasks = async (req, res) => {
             }
         }
 
+        // البحث الرقمي: أعد المهام التى طابقها SQL مباشرة بدون فلتر نصي
         const matched = tasks
-            .filter(t => taskFieldMatches.has(t.TaskID) || subtaskHits.has(t.TaskID) || commentHits.has(t.TaskID))
+            .filter(t => isNumericQuery || taskFieldMatches.has(t.TaskID) || subtaskHits.has(t.TaskID) || commentHits.has(t.TaskID))
             .slice(0, 20)
             .map(t => ({
                 TaskID:      t.TaskID,
@@ -2265,5 +2321,171 @@ exports.searchActiveTasks = async (req, res) => {
     } catch (err) {
         console.error('searchActiveTasks error:', err.message, err.stack);
         res.status(500).json({ message: err.message || 'خطأ في البحث' });
+    }
+};
+
+// POST /api/tasks/:id/merge
+// دمج مهمة مصدر (ب) مع مهمة هدف (أ): ينقل المهام الفرعية والتعليقات ويُلحق بيانات (ب) بوصف (أ) ثم يُغلق (ب)
+exports.mergeTasks = async (req, res) => {
+    const pool = req.app.locals.db;
+    const targetTaskId = parseInt(req.params.id, 10);
+    const { sourceTaskId, userId } = req.body;
+    const srcId = parseInt(sourceTaskId, 10);
+
+    if (!targetTaskId || !srcId || targetTaskId === srcId) {
+        return res.status(400).json({ message: 'معرّفا المهمتين غير صالحين أو متطابقان.' });
+    }
+
+    try {
+        const schema = await detectSchema(pool);
+        const createdByCol = schema.hasTasksCreatedByVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
+        const identityTable = schema.isVacancy ? 'JobVacancies' : 'Users';
+        const identityKey  = schema.isVacancy ? 'VacancyID' : 'UserID';
+        const identityName = schema.isVacancy ? 'Name' : 'FullName';
+
+        // --- جلب بيانات المنفّذ (الاسم + المنصب + الرتبة) ---
+        let actorName = '', actorPosition = '', actorRank = '';
+        try {
+            const actorCtx = await resolveActorContext(pool, userId);
+            // الاسم = fullName (اسم الشخص الحقيقي)، المنصب = vacancyName (اسم الوظيفة)
+            actorName     = actorCtx?.fullName    || String(userId || '');
+            actorPosition = actorCtx?.vacancyName || '';
+
+            // الرتبة — جلب من Ranks عبر JobVacancies.Rank إن وُجد
+            if (actorCtx?.vacancyId) {
+                const rankProbe = await pool.request().query(`
+                    SELECT
+                      CASE WHEN COL_LENGTH('dbo.JobVacancies','Rank') IS NOT NULL THEN 1 ELSE 0 END AS HasRank,
+                      CASE WHEN OBJECT_ID('dbo.Ranks','U')            IS NOT NULL THEN 1 ELSE 0 END AS HasRanks,
+                      CASE WHEN COL_LENGTH('dbo.Ranks','Name')        IS NOT NULL THEN 1 ELSE 0 END AS HasRankName,
+                      CASE WHEN COL_LENGTH('dbo.Ranks','RankName')    IS NOT NULL THEN 1 ELSE 0 END AS HasRankRankName
+                `);
+                const rp = rankProbe.recordset[0] || {};
+                const rankNameCol = rp.HasRankName ? 'rk.Name' : (rp.HasRankRankName ? 'rk.RankName' : null);
+
+                if (rp.HasRank && rp.HasRanks && rankNameCol) {
+                    const posRes = await pool.request()
+                        .input('VID', sql.Int, actorCtx.vacancyId)
+                        .query(`SELECT ${rankNameCol} AS RankName
+                                FROM dbo.JobVacancies jv
+                                LEFT JOIN dbo.Ranks rk ON rk.RankID = jv.Rank
+                                WHERE jv.VacancyID = @VID`);
+                    actorRank = posRes.recordset[0]?.RankName || '';
+                }
+            }
+        } catch (_) {}
+
+        const actionDateStr = new Date().toLocaleDateString('ar-EG', {
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit'
+        });
+
+        // دالة لبناء نص ملاحظة الدمج (الحقول مفصولة بـ |)
+        const buildNote = (action) => {
+            const parts = [action];
+            if (actorName)     parts.push(`المنفّذ: ${actorName}`);
+            if (actorPosition) parts.push(`المنصب: ${actorPosition}`);
+            if (actorRank)     parts.push(`الرتبة: ${actorRank}`);
+            parts.push(`التاريخ: ${actionDateStr}`);
+            return parts.join(' | ');
+        };
+
+        // دالة لإلحاق ملاحظة جديدة بقيمة Notes موجودة (مفصولة بـ |)
+        // كل ملاحظة في سطر مستقل — بينما | تفصل حقول الملاحظة الواحدة
+        const appendNote = (existing, newNote) =>
+            existing ? `${existing}\n${newNote}` : newNote;
+
+        // --- 1. جلب بيانات المهمة المصدر (ب) ---
+        const srcRes = await pool.request()
+            .input('SrcID', sql.Int, srcId)
+            .query(`
+                SELECT t.TaskID, t.Title, t.Description, t.CreatedAt, t.${createdByCol} AS CreatorKey,
+                       idt.${identityName} AS CreatorName
+                FROM dbo.Tasks t
+                LEFT JOIN dbo.${identityTable} idt ON idt.${identityKey} = t.${createdByCol}
+                WHERE t.TaskID = @SrcID
+            `);
+        const src = srcRes.recordset[0];
+        if (!src) return res.status(404).json({ message: 'المهمة المصدر غير موجودة.' });
+
+        let srcTitle = src.Title || '';
+        let srcDesc  = src.Description || '';
+        try { srcTitle = encryptionConfig.decrypt(srcTitle); } catch (_) {}
+        try { srcDesc  = encryptionConfig.decrypt(srcDesc);  } catch (_) {}
+
+        const srcCreatedAt = src.CreatedAt
+            ? new Date(src.CreatedAt).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' })
+            : '';
+        const creatorName = src.CreatorName || String(src.CreatorKey || '');
+
+        // --- 2. تحديث وصف المهمة الهدف (أ) ---
+        const tgtRes = await pool.request()
+            .input('TgtID', sql.Int, targetTaskId)
+            .query(`SELECT Description FROM dbo.Tasks WHERE TaskID = @TgtID`);
+        const tgt = tgtRes.recordset[0];
+        if (!tgt) return res.status(404).json({ message: 'المهمة الهدف غير موجودة.' });
+
+        let tgtDesc = tgt.Description || '';
+        try { tgtDesc = encryptionConfig.decrypt(tgtDesc); } catch (_) {}
+
+        const mergeBlock = [
+            '',
+            '---',
+            `مدمجة من مهمة #${srcId}`,
+            `العنوان: ${srcTitle}`,
+            `المنشئ: ${creatorName}`,
+            `تاريخ الإنشاء: ${srcCreatedAt}`,
+            srcDesc ? `التفاصيل:\n${srcDesc}` : '',
+        ].filter(Boolean).join('\n');
+
+        await pool.request()
+            .input('TgtID', sql.Int, targetTaskId)
+            .input('NewDesc', sql.NVarChar(sql.MAX), encryptionConfig.encrypt((tgtDesc + mergeBlock).trim()))
+            .query(`UPDATE dbo.Tasks SET Description = @NewDesc WHERE TaskID = @TgtID`);
+
+        const mergeNote    = buildNote(`مدمجة من مهمة #${srcId}`);
+        const mergeNoteSrc = buildNote(`تم دمجها مع مهمة #${targetTaskId}`);
+
+        // --- 3. نقل المهام الفرعية ---
+        const stRes = await pool.request()
+            .input('SrcID', sql.Int, srcId)
+            .query(`SELECT SubtaskID, Notes FROM dbo.Subtasks WHERE TaskID = @SrcID`);
+
+        for (const st of stRes.recordset) {
+            await pool.request()
+                .input('SubID', sql.Int, st.SubtaskID)
+                .input('TgtID', sql.Int, targetTaskId)
+                .input('Note', sql.NVarChar(sql.MAX), appendNote(st.Notes || '', mergeNote))
+                .query(`UPDATE dbo.Subtasks SET TaskID = @TgtID, Notes = @Note WHERE SubtaskID = @SubID`);
+        }
+
+        // --- 4. نقل التعليقات ---
+        const cmtRes = await pool.request()
+            .input('SrcID', sql.Int, srcId)
+            .query(`SELECT CommentID, Notes FROM dbo.Comments WHERE TaskID = @SrcID`);
+
+        for (const c of cmtRes.recordset) {
+            await pool.request()
+                .input('CmtID', sql.Int, c.CommentID)
+                .input('TgtID', sql.Int, targetTaskId)
+                .input('Note', sql.NVarChar(sql.MAX), appendNote(c.Notes || '', mergeNote))
+                .query(`UPDATE dbo.Comments SET TaskID = @TgtID, Notes = @Note WHERE CommentID = @CmtID`);
+        }
+
+        // --- 5. إغلاق المهمة المصدر (ب) ---
+        const srcNotesRes = await pool.request()
+            .input('SrcID', sql.Int, srcId)
+            .query(`SELECT Notes FROM dbo.Tasks WHERE TaskID = @SrcID`);
+        const existingSrcNotes = srcNotesRes.recordset[0]?.Notes || '';
+
+        await pool.request()
+            .input('SrcID', sql.Int, srcId)
+            .input('Note', sql.NVarChar(sql.MAX), appendNote(existingSrcNotes, mergeNoteSrc))
+            .query(`UPDATE dbo.Tasks SET Status = 'cancelled', Notes = @Note WHERE TaskID = @SrcID`);
+
+        return res.json({ success: true, mergedSubtasks: stRes.recordset.length, mergedComments: cmtRes.recordset.length });
+    } catch (err) {
+        console.error('mergeTasks error:', err);
+        return res.status(500).json({ message: err.message || 'خطأ في عملية الدمج' });
     }
 };

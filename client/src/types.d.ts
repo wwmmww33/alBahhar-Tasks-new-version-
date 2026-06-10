@@ -19,6 +19,7 @@ export type Subtask = {
   CreatedAt: string;
   UpdatedAt: string;
   ShowInCalendar?: boolean;
+  Notes?: string | null;
 };
 
 export type Task = {
@@ -89,6 +90,7 @@ export type Comment = {
   CreatedAt: string;
   UserName?: string;
   ActedByName?: string;
+  Notes?: string | null;
 };
 
 export type CurrentUser = {

@@ -617,6 +617,15 @@ const UnifiedTimeline = ({
                 </span>
               )}
               <span className="text-xs text-content-secondary font-mono ml-2">#{subtask.SubtaskID}</span>
+              {(subtask as any).Notes && (
+                <div className="flex flex-col gap-0.5 mr-1">
+                  {String((subtask as any).Notes).split('\n').map((line: string, i: number) => (
+                    <span key={i} className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 rounded">
+                      {line}
+                    </span>
+                  ))}
+                </div>
+              )}
               {canDelete && (
                 <button
                   onClick={() => handleDeleteSubtask(subtask)}
@@ -907,10 +916,19 @@ const UnifiedTimeline = ({
                   </button>
                 )}
                 <p className="text-xs text-content-secondary font-mono">#{comment.CommentID}</p>
+                {(comment as any).Notes && (
+                  <div className="flex flex-col gap-0.5">
+                    {String((comment as any).Notes).split('\n').map((line: string, i: number) => (
+                      <span key={i} className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 rounded">
+                        {line}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>
-          
+
           <div className="flex items-center gap-2 mt-2 text-xs text-content-secondary">
             <Clock size={12} />
             <span>

@@ -80,4 +80,7 @@ router.get('/:id/related', taskRelationController.getRelatedTasks);
 router.post('/:id/related', taskRelationController.addRelatedTask);
 router.delete('/:id/related/:relatedId', taskRelationController.removeRelatedTask);
 
+// دمج مهمتين
+router.post('/:id/merge', taskController.mergeTasks);
+
 module.exports = router;

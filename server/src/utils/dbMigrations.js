@@ -519,5 +519,24 @@ module.exports = {
       console.error('❌ Failed ensuring TaskRelations table:', err);
       throw err;
     }
-  }
+  },
+
+  // إضافة عمود Notes إلى Tasks و Subtasks و Comments
+  ensureNotesColumns: async function ensureNotesColumns(pool) {
+    try {
+      await pool.request().query(`
+        IF COL_LENGTH('dbo.Tasks', 'Notes') IS NULL
+          ALTER TABLE dbo.Tasks ADD Notes NVARCHAR(MAX) NULL;
+        IF COL_LENGTH('dbo.Subtasks', 'Notes') IS NULL
+          ALTER TABLE dbo.Subtasks ADD Notes NVARCHAR(MAX) NULL;
+        IF COL_LENGTH('dbo.Comments', 'Notes') IS NULL
+          ALTER TABLE dbo.Comments ADD Notes NVARCHAR(MAX) NULL;
+      `);
+      console.log('✅ Ensured Notes columns in Tasks, Subtasks, Comments.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring Notes columns:', err);
+      throw err;
+    }
+  },
 };

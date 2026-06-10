@@ -114,6 +114,7 @@ const {
   ensureRegistrationRequestsVacancyID,
   ensureTaskRelationsTable,
   ensureTaskAssignmentNotificationsColumns,
+  ensureNotesColumns,
 } = require('./utils/dbMigrations');
 
 
@@ -244,6 +245,13 @@ const startServer = async () => {
       await ensureTaskAssignmentNotificationsColumns(pool);
     } catch (tanErr) {
       console.error('⚠️ Database migration (TaskAssignmentNotifications) failed. Server continues running.', tanErr);
+    }
+
+    // --- أعمدة Notes في Tasks و Subtasks و Comments ---
+    try {
+      await ensureNotesColumns(pool);
+    } catch (notesErr) {
+      console.error('⚠️ Database migration (Notes columns) failed. Server continues running.', notesErr);
     }
     
     app.listen(port, '0.0.0.0', () => {
