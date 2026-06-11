@@ -2,7 +2,46 @@
 const sql = require('mssql');
 const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission, hasActiveDelegation } = require('../utils/delegationUtils');
 const encryptionConfig = require('../config/encryption.config');
-const { detectSchema, resolveVacancyId, ensureVacancyId, resolveActorContext } = require('../utils/vacancyResolver');
+const { detectSchema, resolveVacancyId, ensureVacancyId, resolveActorContext, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
+
+// تسجيل إجراء مهمة في جدول TaskAuditLog (العنوان يُحفظ مشفّراً كما هو في DB)
+async function logTaskAction(pool, { taskId, taskTitle, departmentId, action, userId }) {
+    try {
+        let actorName = '', actorPosition = '', actorDeptId = null;
+        if (userId) {
+            const ctx = await resolveActorContext(pool, String(userId)).catch(() => null);
+            actorName     = ctx?.fullName    || String(userId);
+            actorPosition = ctx?.vacancyName || '';
+            actorDeptId   = ctx?.departmentId != null ? parseInt(ctx.departmentId, 10) : null;
+        }
+
+        // إذا لم يُمرَّر DepartmentID، حاول جلبه من المهمة مباشرة
+        let deptId = departmentId || null;
+        if ((deptId == null || deptId === 0) && taskId) {
+            try {
+                const deptRes = await pool.request()
+                    .input('TID', sql.Int, taskId)
+                    .query('SELECT TOP 1 DepartmentID FROM dbo.Tasks WHERE TaskID = @TID');
+                deptId = deptRes.recordset[0]?.DepartmentID || null;
+            } catch (_) {}
+        }
+
+        await pool.request()
+            .input('TaskID',           sql.Int,           taskId        || null)
+            .input('TaskTitle',        sql.NVarChar(500),  taskTitle     || null)
+            .input('DepartmentID',     sql.Int,           deptId        || null)
+            .input('ActorDepartmentID',sql.Int,           actorDeptId   || null)
+            .input('Action',           sql.NVarChar(50),   action)
+            .input('ActorName',        sql.NVarChar(255),  actorName     || null)
+            .input('ActorPosition',    sql.NVarChar(255),  actorPosition || null)
+            .query(`INSERT INTO dbo.TaskAuditLog
+                      (TaskID, TaskTitle, DepartmentID, ActorDepartmentID, Action, ActorName, ActorPosition)
+                    VALUES
+                      (@TaskID, @TaskTitle, @DepartmentID, @ActorDepartmentID, @Action, @ActorName, @ActorPosition)`);
+    } catch (err) {
+        console.error('logTaskAction failed:', err?.message || err);
+    }
+}
 
 async function resolveEffectiveActorId(pool, rawUserId) {
     const loginId = String(rawUserId || '').trim();
@@ -1222,16 +1261,34 @@ exports.updateTaskStatus = async (req, res) => {
     }
     
     try {
-        // تحديث الحالة بدون تحويل مؤقت - سنحفظ الحالة الأصلية
+        // جلب عنوان المهمة والقسم قبل التحديث (للسجل)
+        const taskMeta = await pool.request()
+            .input('TaskID', sql.Int, id)
+            .query('SELECT TOP 1 Title, DepartmentID FROM dbo.Tasks WHERE TaskID = @TaskID');
+        const meta = taskMeta.recordset[0] || {};
+
         await pool.request()
             .input('TaskID', sql.Int, id)
             .input('Status', sql.NVarChar, Status)
             .query('UPDATE Tasks SET Status = @Status WHERE TaskID = @TaskID');
-        
+
+        // تسجيل في سجل الإجراءات
+        const trackedActions = { completed: 'completed', cancelled: 'cancelled', open: 'reopened', 'in-progress': 'reopened' };
+        if (trackedActions[Status]) {
+            const userId = req.body?.userId || req.body?.UserID || req.query?.userId;
+            await logTaskAction(pool, {
+                taskId:       parseInt(id, 10),
+                taskTitle:    meta.Title    || null,
+                departmentId: meta.DepartmentID || null,
+                action:       trackedActions[Status],
+                userId,
+            });
+        }
+
         res.status(200).json({ message: 'Task status updated successfully' });
-    } catch (error) { 
+    } catch (error) {
         console.error('UPDATE TASK STATUS ERROR:', error);
-        res.status(500).send({ message: 'Error updating task status' }); 
+        res.status(500).send({ message: 'Error updating task status' });
     }
 };
 
@@ -1416,12 +1473,18 @@ exports.deleteTask = async (req, res) => {
     await transaction.begin();
     
     const accessCheck = await checkTaskAccess(pool, taskIdInt, userId, isAdmin === 'true', 'delete');
-    
+
     if (!accessCheck.hasAccess) {
       await transaction.rollback();
       return res.status(403).json({ message: accessCheck.reason });
     }
-    
+
+    // جلب بيانات المهمة للسجل قبل حذفها
+    const taskMetaRes = await new sql.Request(transaction)
+      .input('TaskID', sql.Int, taskIdInt)
+      .query('SELECT TOP 1 Title, DepartmentID FROM dbo.Tasks WHERE TaskID = @TaskID');
+    const taskMeta = taskMetaRes.recordset[0] || {};
+
     // حذف التعليقات المرتبطة بالمهمة
     await new sql.Request(transaction)
       .input('TaskID', sql.Int, taskIdInt)
@@ -1438,8 +1501,18 @@ exports.deleteTask = async (req, res) => {
       .query('DELETE FROM Tasks WHERE TaskID = @TaskID');
     
     await transaction.commit();
+
+    // تسجيل الحذف بعد نجاح العملية
+    await logTaskAction(pool, {
+      taskId:       taskIdInt,
+      taskTitle:    taskMeta.Title        || null,
+      departmentId: taskMeta.DepartmentID || null,
+      action:       'deleted',
+      userId,
+    });
+
     res.status(200).json({ message: 'Task and all related data deleted successfully' });
-    
+
   } catch (error) {
     await transaction.rollback();
     console.error('DATABASE DELETE TASK ERROR:', error);
@@ -2385,7 +2458,6 @@ exports.mergeTasks = async (req, res) => {
             const parts = [action];
             if (actorName)     parts.push(`المنفّذ: ${actorName}`);
             if (actorPosition) parts.push(`المنصب: ${actorPosition}`);
-            if (actorRank)     parts.push(`الرتبة: ${actorRank}`);
             parts.push(`التاريخ: ${actionDateStr}`);
             return parts.join(' | ');
         };
@@ -2421,7 +2493,7 @@ exports.mergeTasks = async (req, res) => {
         // --- 2. تحديث وصف المهمة الهدف (أ) ---
         const tgtRes = await pool.request()
             .input('TgtID', sql.Int, targetTaskId)
-            .query(`SELECT Description FROM dbo.Tasks WHERE TaskID = @TgtID`);
+            .query(`SELECT Description, Title, DepartmentID FROM dbo.Tasks WHERE TaskID = @TgtID`);
         const tgt = tgtRes.recordset[0];
         if (!tgt) return res.status(404).json({ message: 'المهمة الهدف غير موجودة.' });
 
@@ -2483,9 +2555,106 @@ exports.mergeTasks = async (req, res) => {
             .input('Note', sql.NVarChar(sql.MAX), appendNote(existingSrcNotes, mergeNoteSrc))
             .query(`UPDATE dbo.Tasks SET Status = 'cancelled', Notes = @Note WHERE TaskID = @SrcID`);
 
+        // تسجيل إجراء الدمج في سجل الإجراءات (العنوان مشفّر كما هو في DB)
+        await logTaskAction(pool, {
+            taskId:       targetTaskId,
+            taskTitle:    tgt?.Title     || null,
+            departmentId: tgt?.DepartmentID || null,
+            action:       'merged',
+            userId,
+        });
+        await logTaskAction(pool, {
+            taskId:       srcId,
+            taskTitle:    src?.Title     || null,
+            departmentId: tgt?.DepartmentID || null,
+            action:       'merged_into',
+            userId,
+        });
+
         return res.json({ success: true, mergedSubtasks: stRes.recordset.length, mergedComments: cmtRes.recordset.length });
     } catch (err) {
         console.error('mergeTasks error:', err);
         return res.status(500).json({ message: err.message || 'خطأ في عملية الدمج' });
+    }
+};
+
+// سجل إجراءات المهام — الإتمام / الإلغاء / الحذف / الدمج
+// يستخدم OFFSET pagination ويعرض جميع إجراءات القسم المستقل الواحد لجميع موظفيه
+exports.getTaskAuditLog = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { userId, page = 0 } = req.query;
+    const pageNum   = parseInt(page, 10) || 0;
+    const PAGE_SIZE = 50;
+    const rowOffset = pageNum * PAGE_SIZE;
+
+    try {
+        // تحقق من وجود الجدول
+        const tableCheck = await pool.request().query(`
+            SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'TaskAuditLog'
+        `);
+        if (!tableCheck.recordset[0]?.cnt) return res.json([]);
+
+        // 1. جلب قسم المستخدم الحالي من ملفه الشخصي
+        const ctx = await resolveActorContext(pool, userId).catch(() => null);
+        const userDeptId = ctx?.departmentId != null ? parseInt(ctx.departmentId, 10) : null;
+        if (!userDeptId) return res.json([]);
+
+        // 2. جلب جميع أقسام المجموعة المستقلة (القسم المستقل الأب + جميع أقسامه الدنيا)
+        const deptIds = await resolveIndependentDeptGroup(pool, userDeptId);
+        if (deptIds.length === 0) return res.json([]);
+
+        // 3. تحقق من وجود عمود ActorDepartmentID
+        const colCheck = await pool.request().query(`
+            SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='TaskAuditLog' AND COLUMN_NAME='ActorDepartmentID'
+        `);
+        const hasActorDeptCol = !!colCheck.recordset[0]?.cnt;
+
+        // 4. بناء الاستعلام مع قائمة الأقسام
+        const req2 = pool.request();
+        const deptParams = deptIds.map((id, i) => {
+            req2.input(`DID${i}`, sql.Int, id);
+            return `@DID${i}`;
+        }).join(', ');
+        req2.input('RowOffset', sql.Int, rowOffset);
+        req2.input('PageSize',  sql.Int, PAGE_SIZE);
+
+        // الفلتر:
+        //  أ) قسم المهمة ضمن قائمة أقسام المجموعة المستقلة
+        //  ب) قسم المنفّذ ضمن القائمة (يشمل المهام المحذوفة حيث DepartmentID=NULL)
+        //  ج) سجلات قسمها NULL لكن المهمة لا تزال موجودة وتتبع قسماً في القائمة
+        const actorDeptClause = hasActorDeptCol
+            ? `OR al.ActorDepartmentID IN (${deptParams})`
+            : '';
+
+        const result = await req2.query(`
+            SELECT al.LogID, al.TaskID, al.TaskTitle, al.DepartmentID,
+                   al.Action, al.ActorName, al.ActorPosition, al.CreatedAt
+            FROM dbo.TaskAuditLog al
+            WHERE (
+                al.DepartmentID IN (${deptParams})
+                ${actorDeptClause}
+                OR (al.DepartmentID IS NULL AND al.TaskID IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM dbo.Tasks t
+                    WHERE t.TaskID = al.TaskID AND t.DepartmentID IN (${deptParams})
+                ))
+            )
+            ORDER BY al.CreatedAt DESC
+            OFFSET @RowOffset ROWS FETCH NEXT @PageSize ROWS ONLY
+        `);
+
+        // فك تشفير العنوان قبل الإرسال للواجهة
+        const rows = result.recordset.map(r => {
+            if (r.TaskTitle) {
+                try { r.TaskTitle = encryptionConfig.decrypt(r.TaskTitle); } catch (_) {}
+            }
+            return r;
+        });
+
+        res.json(rows);
+    } catch (err) {
+        console.error('getTaskAuditLog error:', err);
+        res.status(500).json({ message: err.message });
     }
 };

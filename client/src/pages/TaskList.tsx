@@ -120,6 +120,17 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   // حدّ أقصى للعودة للوراء: 52 أسبوعاً (سنة كاملة)
   const ACTIVITY_MAX_PAGES = 52;
 
+  // التبويب الفرعي داخل "آخر التحديثات"
+  const [updatesSubTab, setUpdatesSubTab] = useState<'updates' | 'audit'>('updates');
+
+  // سجل إجراءات المهام
+  type AuditLogEntry = { LogID: number; TaskID: number | null; TaskTitle: string | null; Action: string; ActorName: string | null; ActorPosition: string | null; CreatedAt: string; };
+  const [auditItems, setAuditItems] = useState<AuditLogEntry[]>([]);
+  const [isLoadingAudit, setIsLoadingAudit] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditPage, setAuditPage] = useState(0);
+  const [auditHasMore, setAuditHasMore] = useState(true);
+
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   const subtaskAssigneeId = (subtask: Subtask) => String((subtask as any).AssignedToVacancyID ?? (subtask as any).AssignedTo ?? '');
 
@@ -243,17 +254,36 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     }
   }, [actorId, isAdminFlag]);
 
+  const fetchAuditLog = useCallback(async (pageIndex: number) => {
+    setIsLoadingAudit(true);
+    setAuditError(null);
+    try {
+      const res = await fetch(`/api/tasks/audit-log?userId=${actorId}&isAdmin=${isAdminFlag}&page=${pageIndex}`);
+      if (!res.ok) { setAuditError('تعذر جلب سجل الإجراءات.'); return; }
+      const data = await res.json().catch(() => []);
+      const newItems = Array.isArray(data) ? data : [];
+      setAuditHasMore(newItems.length === 50);
+      setAuditItems(prev => pageIndex === 0 ? newItems : [...prev, ...newItems]);
+      setAuditPage(pageIndex);
+    } catch {
+      setAuditError('تعذر الاتصال بالخادم لجلب سجل الإجراءات.');
+    } finally {
+      setIsLoadingAudit(false);
+    }
+  }, [actorId, isAdminFlag]);
+
   // حفظ التبويب النشط في sessionStorage عند كل تغيير
   useEffect(() => {
     sessionStorage.setItem('taskList.tab', activeTab);
     if (activeTab === 'updates') {
-      // Reset and fetch first page — فقط عند تبديل التبويب فعلياً
       setActivityPage(0);
       setActivityHasMore(true);
       setActivityInfoMsg(null);
       fetchActivity(0);
+      setAuditPage(0);
+      setAuditHasMore(true);
+      setUpdatesSubTab('updates');
     }
-    // نتعمّد استبعاد fetchActivity من الـ deps كي لا يُعاد التصفير عند كل render
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
@@ -267,6 +297,14 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     }
     fetchActivity(activityPage + 1);
   };
+
+  // جلب سجل الإجراءات عند تبديل التبويب الفرعي إلى "audit"
+  useEffect(() => {
+    if (updatesSubTab === 'audit' && auditItems.length === 0) {
+      fetchAuditLog(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [updatesSubTab]);
 
   // تجميع التحديثات المتتالية لنفس المهمة في مربع واحد
   const groupedActivity = useMemo<ActivityGroup[]>(() => {
@@ -647,7 +685,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       const response = await fetch(`/api/tasks/${taskId}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ Status: newStatus }),
+        body: JSON.stringify({ Status: newStatus, userId: actorId }),
       });
       if (response.ok) {
         setTasks(prevTasks =>
@@ -1304,36 +1342,99 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       {/* --- عرض المهام حسب التبويب النشط --- */}
       {activeTab === 'updates' && (
         <div>
-          <div className="flex justify-between items-center mb-6">
-            <div>
-              <h1 className="text-3xl font-bold text-content border-b-2 border-purple-500 pb-2">آخر التحديثات</h1>
+          <div className="flex justify-between items-center mb-4">
+            <h1 className="text-3xl font-bold text-content border-b-2 border-purple-500 pb-2">آخر التحديثات</h1>
+            <div className="flex gap-2">
+              {updatesSubTab === 'updates' && (
+                <button type="button" onClick={exportActivityLog} className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 flex items-center gap-2">
+                  <ClipboardCopy size={16} />تصدير للطباعة
+                </button>
+              )}
+              <button type="button" onClick={() => { if (updatesSubTab === 'updates') fetchActivity(0); else { setAuditItems([]); setAuditPage(0); setAuditHasMore(true); fetchAuditLog(0); }}} className="bg-primary text-white px-4 py-2 rounded-md hover:bg-primary-dark">
+                تحديث
+              </button>
             </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={exportActivityLog}
-              className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 flex items-center gap-2"
-            >
-              <ClipboardCopy size={16} />
-              تصدير للطباعة
-            </button>
-            <button
-              type="button"
-              onClick={() => fetchActivity(0)}
-              className="bg-primary text-white px-4 py-2 rounded-md hover:bg-primary-dark"
-            >
-              تحديث
-            </button>
-          </div>
           </div>
 
-          {activityInfoMsg && (
+          {/* التبويبان الفرعيان */}
+          <div className="flex border-b border-content/10 mb-5">
+            <button onClick={() => setUpdatesSubTab('updates')} className={`px-5 py-2 text-sm font-medium transition-colors ${updatesSubTab === 'updates' ? 'text-purple-600 border-b-2 border-purple-500' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}>
+              📋 تحديثات المهام
+            </button>
+            <button onClick={() => setUpdatesSubTab('audit')} className={`px-5 py-2 text-sm font-medium transition-colors ${updatesSubTab === 'audit' ? 'text-orange-600 border-b-2 border-orange-500' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}>
+              ⚡ سجل الإجراءات
+            </button>
+          </div>
+
+          {/* ── سجل الإجراءات ── */}
+          {updatesSubTab === 'audit' && (
+            <div>
+              {isLoadingAudit && auditItems.length === 0 ? (
+                <div className="flex justify-center items-center py-8"><Loader2 className="animate-spin mr-2" /><span>جاري تحميل سجل الإجراءات...</span></div>
+              ) : auditError ? (
+                <p className="text-red-500 text-center py-4">{auditError}</p>
+              ) : auditItems.length > 0 ? (
+                <div className="space-y-2">
+                  {auditItems.map(entry => {
+                    const actionMap: Record<string, { label: string; color: string; icon: string }> = {
+                      completed:   { label: 'تعيين كمكتملة',       color: 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800',     icon: '✅' },
+                      cancelled:   { label: 'إلغاء المهمة',         color: 'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800',             icon: '🚫' },
+                      deleted:     { label: 'حذف المهمة',           color: 'bg-gray-100 border-gray-300 dark:bg-gray-700/40 dark:border-gray-600',         icon: '🗑️' },
+                      merged:      { label: 'دمج المهمة',           color: 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',          icon: '🔀' },
+                      merged_into: { label: 'مدمجة في مهمة أخرى',  color: 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',          icon: '🔗' },
+                      reopened:    { label: 'إعادة فتح المهمة',     color: 'bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800',  icon: '🔓' },
+                    };
+                    const a = actionMap[entry.Action] || { label: entry.Action, color: 'bg-white border-gray-200 dark:bg-gray-800', icon: '📌' };
+                    const dateStr = new Date(entry.CreatedAt).toLocaleString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    return (
+                      <div key={entry.LogID} className={`flex items-start gap-3 border rounded-lg px-4 py-3 ${a.color}`}>
+                        <span className="text-xl mt-0.5 flex-shrink-0">{a.icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold text-sm text-content">{a.label}</span>
+                            {entry.TaskID && entry.Action !== 'deleted' ? (
+                              <Link to={`/task/${entry.TaskID}`} className="text-xs text-primary hover:underline">#{entry.TaskID} — {entry.TaskTitle || ''}</Link>
+                            ) : (
+                              <span className="text-xs text-gray-500">#{entry.TaskID} — {entry.TaskTitle || 'مهمة محذوفة'}</span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-content-secondary">
+                            {entry.ActorName     && <span>المنفّذ: <span className="font-medium text-content">{entry.ActorName}</span></span>}
+                            {entry.ActorPosition && <span>المنصب: <span className="font-medium text-content">{entry.ActorPosition}</span></span>}
+                            <span className="mr-auto">{dateStr}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div className="text-center pt-2">
+                    {auditHasMore ? (
+                      <button onClick={() => { if (!isLoadingAudit) fetchAuditLog(auditPage + 1); }} disabled={isLoadingAudit} className="bg-primary text-white px-6 py-2 rounded-md hover:bg-primary-dark disabled:opacity-50 flex items-center gap-2 mx-auto">
+                        {isLoadingAudit ? <Loader2 className="animate-spin" size={16} /> : null}
+                        {isLoadingAudit ? 'جاري التحميل...' : 'تحميل فترة سابقة (7 أيام)'}
+                      </button>
+                    ) : (
+                      <p className="text-xs text-gray-400">لا توجد إجراءات سابقة.</p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-12 text-content-secondary">
+                  <p className="text-lg">لا توجد إجراءات مسجّلة بعد.</p>
+                  <p className="text-sm mt-1">ستظهر هنا عند إتمام أو إلغاء أو حذف أو دمج المهام.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── تحديثات المهام ── */}
+          {updatesSubTab === 'updates' && activityInfoMsg && (
             <div className="mb-4 text-sm text-center text-content-secondary bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md py-2 px-3">
               {activityInfoMsg}
             </div>
           )}
 
-          {isLoadingActivity && activityItems.length === 0 ? (
+          {updatesSubTab === 'updates' && (isLoadingActivity && activityItems.length === 0 ? (
             <div className="flex justify-center items-center py-8">
               <Loader2 className="animate-spin mr-2" />
               <span>جاري تحميل آخر التحديثات...</span>
@@ -1481,7 +1582,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                 <p className="text-xs text-gray-400">تم الوصول إلى الحدّ الأقصى للبحث في الأنشطة (سنة كاملة).</p>
               )}
             </div>
-          )}
+          ))}
         </div>
       )}
 

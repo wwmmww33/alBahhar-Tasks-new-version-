@@ -761,12 +761,9 @@ exports.deleteSubtask = async (req, res) => {
 
     const actingUserId = resolveActingUserId(req);
     const existing = subtaskResult.recordset[0];
-    const accessCheck = await checkTaskAccess(pool, existing.TaskID, actingUserId, resolveIsAdmin(req), 'edit');
-    if (!accessCheck.hasAccess) {
-      const actorCandidates = await resolveActorCandidates(pool, actingUserId);
-      if (!hasSubtaskOwnership(existing, actorCandidates)) {
-        return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية حذف المهمة الفرعية.' });
-      }
+    const actorCandidates = await resolveActorCandidates(pool, actingUserId);
+    if (!hasSubtaskOwnership(existing, actorCandidates)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية حذف هذه المهمة الفرعية، يمكنك فقط حذف المهام الفرعية التي أنشأتها.' });
     }
 
         await pool.request()

@@ -180,6 +180,10 @@ const UnifiedTimeline = ({
     return isActorMatch(subtask.CreatedByVacancyID) || isActorMatch(subtask.CreatedBy);
   };
 
+  const isCommentOwner = (comment: Comment) => {
+    return isActorMatch(comment.CommentedByVacancyID) || isActorMatch(comment.UserID);
+  };
+
   const canAddSubtasks = Boolean(task);
 
   // دمج المهام الفرعية والتعليقات وترتيبها حسب التاريخ
@@ -451,8 +455,8 @@ const UnifiedTimeline = ({
       });
 
       if (!resp.ok) {
-        const text = await resp.text().catch(() => '');
-        alert(`فشل حذف المهمة الفرعية (${resp.status}). ${text}`);
+        const data = await resp.json().catch(() => ({}));
+        alert(data.message || `فشل حذف المهمة الفرعية (${resp.status})`);
         return;
       }
 
@@ -539,7 +543,7 @@ const UnifiedTimeline = ({
   };
 
   const renderSubtaskItem = (subtask: Subtask) => {
-    const canDelete = true;
+    const canDelete = isSubtaskCreatorActor(subtask);
     const canEditTitle = true;
     const canEditDue = true;
     const canToggleStatus = isSubtaskAssignedToActor(subtask);
@@ -810,7 +814,7 @@ const UnifiedTimeline = ({
   };
 
   const renderCommentItem = (comment: Comment) => {
-    const canManage = true;
+    const canManage = isCommentOwner(comment);
     const isEditing = editingCommentId === comment.CommentID;
     const handleToggleCommentCalendar = async (next: boolean) => {
       try {

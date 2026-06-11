@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { cpSync, rmSync, existsSync, mkdirSync, copyFileSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { rmSync, existsSync, mkdirSync, copyFileSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join, dirname, extname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
@@ -102,30 +102,13 @@ writeFileSync(seaConfigPath, JSON.stringify({
 execSync('node --experimental-sea-config sea-config.json', { cwd: __dirname, stdio: 'inherit' });
 console.log('✅ SEA blob generated');
 
-// Inject blob into a copy of node.exe using resedit (pure JS, no WASM/signtool needed)
-const { NtExecutable, NtExecutableResource } = require('resedit');
-const exeData = readFileSync(process.execPath);
-const exe = NtExecutable.from(exeData, { ignoreCert: true });
-const res = NtExecutableResource.from(exe);
-
-const blob = readFileSync(seaBlobPath);
-const blobBuf = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
-res.entries.push({ type: 10, id: 'NODE_SEA_BLOB', lang: 1033, bin: blobBuf });
-res.outputResource(exe);
-
-const outData = exe.generate({ ignoreCert: true });
-const exeBuf = Buffer.from(outData);
-
-// Flip the sentinel fuse: Node.js reads this byte at startup to decide
-// whether to enter SEA mode. postject normally does this; we must do it
-// manually since we replaced postject with resedit.
-const FUSE_OFF = Buffer.from('NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2:0');
-const fuseIdx = exeBuf.indexOf(FUSE_OFF);
-if (fuseIdx === -1) throw new Error('❌ SEA sentinel fuse not found — is process.execPath really a Node.js binary?');
-exeBuf[fuseIdx + FUSE_OFF.length - 1] = 0x31; // '0' → '1'  (enable SEA)
-console.log(`✅ SEA sentinel fuse flipped at 0x${fuseIdx.toString(16)}`);
-
-writeFileSync(exePath, exeBuf);
+// Copy node.exe then inject blob using postject CLI
+copyFileSync(process.execPath, exePath);
+const postjectBin = join(__dirname, 'node_modules', '.bin', 'postject.cmd');
+execSync(
+  `"${postjectBin}" "${exePath}" NODE_SEA_BLOB "${seaBlobPath}" --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`,
+  { cwd: __dirname, stdio: 'inherit' }
+);
 console.log('✅ SEA blob injected into bahar.exe');
 
 // Cleanup temp files

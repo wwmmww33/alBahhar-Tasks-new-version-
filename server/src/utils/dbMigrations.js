@@ -521,6 +521,50 @@ module.exports = {
     }
   },
 
+  // جدول سجل إجراءات المهام (إتمام / إلغاء / حذف / دمج)
+  ensureTaskAuditLogTable: async function ensureTaskAuditLogTable(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'TaskAuditLog'
+      `);
+      if (check.recordset[0].cnt > 0) {
+        // الجدول موجود — أضف ActorDepartmentID إذا لم يكن موجوداً
+        await pool.request().query(`
+          IF COL_LENGTH('dbo.TaskAuditLog','ActorDepartmentID') IS NULL
+          BEGIN
+            ALTER TABLE dbo.TaskAuditLog ADD ActorDepartmentID INT NULL;
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_TaskAuditLog_ActorDept' AND object_id=OBJECT_ID('dbo.TaskAuditLog'))
+              CREATE INDEX IX_TaskAuditLog_ActorDept ON dbo.TaskAuditLog(ActorDepartmentID, CreatedAt DESC);
+          END
+        `);
+        console.log('ℹ️ TaskAuditLog table already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        CREATE TABLE dbo.TaskAuditLog (
+          LogID              INT IDENTITY(1,1) PRIMARY KEY,
+          TaskID             INT NULL,
+          TaskTitle          NVARCHAR(500) NULL,
+          DepartmentID       INT NULL,
+          ActorDepartmentID  INT NULL,
+          Action             NVARCHAR(50) NOT NULL,
+          ActorName          NVARCHAR(255) NULL,
+          ActorPosition      NVARCHAR(255) NULL,
+          CreatedAt          DATETIME2 NOT NULL CONSTRAINT DF_TaskAuditLog_CreatedAt DEFAULT(GETDATE())
+        );
+        CREATE INDEX IX_TaskAuditLog_Dept     ON dbo.TaskAuditLog(DepartmentID,      CreatedAt DESC);
+        CREATE INDEX IX_TaskAuditLog_ActorDept ON dbo.TaskAuditLog(ActorDepartmentID, CreatedAt DESC);
+        CREATE INDEX IX_TaskAuditLog_Task     ON dbo.TaskAuditLog(TaskID);
+      `);
+      console.log('✅ Created TaskAuditLog table.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring TaskAuditLog table:', err);
+      throw err;
+    }
+  },
+
   // إضافة عمود Notes إلى Tasks و Subtasks و Comments
   ensureNotesColumns: async function ensureNotesColumns(pool) {
     try {

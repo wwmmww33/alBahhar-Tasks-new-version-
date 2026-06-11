@@ -335,7 +335,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     try {
         await fetch(getApiUrl(`tasks/${task.TaskID}/status`), {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ Status: newStatus })
+            body: JSON.stringify({ Status: newStatus, userId: actorId })
         });
         fetchAllDetails();
     } catch (error) { console.error("Failed to update task status:", error); }

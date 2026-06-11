@@ -115,6 +115,7 @@ const {
   ensureTaskRelationsTable,
   ensureTaskAssignmentNotificationsColumns,
   ensureNotesColumns,
+  ensureTaskAuditLogTable,
 } = require('./utils/dbMigrations');
 
 
@@ -252,6 +253,13 @@ const startServer = async () => {
       await ensureNotesColumns(pool);
     } catch (notesErr) {
       console.error('⚠️ Database migration (Notes columns) failed. Server continues running.', notesErr);
+    }
+
+    // --- جدول سجل إجراءات المهام ---
+    try {
+      await ensureTaskAuditLogTable(pool);
+    } catch (auditErr) {
+      console.error('⚠️ Database migration (TaskAuditLog) failed. Server continues running.', auditErr);
     }
     
     app.listen(port, '0.0.0.0', () => {

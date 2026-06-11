@@ -15,6 +15,9 @@ router.get('/with-notifications', taskController.getTasksWithNotifications);
 // GET /api/tasks/activity (للحصول على آخر التحديثات: مهمة/مهمة فرعية/تعليق)
 router.get('/activity', taskController.getTaskActivity);
 
+// GET /api/tasks/audit-log (سجل إجراءات المهام: إتمام / إلغاء / حذف / دمج)
+router.get('/audit-log', taskController.getTaskAuditLog);
+
 // GET /api/tasks/completed (للحصول على المهام المكتملة/الملغاة عند الحاجة)
 router.get('/completed', taskController.getCompletedTasks);
 

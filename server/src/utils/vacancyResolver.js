@@ -270,6 +270,135 @@ async function ensureVacancyId(pool, reqUser) {
   return await resolveVacancyId(pool, reqUser.userId);
 }
 
+// ---------------------------------------------------------------------------
+// resolveIndependentDeptGroup
+// ---------------------------------------------------------------------------
+// دالة عامة: تأخذ رقم القسم وتعيد جميع أرقام الأقسام الفرعية للقسم المستقل
+// الأب (أو القسم نفسه إذا كان مستقلاً).
+//
+// الخوارزمية:
+//   1. إذا كان القسم type=1 (مستقل) → اجلب جميع أقسامه الدنيا.
+//   2. إذا لم يكن type=1 → اصعد في الشجرة حتى تجد الأب المستقل (type=1)
+//      ثم اجلب جميع أقسامه الدنيا.
+//   3. إذا لم يُعثر على أب مستقل → استخدم القسم الحالي كجذر.
+//
+// fallback: إذا لم يكن هناك عمود أب في جدول الأقسام → يُعيد [deptId] فقط.
+// ---------------------------------------------------------------------------
+async function resolveIndependentDeptGroup(pool, deptId) {
+  const deptIdInt = parseInt(String(deptId || '').trim(), 10);
+  if (!deptIdInt || isNaN(deptIdInt)) return [];
+
+  try {
+    const probe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+        CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+        CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasType
+    `);
+    const p = probe.recordset[0] || {};
+    const parentCol = p.HasParentDeptID ? 'ParentDepartmentID'
+                    : p.HasParentID     ? 'ParentID'
+                    : null;
+
+    if (!parentCol) {
+      // لا يوجد هيكل شجري — نعيد القسم نفسه
+      return [deptIdInt];
+    }
+
+    let rootId = deptIdInt;
+
+    if (p.HasType) {
+      // اصعد في الشجرة للعثور على أقرب قسم مستقل (Type=1)، قد يكون القسم نفسه
+      const upRes = await pool.request()
+        .input('DeptID', sql.Int, deptIdInt)
+        .query(`
+          ;WITH UpTree AS (
+            SELECT DepartmentID,
+                   TRY_CAST(${parentCol} AS INT)  AS ParentDeptID,
+                   TRY_CAST([Type] AS INT)         AS DeptType,
+                   0 AS Depth
+            FROM dbo.Departments
+            WHERE DepartmentID = @DeptID
+            UNION ALL
+            SELECT d.DepartmentID,
+                   TRY_CAST(d.${parentCol} AS INT),
+                   TRY_CAST(d.[Type] AS INT),
+                   u.Depth + 1
+            FROM dbo.Departments d
+            INNER JOIN UpTree u
+                    ON u.ParentDeptID IS NOT NULL
+                   AND d.DepartmentID = u.ParentDeptID
+          )
+          SELECT TOP 1 DepartmentID
+          FROM UpTree
+          WHERE DeptType = 1
+          ORDER BY Depth ASC
+          OPTION (MAXRECURSION 100)
+        `);
+      if (upRes.recordset[0]?.DepartmentID != null) {
+        rootId = parseInt(upRes.recordset[0].DepartmentID, 10);
+      }
+      // إذا لم يُعثر على أب مستقل → rootId يبقى = deptIdInt (القسم نفسه كجذر)
+    }
+
+    // انزل من الجذر لجلب جميع الأقسام الفرعية (الجذر + أبناؤه + أحفاده...)
+    const downRes = await pool.request()
+      .input('RootID', sql.Int, rootId)
+      .query(`
+        ;WITH DeptTree AS (
+          SELECT DepartmentID
+          FROM dbo.Departments
+          WHERE DepartmentID = @RootID
+          UNION ALL
+          SELECT d.DepartmentID
+          FROM dbo.Departments d
+          INNER JOIN DeptTree dt
+                  ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
+                 AND TRY_CAST(d.${parentCol} AS INT) = dt.DepartmentID
+        )
+        SELECT DISTINCT DepartmentID FROM DeptTree
+        OPTION (MAXRECURSION 300)
+      `);
+
+    const ids = downRes.recordset
+      .map(r => parseInt(r.DepartmentID, 10))
+      .filter(v => !isNaN(v) && v > 0);
+
+    return ids.length > 0 ? ids : [deptIdInt];
+
+  } catch (err) {
+    console.error('resolveIndependentDeptGroup error:', err?.message || err);
+    return [deptIdInt];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// resolveIndependentDeptGroupByVacancy
+// ---------------------------------------------------------------------------
+// مثل resolveIndependentDeptGroup لكنّ المدخل رقم منصب (VacancyID).
+// يجلب DepartmentID للمنصب ثم يستدعي resolveIndependentDeptGroup.
+// ---------------------------------------------------------------------------
+async function resolveIndependentDeptGroupByVacancy(pool, vacancyId) {
+  const vid = parseInt(String(vacancyId || '').trim(), 10);
+  if (!vid || isNaN(vid)) return [];
+  try {
+    const hasCol = await pool.request().query(`
+      SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='JobVacancies' AND COLUMN_NAME='DepartmentID'
+    `);
+    if (!hasCol.recordset[0]?.cnt) return [];
+    const res = await pool.request()
+      .input('VID', sql.Int, vid)
+      .query('SELECT TOP 1 DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @VID');
+    const deptId = res.recordset[0]?.DepartmentID;
+    if (deptId == null) return [];
+    return resolveIndependentDeptGroup(pool, deptId);
+  } catch (err) {
+    console.error('resolveIndependentDeptGroupByVacancy error:', err?.message || err);
+    return [];
+  }
+}
+
 module.exports = {
   detectSchema,
   invalidateSchemaCache,
@@ -278,4 +407,6 @@ module.exports = {
   ensureVacancyId,
   normalizeUserId,
   isNumericInt,
+  resolveIndependentDeptGroup,
+  resolveIndependentDeptGroupByVacancy,
 };
