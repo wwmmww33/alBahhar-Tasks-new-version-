@@ -1,6 +1,6 @@
 // src/components/UnifiedTimeline.tsx
 import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users } from 'lucide-react';
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
@@ -125,6 +125,15 @@ const UnifiedTimeline = ({
   // New Task Bulk State
   const [isNewTaskBulkModalOpen, setIsNewTaskBulkModalOpen] = useState(false);
   const [newSubtaskBulkUsers, setNewSubtaskBulkUsers] = useState<string[]>([]);
+
+  const autoResize = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }, []);
+
+  const newCommentRef = useRef<HTMLTextAreaElement>(null);
+  const editingCommentRef = useRef<HTMLTextAreaElement>(null);
 
   const actingUserId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   const userActorId = (user: User) => String(resolveUserActorId(user) || user.UserID);
@@ -850,8 +859,10 @@ const UnifiedTimeline = ({
             {isEditing ? (
               <textarea
                 autoFocus
+                ref={(el) => { (editingCommentRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = el; autoResize(el); }}
                 value={editingCommentValue}
-                onChange={(e) => setEditingCommentValue(e.target.value)}
+                onChange={(e) => { setEditingCommentValue(e.target.value); autoResize(e.target); }}
+                onPaste={(e) => { setTimeout(() => autoResize(e.target as HTMLTextAreaElement), 0); }}
                 onBlur={async () => {
                   const trimmed = editingCommentValue.trim();
                   if (trimmed && trimmed !== comment.Content) {
@@ -872,7 +883,7 @@ const UnifiedTimeline = ({
                     setEditingCommentId(null);
                   }
                 }}
-                className="w-full p-2 border border-content/20 rounded bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm mb-2"
+                className="w-full p-2 border border-content/20 rounded bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm mb-2 resize-none overflow-hidden"
                 rows={3}
               />
             ) : (
@@ -1135,12 +1146,14 @@ const UnifiedTimeline = ({
         <form onSubmit={handleCommentSubmit}>
           <div className="mb-3">
             <textarea
+              ref={newCommentRef}
               value={newComment}
-              onChange={(e) => setNewComment(e.target.value)}
+              onChange={(e) => { setNewComment(e.target.value); autoResize(e.target); }}
+              onPaste={(e) => { setTimeout(() => autoResize(e.target as HTMLTextAreaElement), 0); }}
               placeholder="أضف تعليقاً..."
               rows={3}
               required
-              className="w-full p-2 border rounded-md bg-bkg border-content/20 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+              className="w-full p-2 border rounded-md bg-bkg border-content/20 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 resize-none overflow-hidden"
             />
           </div>
           

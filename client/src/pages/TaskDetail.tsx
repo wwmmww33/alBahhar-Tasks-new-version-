@@ -610,6 +610,18 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                   className="flex-1 p-1 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-content text-sm"
                 />
                 <button
+                  onClick={async () => {
+                    try {
+                      const text = await navigator.clipboard.readText();
+                      if (text.trim()) setUrlInput(text.trim());
+                    } catch {}
+                  }}
+                  className="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-content border border-content/20 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 text-sm"
+                  title="لصق من الحافظة"
+                >
+                  لصق
+                </button>
+                <button
                   onClick={() => handleUpdateTaskURL(urlInput.trim() ? urlInput.trim() : null)}
                   disabled={isUpdatingURL}
                   className="px-2 py-1 bg-primary text-white rounded-md hover:bg-primary/90 disabled:bg-gray-400 text-sm"
@@ -649,12 +661,29 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                   <span className="text-content-secondary italic">لا يوجد رابط</span>
                 )}
                 {canEditTaskDetails && (
-                  <button
-                    onClick={() => { setIsEditingURL(true); setUrlInput((task as any)?.URL || ''); }}
-                    className="text-sm text-primary hover:underline"
-                  >
-                    {(task as any)?.URL ? 'تعديل' : 'إضافة رابط'}
-                  </button>
+                  <>
+                    <button
+                      onClick={() => { setIsEditingURL(true); setUrlInput((task as any)?.URL || ''); }}
+                      className="text-sm text-primary hover:underline"
+                    >
+                      {(task as any)?.URL ? 'تعديل' : 'إضافة رابط'}
+                    </button>
+                    {!(task as any)?.URL && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            const text = await navigator.clipboard.readText();
+                            if (text.trim()) {
+                              await handleUpdateTaskURL(text.trim());
+                            }
+                          } catch {}
+                        }}
+                        className="text-sm text-primary hover:underline"
+                      >
+                        لصق الرابط
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             )}

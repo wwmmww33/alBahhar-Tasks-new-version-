@@ -49,6 +49,7 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
     : null;
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [taskUrl, setTaskUrl] = useState('');
   const getTodayString = () => new Date().toISOString().split('T')[0];
   const [dueDate, setDueDate] = useState(getTodayString()); // القيمة الافتراضية هي اليوم
   
@@ -138,6 +139,7 @@ const handleSubmit = async (e: React.FormEvent) => {
     CreatedBy: actingUserId,
     ActedBy: _isDelegationMode ? delegateUserId : actingUserId,
     CategoryID: selectedCategory ? parseInt(selectedCategory) : null,
+    URL: taskUrl.trim() || null,
   };
 
   try {
@@ -256,7 +258,33 @@ const handleSubmit = async (e: React.FormEvent) => {
           <label htmlFor="dueDate" className="block text-sm font-medium text-content-secondary">تاريخ الاستحقاق</label>
           <input type="date" id="dueDate" value={dueDate} onChange={(e) => setDueDate(e.target.value)} required className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"/>
         </div>
-        
+
+        <div>
+          <label htmlFor="taskUrl" className="block text-sm font-medium text-content-secondary">الرابط الخارجي (اختياري)</label>
+          <div className="mt-1 flex gap-2">
+            <input
+              type="url"
+              id="taskUrl"
+              value={taskUrl}
+              onChange={(e) => setTaskUrl(e.target.value)}
+              placeholder="https://example.com/path"
+              className="flex-1 px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary text-sm"
+            />
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const text = await navigator.clipboard.readText();
+                  if (text.trim()) setTaskUrl(text.trim());
+                } catch {}
+              }}
+              className="px-3 py-2 text-sm border border-content/20 bg-bkg rounded-md hover:bg-content/10 text-content-secondary whitespace-nowrap"
+            >
+              لصق الرابط
+            </button>
+          </div>
+        </div>
+
         {subtasks.length > 0 && (
           <div>
             <h3 className="text-lg font-medium text-content mb-2">المهام الفرعية المقترحة</h3>

@@ -6,105 +6,7 @@ git commit -m "شرح مختصر للتعديلات اللي سويتها"
 git push                  # يرفع التعديلات إلى GitHub
 
 
-git reset --hard 06b262d استعادة الملفات الى نقطة معينه
 
-
-
-a1b2c3d (HEAD -> master) Fix login validation
-9f8e7d6 Add login page
-1234567 Initial commit - first version of web app
-
-الحالة 1️⃣: أبغى أشوف النسخة القديمة بس (بدون ما ألمس الشغل الحالي)
-git checkout 1234567
-
-
-
-لو خلصت وتبي ترجع لأحدث نسخة (مثلاً الفرع master أو main):
-git checkout master
-او
-git checkout main
-
-
-الحالة 2️⃣ (المفضلة): أريد أبدأ تعديلات جديدة انطلاقًا من نسخة قديمة
-الأفضل تسوي فرع جديد من النسخة القديمة وتشتغل عليه، بدون ما تخرب تاريخ الفرع الأساسي.
-الفكرة:
-
-عندك مثلاً الفرع الأساسي: master
-
-عندك نسخة قديمة برقم: 1234567
-
-بنسوي فرع جديد يبدأ من النسخة القديمة مثلاً اسمه: old-fix
-
-git switch -c old-fix 1234567
-لو الأمر switch ما اشتغل، استخدم:
-git checkout -b old-fix 1234567
-
-
-old-fix = اسم الفرع الجديد (تقدر تسميه أي شيء يناسبك).
-
-بعد هالأمر:
-
-الملفات في المجلد تصير مثل ما كانت في النسخة القديمة.
-
-وتكون الآن واقف على فرع جديد مستقل.
-
-الآن اشتغل عادي:
-
-عدّل الملفات.
-
-بعد كل مجموعة تعديلات:
-git add .
-git commit -m "تعديل انطلاقًا من النسخة القديمة"
-
-
-لو تبغى ترجع للفرع الأساسي:
-
-bash
-Copy code
-git switch master
-# أو
-git checkout master
-
-وتقدر تنتقل بين الفرعين متى ما حبيت:
-
-git switch old-fix
-git switch master
-
-
-
-الحالة 3️⃣ (خطِرة): أريد الفرع الرئيسي نفسه يرجع لنسخة قديمة
-
-و الفرع عندك اسمه master وتبغاه يرجع للنسخة 1234567:
-تأكد إنك على نفس الفرع:
-
-git checkout master
-
-
-نفّذ:
-
-git reset --hard 1234567
-
-
-هذا يسوي:
-
-يحرك مؤشر الفرع master إلى النسخة القديمة.
-
-يعدّل الملفات في المجلد لتطابق تلك النسخة.
-
-أي commits بعدها تختفي من تاريخ الفرع.
-
-ما أنصحك تبدأ بهالطريقة الآن، الأفضل تجرب الحالة 2 (فرع جديد من النسخة القديمة) لين ترتاح مع Git.
-
-
-
-
-
-خطوات بناء التطبيق
-cd client
-npm run build
-
-cd server
-npm run build
 
 
 
@@ -116,3 +18,35 @@ taskkill /f /im node.exe
 
 
 resolveIndependentDeptGroup 
+
+----------------------------------
+خطوات البناء والتصدير
+1-
+cd "c:\Users\RNO\Desktop\NewTask - V10 url - Copy (3) - cluade\client"
+npm run build
+
+ما يفعله: يُحوّل كود React/TypeScript إلى ملفات HTML/JS/CSS جاهزة في مجلد client/dist.
+
+متى تحتاجه: فقط إذا عدّلت ملفات داخل مجلد client/src.
+
+
+2-
+cd "c:\Users\RNO\Desktop\NewTask - V10 url - Copy (3) - cluade\server"
+Stop-Process -Name "bahar" -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; node build.mjs
+ما يفعله داخلياً بالترتيب:
+#	الخطوة	الناتج
+1	يقرأ ملفات client/dist ويحوّلها إلى base64 داخل ملف JS	src/inlinedDist.generated.js
+2	يجمع كل كود الـ Server في ملف واحد (esbuild)	bundle.js
+3	ينسخ ملف .env إلى مجلد release/	release/.env
+4	يُنشئ SEA blob من bundle.js	sea-prep.blob (مؤقت)
+5	ينسخ node.exe ثم يحقن الـ blob فيه	release/bahar.exe
+6	يحذف الملفات المؤقتة
+
+3-
+الخطوة البديلة — إذا كان الـ RAM محدوداً (pack-only)
+إذا ظهر خطأ "ArrayBuffer allocation failed" أثناء البناء:
+
+
+cd "c:\Users\RNO\Desktop\NewTask - V10 url - Copy (3) - cluade\server"
+node pack-only.mjs
+الفرق: يتجاوز خطوة esbuild ويستخدم bundle.js الموجود مسبقاً، ويكمل فقط خطوات SEA (4 و5 و6). مفيد عندما عدّلت كود الـ Server فقط وتريد تجنب الضغط على الذاكرة.

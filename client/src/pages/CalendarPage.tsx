@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Calendar as CalendarIcon, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, FileDown } from 'lucide-react';
 import type { CurrentUser } from '../types';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
+import { exportCalendarToPdf } from '../utils/calendarPdfExport';
 
 type CalendarItem = {
   SubtaskID: number;
@@ -592,7 +593,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
       ) : (
         <>
           {viewMode === 'month' && (
-            <div className="flex items-center gap-2 justify-end">
+            <div className="flex items-center gap-2 justify-end flex-wrap">
               <span className="text-xs text-content-secondary">طريقة عرض الشهر:</span>
               <button
                 type="button"
@@ -616,14 +617,29 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
               >
                 شبكة مربعات
               </button>
+              <button
+                type="button"
+                onClick={() => exportCalendarToPdf({
+                  monthLabel: rangeLabel,
+                  dateRange,
+                  displayItems,
+                  personalByDay,
+                  commentsByDay,
+                })}
+                className="flex items-center gap-1 px-2 py-1 text-xs rounded border bg-white dark:bg-gray-700 text-content border-content/20 hover:bg-gray-50 dark:hover:bg-gray-600"
+                title="تصدير التقويم الشهري كـ PDF"
+              >
+                <FileDown className="w-3 h-3" />
+                تصدير PDF
+              </button>
             </div>
           )}
 
           {viewMode === 'month' && viewLayout === 'grid' ? (
             <div className="mt-3 border rounded-lg overflow-hidden">
               <div className="grid grid-cols-7 bg-content/5 text-xs font-semibold text-center py-2">
-                {['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'].map((label) => (
-                  <div key={label}>{label}</div>
+                {['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'].map((label, i) => (
+                  <div key={label} className={i === 5 || i === 6 ? 'text-gray-400 dark:text-gray-500' : ''}>{label}</div>
                 ))}
               </div>
               <div className="border-t border-content/10">
@@ -683,7 +699,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                     }
 
                     const maxLane = bars.length > 0 ? Math.max(...bars.map(b => b.lane)) : -1;
-                    const barAreaH = maxLane >= 0 ? (maxLane + 1) * 22 + 4 : 0;
+                    const barAreaH = maxLane >= 0 ? (maxLane + 1) * 14 + 4 : 0;
 
                     return (
                       <div key={weekIdx}>
@@ -703,10 +719,10 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                                 title={`${bar.item.SubtaskTitle}${bar.item.AssignedToName ? ` (${bar.item.AssignedToName})` : ''} — ضمن: ${bar.item.TaskTitle}`}
                                 style={{
                                   position: 'absolute',
-                                  top:   `${bar.lane * 22 + 2}px`,
+                                  top:   `${bar.lane * 14 + 2}px`,
                                   right:  `calc(${(bar.startCol / 7) * 100}% + ${bar.isFirst ? 2 : 0}px)`,
                                   width: `calc(${((bar.endCol - bar.startCol + 1) / 7) * 100}% - ${(bar.isFirst ? 2 : 0) + (bar.isLast ? 2 : 0)}px)`,
-                                  height: '18px',
+                                  height: '8px',
                                   backgroundColor: barColor,
                                 }}
                                 className={[
@@ -728,6 +744,8 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             }
                             const key = toLocalYMD(cell.date);
                             const isToday = key === todayKey;
+                            const dayOfWeek = cell.date.getDay();
+                            const isWeekend = dayOfWeek === 5 || dayOfWeek === 6;
                             const sharedForDay   = singleDayMap[key] || [];
                             const personalForDay = (viewFilter === 'both' || viewFilter === 'personal') ? (personalByDay[key] || []) : [];
                             const commentsForDay = viewFilter !== 'personal' ? (commentsByDay[key] || []) : [];
@@ -741,9 +759,11 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                                 className={`h-24 border p-1 flex flex-col ${
                                   isToday
                                     ? 'bg-yellow-100 dark:bg-yellow-900 border-yellow-400 dark:border-yellow-500'
-                                    : hasEvents
-                                      ? 'bg-white dark:bg-gray-900 border-content/10'
-                                      : 'bg-white/60 dark:bg-gray-900/40 border-content/10'
+                                    : isWeekend
+                                      ? 'bg-gray-100 dark:bg-gray-800/70 border-content/10'
+                                      : hasEvents
+                                        ? 'bg-white dark:bg-gray-900 border-content/10'
+                                        : 'bg-white/60 dark:bg-gray-900/40 border-content/10'
                                 }`}
                               >
                                 <div className="flex items-center justify-between mb-1">

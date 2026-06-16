@@ -737,7 +737,7 @@ exports.assignTask = async (req, res) => {
 
 exports.createTask = async (req, res) => {
   // createTask المصحح — يدعم مخطط VacancyID الجديد ومخطط UserID القديم
-  const { Title, Description, DepartmentID, Priority, DueDate, subtasks, CreatedBy, ActedBy, CategoryID } = req.body;
+  const { Title, Description, DepartmentID, Priority, DueDate, subtasks, CreatedBy, ActedBy, CategoryID, URL } = req.body;
   const encryptedDescription = Description ? encryptionConfig.encrypt(Description) : null;
   const encryptedTitle = encryptionConfig.encrypt(Title);
 
@@ -775,8 +775,8 @@ exports.createTask = async (req, res) => {
     }
 
     // بناء INSERT لجدول Tasks ديناميكياً
-    const taskCols = ['Title', 'Description', 'DepartmentID', 'Priority', 'DueDate', 'Status', 'CategoryID'];
-    const taskVals = ['@Title', '@Description', '@DepartmentID', '@Priority', '@DueDate', '\'open\'', '@CategoryID'];
+    const taskCols = ['Title', 'Description', 'DepartmentID', 'Priority', 'DueDate', 'Status', 'CategoryID', 'URL'];
+    const taskVals = ['@Title', '@Description', '@DepartmentID', '@Priority', '@DueDate', '\'open\'', '@CategoryID', '@URL'];
 
     const taskRequest = new sql.Request(transaction)
       .input('Title', sql.NVarChar, encryptedTitle)
@@ -784,7 +784,8 @@ exports.createTask = async (req, res) => {
       .input('DepartmentID', sql.Int, DepartmentID)
       .input('Priority', sql.NVarChar, Priority || 'normal')
       .input('DueDate', sql.DateTime, new Date(DueDate))
-      .input('CategoryID', sql.Int, CategoryID || null);
+      .input('CategoryID', sql.Int, CategoryID || null)
+      .input('URL', sql.NVarChar, URL ? String(URL).slice(0, 1000) : null);
 
     // CreatedBy — VacancyID إن توفر، وإلا UserID نصي
     if (schema.hasTasksCreatedByVacancy) {
