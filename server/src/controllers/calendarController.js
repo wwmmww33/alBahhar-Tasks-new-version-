@@ -18,6 +18,7 @@ async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
 
   let rootDepartmentId = normalizedBaseDepartmentId;
   if (s.HasDepartmentType) {
+    // نقيّد الصعود بـ 3 مستويات لمنع الوصول إلى جذر مشترك يخترق عزل الجهات المستقلة
     const root = await pool.request()
       .input('DepartmentID', sql.NVarChar, normalizedBaseDepartmentId)
       .query(`
@@ -29,13 +30,14 @@ async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
           SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
           FROM dbo.Departments d
           INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
+          WHERE u.Depth < 3
         )
         SELECT TOP 1 u.DepartmentID
         FROM UpTree u
         INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
         WHERE TRY_CAST(d.[Type] AS INT) = 1 OR LTRIM(RTRIM(CAST(d.[Type] AS NVARCHAR(50)))) = N'1'
         ORDER BY u.Depth ASC
-        OPTION (MAXRECURSION 100)
+        OPTION (MAXRECURSION 10)
       `);
     if (root.recordset[0]?.DepartmentID != null) {
         rootDepartmentId = String(root.recordset[0].DepartmentID).trim();
