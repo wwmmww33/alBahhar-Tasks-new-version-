@@ -3,6 +3,27 @@ const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 const { checkTaskAccess } = require('../utils/delegationUtils');
 
+// يحوّل VacancyID رقمي → UserID حقيقي (للتحقق من ملكية المهام الشخصية)
+async function resolveUserIDForPersonal(pool, rawActorId) {
+  const text = String(rawActorId || '').trim();
+  if (!text || !/^\d+$/.test(text)) return text;
+  try {
+    const res = await pool.request()
+      .input('VacancyID', sql.Int, parseInt(text, 10))
+      .query(`
+        IF OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL
+          SELECT TOP 1 LTRIM(RTRIM(UserID)) AS UserID
+          FROM dbo.Assignments
+          WHERE VacancyID = @VacancyID
+          ORDER BY CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
+                   ISNULL(StartDate, '1900-01-01') DESC;
+      `);
+    const uid = res.recordset[0]?.UserID;
+    if (uid) return String(uid).trim();
+  } catch (_) {}
+  return text;
+}
+
 const resolveActingUserId = (req) => {
   return String(
     req.body?.UserID ||
@@ -493,7 +514,22 @@ exports.updateSubtaskStatus = async (req, res) => {
     const actingUserId = resolveActingUserId(req);
     const isAssignee = await isActorSubtaskAssignee(pool, subtaskResult.recordset[0], actingUserId);
     if (!isAssignee) {
-      return res.status(403).json({ message: 'فقط الشخص المسندت له المهمة الفرعية يمكنه تغيير حالة الإكمال.' });
+      // استثناء: أصحاب المهام الشخصية لديهم صلاحية كاملة على مهامهم الفرعية
+      const personalColProbe = await pool.request().query(
+        `SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`
+      );
+      if (personalColProbe.recordset[0]?.Len) {
+        const resolvedUID = await resolveUserIDForPersonal(pool, actingUserId);
+        const personalCheck = await pool.request()
+          .input('TaskID', sql.Int, subtaskResult.recordset[0].TaskID)
+          .input('OwnerUID', sql.NVarChar, resolvedUID)
+          .query(`SELECT 1 as IsOwner FROM dbo.Tasks WHERE TaskID = @TaskID AND PersonalOwnerUserID = @OwnerUID`);
+        if (!personalCheck.recordset.length) {
+          return res.status(403).json({ message: 'فقط الشخص المسندت له المهمة الفرعية يمكنه تغيير حالة الإكمال.' });
+        }
+      } else {
+        return res.status(403).json({ message: 'فقط الشخص المسندت له المهمة الفرعية يمكنه تغيير حالة الإكمال.' });
+      }
     }
 
     await pool.request()

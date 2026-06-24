@@ -7,7 +7,14 @@ type DisplayItem = {
   AssignedToName?: string;
 };
 
-type PersonalItem = { EventID: number; Title: string };
+type PersonalItem = {
+  SubtaskID?: number;
+  TaskID?: number;
+  SubtaskTitle?: string;
+  TaskTitle?: string;
+  EventID?: number;
+  Title?: string;
+};
 type CommentItem  = { CommentID: number; Content: string; TaskTitle: string };
 
 export type CalendarPdfParams = {
@@ -154,9 +161,11 @@ export function exportCalendarToPdf(p: CalendarPdfParams): void {
         return `<div class="item-row" style="color:${c};">${it.SubtaskID}◀ ${esc(it.SubtaskTitle)}${person}${task}</div>`;
       }).join('');
 
-      const personalHTML = personal.map(ev =>
-        `<div class="item-row" style="color:#059669;">${ev.EventID}★ ${esc(ev.Title)}</div>`
-      ).join('');
+      const personalHTML = personal.map(ev => {
+        const id = ev.SubtaskID ?? ev.TaskID ?? ev.EventID ?? '';
+        const label = ev.SubtaskTitle ?? ev.TaskTitle ?? ev.Title ?? '';
+        return `<div class="item-row" style="color:#059669;">${id}★ ${esc(label)}</div>`;
+      }).join('');
 
       const commentsHTML = comments.map(cm =>
         `<div class="item-row" style="color:#7c3aed;">${cm.CommentID}💬 ${esc(cm.Content)}</div>`

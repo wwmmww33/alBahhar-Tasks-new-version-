@@ -1,6 +1,27 @@
 // src/utils/delegationUtils.js
 const sql = require('mssql');
 
+// يحوّل VacancyID رقمي → UserID حقيقي لمقارنة PersonalOwnerUserID
+async function resolveUserIDFromActor(pool, rawActorId) {
+  const text = String(rawActorId || '').trim();
+  if (!text || !/^\d+$/.test(text)) return text;
+  try {
+    const res = await pool.request()
+      .input('VacancyID', sql.Int, parseInt(text, 10))
+      .query(`
+        IF OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL
+          SELECT TOP 1 LTRIM(RTRIM(UserID)) AS UserID
+          FROM dbo.Assignments
+          WHERE VacancyID = @VacancyID
+          ORDER BY CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
+                   ISNULL(StartDate, '1900-01-01') DESC;
+      `);
+    const uid = res.recordset[0]?.UserID;
+    if (uid) return String(uid).trim();
+  } catch (_) {}
+  return text;
+}
+
 async function detectIdentitySchema(pool) {
   const result = await pool.request().query(`
     SELECT
@@ -256,12 +277,23 @@ async function getDelegatesForUser(pool, delegatorUserId) {
   }
 }
 
-async function getTasksQueryWithDelegation(pool, userId, isAdmin) {
+async function getTasksQueryWithDelegation(pool, userId, isAdmin, originalUserId = null) {
   try {
     const schema = await detectIdentitySchema(pool);
+
+    // فحص وجود عمود المهام الشخصية
+    const personalColCheck = await pool.request().query(
+      `SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`
+    );
+    const hasPersonalCol = !!(personalColCheck.recordset[0]?.Len);
+    const personalUserIdParam = originalUserId ? String(originalUserId).trim() : null;
+    const personalExpr = (hasPersonalCol && personalUserIdParam)
+      ? `t.PersonalOwnerUserID = @PersonalUserID`
+      : null;
+
     const ownerExpr = `t.${schema.taskCreatorCol} = @UserID`;
     const subtaskExpr = `EXISTS (SELECT 1 FROM Subtasks s_inner WHERE s_inner.TaskID = t.TaskID AND s_inner.${schema.subtaskAssignedCol} = @UserID)`;
-    const delegationExpr = `EXISTS (
+    const delegationExpr = `(${hasPersonalCol ? `t.PersonalOwnerUserID IS NULL AND ` : ''}EXISTS (
                  SELECT 1
                  FROM TaskDelegations d_acc
                  WHERE d_acc.${schema.delegatorCol} = t.${schema.taskCreatorCol}
@@ -269,12 +301,13 @@ async function getTasksQueryWithDelegation(pool, userId, isAdmin) {
                    AND d_acc.IsActive = 1
                    AND d_acc.StartDate <= GETDATE()
                    AND (d_acc.EndDate IS NULL OR d_acc.EndDate >= GETDATE())
-               )`;
+               ))`;
 
     const accessParts = [ownerExpr, subtaskExpr, delegationExpr];
     if (schema.taskAssignedCol) {
       accessParts.splice(1, 0, `t.${schema.taskAssignedCol} = @UserID`);
     }
+    if (personalExpr) accessParts.push(personalExpr);
     const accessWhere = accessParts.join('\n          OR ');
 
     const assigneeSelect = schema.taskAssignedCol ? `
@@ -287,19 +320,26 @@ async function getTasksQueryWithDelegation(pool, userId, isAdmin) {
       ? `LEFT JOIN ${schema.identityTable} assignee ON t.${schema.taskAssignedCol} = assignee.${schema.identityKey}`
       : '';
 
+    // فلتر شامل للمهام الشخصية — يُطبَّق على الجميع (admin/non-admin/delegation)
+    // عند personalExpr = null (وضع التفويض): يُصبح AND t.PersonalOwnerUserID IS NULL
+    const globalPersonalFilter = hasPersonalCol
+      ? `AND (t.PersonalOwnerUserID IS NULL${personalExpr ? ` OR ${personalExpr}` : ''})`
+      : '';
+
     if (isAdmin) {
       return `
         SELECT t.*,
                creator.${schema.identityName} as CreatedByName,
                acted.${schema.identityName} as ActedByName,${assigneeSelect}
                c.Name as CategoryName,
-               CASE WHEN ${ownerExpr} THEN 'owner' ELSE 'admin' END as AccessType
+               CASE WHEN ${ownerExpr}${personalExpr ? ` OR ${personalExpr}` : ''} THEN 'owner' ELSE 'admin' END as AccessType
         FROM Tasks t
         LEFT JOIN ${schema.identityTable} creator ON t.${schema.taskCreatorCol} = creator.${schema.identityKey}
         LEFT JOIN ${schema.identityTable} acted ON COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${schema.taskCreatorCol}) = acted.${schema.identityKey}
         ${assigneeJoin}
         LEFT JOIN Categories c ON t.CategoryID = c.CategoryID
         WHERE t.Status NOT IN ('completed', 'cancelled')
+          ${globalPersonalFilter}
         ORDER BY t.CreatedAt DESC
       `;
     }
@@ -307,8 +347,8 @@ async function getTasksQueryWithDelegation(pool, userId, isAdmin) {
     return `
       SELECT DISTINCT t.*, creator.${schema.identityName} as CreatedByName, acted.${schema.identityName} as ActedByName,${assigneeSelect}
              c.Name as CategoryName,
-             CASE 
-               WHEN ${ownerExpr} THEN 'owner'
+             CASE
+               WHEN ${personalExpr ? `${personalExpr} THEN 'owner' WHEN ` : ''}${ownerExpr} THEN 'owner'
                WHEN ${delegationExpr} THEN 'delegated'
                ELSE 'assigned'
              END as AccessType
@@ -321,6 +361,7 @@ async function getTasksQueryWithDelegation(pool, userId, isAdmin) {
         AND (
           ${accessWhere}
         )
+        ${globalPersonalFilter}
       ORDER BY t.CreatedAt DESC
     `;
   } catch (error) {
@@ -461,6 +502,7 @@ async function hasDirectorateAccessByTaskDepartment(pool, effectiveActorId, task
         SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
         FROM dbo.Departments d
         INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
+        WHERE u.Depth < 3
       )
       SELECT TOP 1 DepartmentID
       FROM (
@@ -470,7 +512,7 @@ async function hasDirectorateAccessByTaskDepartment(pool, effectiveActorId, task
         WHERE ${p.HasDepartmentType ? 'd.[Type] = 1' : '1=0'}
       ) x
       ORDER BY x.Depth ASC
-      OPTION (MAXRECURSION 100)
+      OPTION (MAXRECURSION 10)
     `);
 
   const rootDepartmentId = String(rootOrSelfResult.recordset[0]?.DepartmentID || actorDepartmentId).trim();
@@ -506,25 +548,43 @@ async function checkTaskAccess(pool, taskId, userId, isAdmin, requiredPermission
     const normalizedUserId = userId == null ? '' : String(userId).trim();
     const schema = await detectIdentitySchema(pool);
     const effectiveActorId = await resolveAccessActorId(pool, normalizedUserId, schema);
+
+    // فحص وجود عمود المهام الشخصية
+    const personalColCheck = await pool.request().query(
+      `SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`
+    );
+    const hasPersonalCol = !!(personalColCheck.recordset[0]?.Len);
+    const personalColSelect = hasPersonalCol ? ', PersonalOwnerUserID' : '';
+
     const taskRequest = pool.request();
     taskRequest.input('taskId', sql.Int, taskId);
-    
+
     const taskResult = await taskRequest.query(`
-      SELECT TaskID, ${schema.taskCreatorCol} as CreatedBy, Title, DepartmentID${schema.taskAssignedCol ? `, ${schema.taskAssignedCol} as AssignedTo` : ''}
+      SELECT TaskID, ${schema.taskCreatorCol} as CreatedBy, Title, DepartmentID${schema.taskAssignedCol ? `, ${schema.taskAssignedCol} as AssignedTo` : ''}${personalColSelect}
       FROM Tasks
       WHERE TaskID = @taskId
     `);
-    
+
     if (taskResult.recordset.length === 0) {
       return { hasAccess: false, reason: 'المهمة غير موجودة' };
     }
-    
+
     const task = taskResult.recordset[0];
-    
+
+    // المهام الشخصية: خاصة تماماً بصاحبها — لا يصل إليها أحد آخر حتى المدير
+    if (hasPersonalCol && task.PersonalOwnerUserID != null) {
+      // حلّ UserID الأصلي (normalizedUserId قد يكون VacancyID)
+      const resolvedUserId = await resolveUserIDFromActor(pool, normalizedUserId);
+      const personalOwner = String(task.PersonalOwnerUserID).trim();
+      const isOwner = personalOwner === normalizedUserId || personalOwner === resolvedUserId;
+      if (isOwner) return { hasAccess: true, accessType: 'owner', task };
+      return { hasAccess: false, reason: 'المهام الشخصية خاصة بأصحابها فقط' };
+    }
+
     if (isAdmin) {
       return { hasAccess: true, accessType: 'admin', task };
     }
-    
+
     if (String(task.CreatedBy) === effectiveActorId) {
       return { hasAccess: true, accessType: 'owner', task };
     }

@@ -50,8 +50,6 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [taskUrl, setTaskUrl] = useState('');
-  const getTodayString = () => new Date().toISOString().split('T')[0];
-  const [dueDate, setDueDate] = useState(getTodayString()); // القيمة الافتراضية هي اليوم
   
   const [subtasks, setSubtasks] = useState<string[]>([]);
   const [procedures, setProcedures] = useState<Procedure[]>([]);
@@ -60,6 +58,7 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isPersonal, setIsPersonal] = useState(false);
   const [autoDetect, setAutoDetect] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_DETECT_KEY) !== 'false'; } catch { return true; }
   });
@@ -118,7 +117,7 @@ const handleSubmit = async (e: React.FormEvent) => {
   if (isSubmitting) return;
 
   // --- تحقق مهم هنا ---
-  if (!currentUser || currentUser.DepartmentID === null) {
+  if (!isPersonal && (!currentUser || currentUser.DepartmentID === null)) {
       setMessage({ type: 'error', text: 'لا يمكن إنشاء مهمة بدون قسم. يرجى التأكد من أن حسابك مرتبط بقسم.' });
       return;
   }
@@ -130,15 +129,17 @@ const handleSubmit = async (e: React.FormEvent) => {
   const newTaskPayload = {
     Title: title,
     Description: description,
-    DueDate: dueDate,
-    DepartmentID: currentUser.DepartmentID,
+    DueDate: new Date().toISOString(),
+    ...(isPersonal ? {} : { DepartmentID: currentUser.DepartmentID }),
+    IsPersonal: isPersonal,
+    PersonalOwnerUserID: isPersonal ? String(currentUser.UserID) : null,
     Priority: 'normal',
-    Status: 'open', // الحالة الافتراضية: مفتوحة
+    Status: 'open',
     AssignedTo: actingUserId,
     subtasks: subtasks,
     CreatedBy: actingUserId,
     ActedBy: _isDelegationMode ? delegateUserId : actingUserId,
-    CategoryID: selectedCategory ? parseInt(selectedCategory) : null,
+    CategoryID: !isPersonal && selectedCategory ? parseInt(selectedCategory) : null,
     URL: taskUrl.trim() || null,
   };
 
@@ -157,9 +158,12 @@ const handleSubmit = async (e: React.FormEvent) => {
     if (autoDetect && title.trim().length >= 3) {
       try {
         const keyword = title.trim().split(/\s+/).filter(w => w.length > 2)[0] || title.trim();
-        const searchRes = await fetch(
-          getApiUrl(`tasks/search?q=${encodeURIComponent(keyword)}&userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}&excludeTaskId=${newId}`)
-        );
+        // المهام الشخصية: ابحث في المهام الشخصية الخاصة بالمستخدم فقط
+        const deptParam = (!isPersonal && currentUser.DepartmentID != null) ? `&deptId=${currentUser.DepartmentID}` : '';
+        const searchUrl = isPersonal
+          ? getApiUrl(`tasks/search?q=${encodeURIComponent(keyword)}&userId=${actingUserId}&excludeTaskId=${newId}&personalOnly=true&originalUserId=${encodeURIComponent(String(currentUser.UserID))}`)
+          : getApiUrl(`tasks/search?q=${encodeURIComponent(keyword)}&userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}&excludeTaskId=${newId}${deptParam}`);
+        const searchRes = await fetch(searchUrl);
         if (searchRes.ok) {
           const found: SuggestedTask[] = await searchRes.json();
           if (found.length > 0) {
@@ -220,6 +224,28 @@ const handleSubmit = async (e: React.FormEvent) => {
       <h1 className="text-3xl font-bold text-content mb-6">إنشاء مهمة جديدة</h1>
       
       <form onSubmit={handleSubmit} className="space-y-6">
+
+        {/* خيار المهمة الشخصية — لا يظهر في وضع التفويض */}
+        {!_isDelegationMode && (
+          <div className={`flex items-center gap-3 p-3 rounded-lg border-2 cursor-pointer select-none transition-colors ${
+            isPersonal
+              ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20'
+              : 'border-content/10 bg-white dark:bg-gray-700/30 hover:border-content/30'
+          }`}
+            onClick={() => setIsPersonal(v => !v)}
+          >
+            <div className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 ${
+              isPersonal ? 'border-emerald-500 bg-emerald-500' : 'border-content/30'
+            }`}>
+              {isPersonal && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7"/></svg>}
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-content">مهمة شخصية خاصة</div>
+              <div className="text-xs text-content-secondary">مرتبطة بك شخصياً — لا تظهر لأحد غيرك ولا تنتمي لأي قسم</div>
+            </div>
+          </div>
+        )}
+
         <div>
           <label htmlFor="title" className="block text-sm font-medium text-content-secondary">عنوان المهمة</label>
           <input type="text" id="title" value={title} onChange={(e) => setTitle(e.target.value)} required className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"/>
@@ -230,34 +256,32 @@ const handleSubmit = async (e: React.FormEvent) => {
           <textarea id="description" rows={4} value={description} onChange={(e) => setDescription(e.target.value)} className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"/>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label htmlFor="procedure" className="block text-sm font-medium text-content-secondary">اختيار مهمة افتراضية (اختياري)</label>
-            <select id="procedure" value={selectedProcedure} onChange={(e) => handleProcedureChange(e.target.value)}
-              className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary">
-              <option value="">-- اختر مهمة افتراضية --</option>
-              {procedures.map(proc => (
-                <option key={proc.ProcedureID} value={proc.ProcedureID}>{proc.Title}</option>
-              ))}
-            </select>
-          </div>
+        {!isPersonal && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="procedure" className="block text-sm font-medium text-content-secondary">اختيار مهمة افتراضية (اختياري)</label>
+              <select id="procedure" value={selectedProcedure} onChange={(e) => handleProcedureChange(e.target.value)}
+                className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary">
+                <option value="">-- اختر مهمة افتراضية --</option>
+                {procedures.map(proc => (
+                  <option key={proc.ProcedureID} value={proc.ProcedureID}>{proc.Title}</option>
+                ))}
+              </select>
+            </div>
 
-          <div>
-            <label htmlFor="category" className="block text-sm font-medium text-content-secondary">التصنيف (اختياري)</label>
-            <select id="category" value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}
-              className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary">
-              <option value="">بدون تصنيف</option>
-              {categories.map(category => (
-                <option key={category.CategoryID} value={category.CategoryID}>{category.Name}</option>
-              ))}
-            </select>
+            <div>
+              <label htmlFor="category" className="block text-sm font-medium text-content-secondary">التصنيف (اختياري)</label>
+              <select id="category" value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}
+                className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary">
+                <option value="">بدون تصنيف</option>
+                {categories.map(category => (
+                  <option key={category.CategoryID} value={category.CategoryID}>{category.Name}</option>
+                ))}
+              </select>
+            </div>
           </div>
-        </div>
+        )}
 
-        <div>
-          <label htmlFor="dueDate" className="block text-sm font-medium text-content-secondary">تاريخ الاستحقاق</label>
-          <input type="date" id="dueDate" value={dueDate} onChange={(e) => setDueDate(e.target.value)} required className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"/>
-        </div>
 
         <div>
           <label htmlFor="taskUrl" className="block text-sm font-medium text-content-secondary">الرابط الخارجي (اختياري)</label>

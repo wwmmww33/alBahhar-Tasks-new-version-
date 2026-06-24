@@ -116,6 +116,7 @@ const {
   ensureTaskAssignmentNotificationsColumns,
   ensureNotesColumns,
   ensureTaskAuditLogTable,
+  ensurePersonalTasksSupport,
 } = require('./utils/dbMigrations');
 
 
@@ -261,7 +262,14 @@ const startServer = async () => {
     } catch (auditErr) {
       console.error('⚠️ Database migration (TaskAuditLog) failed. Server continues running.', auditErr);
     }
-    
+
+    // --- دعم المهام الشخصية ---
+    try {
+      await ensurePersonalTasksSupport(pool);
+    } catch (personalErr) {
+      console.error('⚠️ Database migration (PersonalTasks) failed. Server continues running.', personalErr);
+    }
+
     app.listen(port, '0.0.0.0', () => {
       console.log(`🚀 Server is running on http://0.0.0.0:${port}`);
       console.log(`🌐 Access from network: http://<your-ip>:${port}`);

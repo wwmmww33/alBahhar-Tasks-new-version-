@@ -17,6 +17,7 @@ type Props = {
   targetTaskTitle: string;
   userId: string;
   isAdmin: boolean;
+  deptId?: number | null;
   onClose: () => void;
   onMerged: () => void;
 };
@@ -29,7 +30,7 @@ const STATUS_LABELS: Record<string, string> = {
   external: 'خارجية',
 };
 
-const MergeTaskModal = ({ targetTaskId, targetTaskTitle, userId, isAdmin, onClose, onMerged }: Props) => {
+const MergeTaskModal = ({ targetTaskId, targetTaskTitle, userId, isAdmin, deptId, onClose, onMerged }: Props) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -48,8 +49,9 @@ const MergeTaskModal = ({ targetTaskId, targetTaskTitle, userId, isAdmin, onClos
     timeoutRef.current = setTimeout(async () => {
       setIsSearching(true);
       try {
+        const deptParam = deptId != null ? `&deptId=${deptId}` : '';
         const res = await fetch(
-          getApiUrl(`tasks/search?q=${encodeURIComponent(val)}&userId=${userId}&isAdmin=${isAdmin}&excludeTaskId=${targetTaskId}`)
+          getApiUrl(`tasks/search?q=${encodeURIComponent(val)}&userId=${userId}&isAdmin=${isAdmin}&excludeTaskId=${targetTaskId}${deptParam}`)
         );
         if (res.ok) setResults(await res.json());
       } finally {

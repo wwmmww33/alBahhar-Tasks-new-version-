@@ -583,4 +583,62 @@ module.exports = {
       throw err;
     }
   },
+
+  // دعم المهام الشخصية: عمود PersonalOwnerUserID + جعل DepartmentID قابلاً للـ NULL
+  ensurePersonalTasksSupport: async function ensurePersonalTasksSupport(pool) {
+    try {
+      // 1. إضافة عمود PersonalOwnerUserID إذا لم يكن موجوداً
+      await pool.request().query(`
+        IF COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID') IS NULL
+          ALTER TABLE dbo.Tasks ADD PersonalOwnerUserID NVARCHAR(255) NULL;
+      `);
+      // 2. جعل DepartmentID قابلاً للـ NULL (مطلوب للمهام الشخصية التي لا تنتمي لقسم)
+      try {
+        await pool.request().query(`
+          ALTER TABLE dbo.Tasks ALTER COLUMN DepartmentID INT NULL;
+        `);
+      } catch (_) { /* سبق تحويله أو توجد قيود تمنعه — آمن للمتابعة */ }
+
+      // 3. backfill: تعبئة PersonalOwnerUserID للمهام الشخصية القديمة (DepartmentID IS NULL)
+      // محاولة VacancyID schema أولاً باستخدام CROSS APPLY لتجنب تكرار الصفوف
+      try {
+        await pool.request().query(`
+          IF OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL
+             AND COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL
+          BEGIN
+            UPDATE t
+            SET t.PersonalOwnerUserID = LTRIM(RTRIM(sub.UserID))
+            FROM dbo.Tasks t
+            CROSS APPLY (
+              SELECT TOP 1 LTRIM(RTRIM(a.UserID)) AS UserID
+              FROM dbo.Assignments a
+              WHERE a.VacancyID = t.CreatedByVacancyID
+            ) sub
+            WHERE t.DepartmentID IS NULL
+              AND (t.PersonalOwnerUserID IS NULL OR t.PersonalOwnerUserID = '');
+          END
+        `);
+      } catch (_) { /* VacancyID backfill غير متاح */ }
+
+      // محاولة UserID schema (CreatedBy مباشر)
+      try {
+        await pool.request().query(`
+          IF COL_LENGTH('dbo.Tasks', 'CreatedBy') IS NOT NULL
+          BEGIN
+            UPDATE dbo.Tasks
+            SET PersonalOwnerUserID = LTRIM(RTRIM(CreatedBy))
+            WHERE DepartmentID IS NULL
+              AND (PersonalOwnerUserID IS NULL OR PersonalOwnerUserID = '')
+              AND CreatedBy IS NOT NULL AND CreatedBy <> '';
+          END
+        `);
+      } catch (_) { /* UserID backfill غير متاح */ }
+
+      console.log('✅ Ensured PersonalOwnerUserID column, nullable DepartmentID, and backfilled existing personal tasks.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring personal tasks support:', err);
+      throw err;
+    }
+  },
 };

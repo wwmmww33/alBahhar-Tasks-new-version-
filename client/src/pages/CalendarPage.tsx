@@ -13,16 +13,11 @@ type CalendarItem = {
   EndDate?: string | null;
   AssignedToName?: string;
   AssignedToID?: string | null;
+  PersonalOwnerUserID?: string | null;
 };
 
 type SpanPos = 'single' | 'start' | 'middle' | 'end';
 type CalendarItemWithSpan = CalendarItem & { _spanPos: SpanPos };
-
-type PersonalEventItem = {
-  EventID: number;
-  Title: string;
-  EventDate: string;
-};
 
 type CalendarCommentItem = {
   CommentID: number;
@@ -31,6 +26,7 @@ type CalendarCommentItem = {
   Content: string;
   CreatedAt: string;
   CommentedByName?: string;
+  PersonalOwnerUserID?: string | null;
 };
 
 type ViewMode = 'month' | 'week' | 'day';
@@ -44,7 +40,6 @@ type CalendarPageProps = {
 const CalendarPage = ({ currentUser }: CalendarPageProps) => {
   const actorId = resolveCurrentActorId(currentUser) || currentUser.UserID;
   const [items, setItems] = useState<CalendarItem[]>([]);
-  const [personalEvents, setPersonalEvents] = useState<PersonalEventItem[]>([]);
   const [commentEvents, setCommentEvents] = useState<CalendarCommentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -54,18 +49,6 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
   const [viewLayout, setViewLayout] = useState<ViewLayout>('grid');
   const [hideEmptyDays, setHideEmptyDays] = useState(false);
   const [hideContinuationOnly, setHideContinuationOnly] = useState(false);
-  const [newEventTitle, setNewEventTitle] = useState('');
-  const [newEventDate, setNewEventDate] = useState(() => {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${dd}`;
-  });
-  const [submittingEvent, setSubmittingEvent] = useState(false);
-  const [editingEventId, setEditingEventId] = useState<number | null>(null);
-  const [editTitle, setEditTitle] = useState('');
-  const [editDate, setEditDate] = useState('');
 
   const openTaskInNewTab = (taskId: number) => {
     window.open(`/task/${taskId}`, '_blank', 'noopener,noreferrer');
@@ -138,21 +121,6 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
         setItems(Array.isArray(subtasksData) ? subtasksData : []);
 
         try {
-          const personalRes = await fetch(
-            `/api/calendar/personal-events?${params.toString()}`
-          );
-          if (personalRes.ok) {
-            const pct = personalRes.headers.get('content-type') || '';
-            const personalData = pct.includes('application/json') ? await personalRes.json() : [];
-            setPersonalEvents(Array.isArray(personalData) ? personalData : []);
-          } else {
-            setPersonalEvents([]);
-          }
-        } catch (_) {
-          setPersonalEvents([]);
-        }
-
-        try {
           const commentsRes = await fetch(
             `/api/calendar/comments?${params.toString()}`
           );
@@ -168,7 +136,6 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
         }
       } catch (err: any) {
         setItems([]);
-        setPersonalEvents([]);
         setCommentEvents([]);
         setError(err?.message || 'حدث خطأ أثناء جلب بيانات التقويم.');
       } finally {
@@ -221,9 +188,11 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
   }, [viewMode, currentDate]);
 
   const displayItems = useMemo(() => {
+    // المهام الشخصية تُعرض دائماً عبر personalByDay، نُبعدها من مجموعة العمل
+    const workItems = items.filter(it => !it.PersonalOwnerUserID);
     if (viewFilter === 'personal') return [];
-    if (viewFilter === 'vacancy') return items.filter(it => String(it.AssignedToID) === String(actorId));
-    return items;
+    if (viewFilter === 'vacancy') return workItems.filter(it => String(it.AssignedToID) === String(actorId));
+    return workItems;
   }, [items, viewFilter, actorId]);
 
   const itemsByDay = useMemo(() => {
@@ -257,15 +226,16 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
   }, [displayItems]);
 
   const personalByDay = useMemo(() => {
-    const map: Record<string, PersonalEventItem[]> = {};
-    for (const ev of personalEvents) {
-      const d = new Date(ev.EventDate);
+    const map: Record<string, CalendarItemWithSpan[]> = {};
+    for (const it of items) {
+      if (!it.PersonalOwnerUserID) continue;
+      const d = new Date(it.DueDate);
       const key = toLocalYMD(d);
       if (!map[key]) map[key] = [];
-      map[key].push(ev);
+      map[key].push({ ...it, _spanPos: 'single' });
     }
     return map;
-  }, [personalEvents]);
+  }, [items]);
 
   const commentsByDay = useMemo(() => {
     const map: Record<string, CalendarCommentItem[]> = {};
@@ -322,7 +292,11 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
       const personalForDay = personalByDay[d.key] || [];
       const commentsForDay = commentsByDay[d.key] || [];
       const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? personalForDay : [];
-      const visibleComments = viewFilter !== 'personal' ? commentsForDay : [];
+      const visibleComments = viewFilter === 'personal'
+        ? commentsForDay.filter(c => c.PersonalOwnerUserID)
+        : viewFilter === 'both'
+          ? commentsForDay
+          : commentsForDay.filter(c => !c.PersonalOwnerUserID);
       const hasAnyEvents = sharedForDay.length > 0 || visiblePersonal.length > 0 || visibleComments.length > 0;
       if (hideEmptyDays && !hasAnyEvents) return false;
       if (hideContinuationOnly) {
@@ -395,137 +369,6 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     });
   }, [viewMode, currentDate]);
 
-  const sortedPersonalEvents = useMemo(() => {
-    const copy = [...personalEvents];
-    copy.sort((a, b) => {
-      const ad = new Date(a.EventDate).getTime();
-      const bd = new Date(b.EventDate).getTime();
-      if (ad === bd) return a.EventID - b.EventID;
-      return ad - bd;
-    });
-    return copy;
-  }, [personalEvents]);
-
-  const handleCreatePersonalEvent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newEventTitle.trim()) return;
-    setSubmittingEvent(true);
-    try {
-      const resp = await fetch('/api/calendar/personal-events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: currentUser.UserID,
-          title: newEventTitle.trim(),
-          eventDate: newEventDate,
-        }),
-      });
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => '');
-        throw new Error(`فشل إضافة الحدث الخاص (${resp.status}). ${txt}`);
-      }
-      const created: PersonalEventItem = await resp.json();
-      setPersonalEvents(prev => {
-        const merged = [...prev, created];
-        merged.sort((a, b) => {
-          const ad = new Date(a.EventDate).getTime();
-          const bd = new Date(b.EventDate).getTime();
-          if (ad === bd) return a.EventID - b.EventID;
-          return ad - bd;
-        });
-        return merged;
-      });
-      setNewEventTitle('');
-      const d = new Date();
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      setNewEventDate(`${y}-${m}-${dd}`);
-    } catch (err: any) {
-      alert(err?.message || 'فشل إضافة الحدث الخاص.');
-    } finally {
-      setSubmittingEvent(false);
-    }
-  };
-
-  const startEditEvent = (ev: PersonalEventItem) => {
-    setEditingEventId(ev.EventID);
-    setEditTitle(ev.Title);
-    const d = new Date(ev.EventDate);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    setEditDate(`${y}-${m}-${dd}`);
-  };
-
-  const handleUpdatePersonalEvent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingEventId) return;
-    if (!editTitle.trim()) return;
-    setSubmittingEvent(true);
-    try {
-      const resp = await fetch(`/api/calendar/personal-events/${editingEventId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: currentUser.UserID,
-          title: editTitle.trim(),
-          eventDate: editDate,
-        }),
-      });
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => '');
-        throw new Error(`فشل تعديل الحدث الخاص (${resp.status}). ${txt}`);
-      }
-      const updated: PersonalEventItem = await resp.json();
-      setPersonalEvents(prev => {
-        const mapped = prev.map(ev => (ev.EventID === updated.EventID ? updated : ev));
-        mapped.sort((a, b) => {
-          const ad = new Date(a.EventDate).getTime();
-          const bd = new Date(b.EventDate).getTime();
-          if (ad === bd) return a.EventID - b.EventID;
-          return ad - bd;
-        });
-        return mapped;
-      });
-      setEditingEventId(null);
-      setEditTitle('');
-      setEditDate('');
-    } catch (err: any) {
-      alert(err?.message || 'فشل تعديل الحدث الخاص.');
-    } finally {
-      setSubmittingEvent(false);
-    }
-  };
-
-  const handleDeletePersonalEvent = async (id: number) => {
-    const confirmDelete = window.confirm('هل أنت متأكد من حذف هذا الحدث الخاص؟');
-    if (!confirmDelete) return;
-    setSubmittingEvent(true);
-    try {
-      const params = new URLSearchParams({
-        userId: String(currentUser.UserID),
-      });
-      const resp = await fetch(`/api/calendar/personal-events/${id}?${params.toString()}`, {
-        method: 'DELETE',
-      });
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => '');
-        throw new Error(`فشل حذف الحدث الخاص (${resp.status}). ${txt}`);
-      }
-      setPersonalEvents(prev => prev.filter(ev => ev.EventID !== id));
-      if (editingEventId === id) {
-        setEditingEventId(null);
-        setEditTitle('');
-        setEditDate('');
-      }
-    } catch (err: any) {
-      alert(err?.message || 'فشل حذف الحدث الخاص.');
-    } finally {
-      setSubmittingEvent(false);
-    }
-  };
-
   return (
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -534,7 +377,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
           <div>
             <h1 className="text-2xl font-bold">التقويم</h1>
             <p className="text-sm text-content-secondary">
-              عرض {viewMode === 'month' ? 'شهري' : viewMode === 'week' ? 'أسبوعي' : 'يومي'} للمهام الفرعية والأحداث الخاصة.
+              عرض {viewMode === 'month' ? 'شهري' : viewMode === 'week' ? 'أسبوعي' : 'يومي'} للمهام الفرعية.
             </p>
           </div>
         </div>
@@ -872,7 +715,12 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             const isWeekend = dayOfWeek === 5 || dayOfWeek === 6;
                             const allCellItems   = itemsByDay[key] || [];
                             const personalForDay = (viewFilter === 'both' || viewFilter === 'personal') ? (personalByDay[key] || []) : [];
-                            const commentsForDay = viewFilter !== 'personal' ? (commentsByDay[key] || []) : [];
+                            const rawCommentsForDay = commentsByDay[key] || [];
+                            const commentsForDay = viewFilter === 'personal'
+                              ? rawCommentsForDay.filter(c => c.PersonalOwnerUserID)
+                              : viewFilter === 'both'
+                                ? rawCommentsForDay
+                                : rawCommentsForDay.filter(c => !c.PersonalOwnerUserID);
                             const hasBarOnDay    = bars.some(b => b.startCol <= colIdx && b.endCol >= colIdx);
                             const hasEvents      = allCellItems.length > 0 || personalForDay.length > 0 || commentsForDay.length > 0 || hasBarOnDay;
 
@@ -953,11 +801,13 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                                       {it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
                                     </button>
                                   ))}
-                                  {/* 4. أحداث خاصة */}
-                                  {personalForDay.map(ev => (
-                                    <div key={ev.EventID} className="font-semibold break-words" style={{ color: '#059669' }}>
-                                      {ev.EventID}★ {ev.Title}
-                                    </div>
+                                  {/* 4. مهام شخصية */}
+                                  {personalForDay.map(it => (
+                                    <button key={it.SubtaskID} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                                      className="w-full text-right break-words hover:underline font-semibold"
+                                      style={{ color: '#059669' }}>
+                                      ★ {it.SubtaskTitle || it.TaskTitle}
+                                    </button>
                                   ))}
                                   {/* 5. تعليقات */}
                                   {commentsForDay.map(cm => (
@@ -1001,7 +851,11 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                 const commentsForDay = commentsByDay[d.key] || [];
                 const visibleShared   = sharedForDay;
                 const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? personalForDay : [];
-                const visibleComments = viewFilter !== 'personal' ? commentsForDay : [];
+                const visibleComments = viewFilter === 'personal'
+                  ? commentsForDay.filter(c => c.PersonalOwnerUserID)
+                  : viewFilter === 'both'
+                    ? commentsForDay
+                    : commentsForDay.filter(c => !c.PersonalOwnerUserID);
                 const hasEvents = visibleShared.length > 0 || visiblePersonal.length > 0 || visibleComments.length > 0;
                 const todayKey  = toLocalYMD(new Date());
                 const isToday   = d.key === todayKey;
@@ -1102,10 +956,12 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             </button>
                           </div>
                         ))}
-                        {visiblePersonal.map(ev => (
-                          <div key={ev.EventID} className="text-xs font-semibold" style={{ color: '#059669' }}>
-                            {ev.EventID}★ {ev.Title}
-                          </div>
+                        {visiblePersonal.map(it => (
+                          <button key={it.SubtaskID} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                            className="text-xs font-semibold hover:underline text-right w-full break-words"
+                            style={{ color: '#059669' }}>
+                            ★ {it.SubtaskTitle || it.TaskTitle}
+                          </button>
                         ))}
                         {visibleComments.map(cm => (
                           <button key={cm.CommentID} type="button" onClick={() => openTaskInNewTab(cm.TaskID)}
@@ -1122,136 +978,6 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
             </div>
           )}
 
-          <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="border rounded-lg p-4 bg-white/80 dark:bg-gray-900/80 border-content/10">
-              <h2 className="text-lg font-semibold mb-3 text-right">إضافة حدث خاص</h2>
-              <form onSubmit={handleCreatePersonalEvent} className="space-y-3">
-                <div className="flex flex-col gap-1">
-                  <label className="text-sm text-right">عنوان الحدث</label>
-                  <input
-                    type="text"
-                    value={newEventTitle}
-                    onChange={(e) => setNewEventTitle(e.target.value)}
-                    className="border border-content/20 rounded px-3 py-2 text-sm text-right bg-white dark:bg-gray-800"
-                    disabled={submittingEvent}
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-sm text-right">تاريخ الحدث</label>
-                  <input
-                    type="date"
-                    value={newEventDate}
-                    onChange={(e) => setNewEventDate(e.target.value)}
-                    className="border border-content/20 rounded px-3 py-2 text-sm text-right bg-white dark:bg-gray-800"
-                    disabled={submittingEvent}
-                  />
-                </div>
-                <div className="flex justify-end">
-                  <button
-                    type="submit"
-                    disabled={submittingEvent || !newEventTitle.trim()}
-                    className="px-4 py-2 rounded-md bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    حفظ الحدث
-                  </button>
-                </div>
-              </form>
-            </div>
-
-            <div className="border rounded-lg p-4 bg-white/80 dark:bg-gray-900/80 border-content/10">
-              <h2 className="text-lg font-semibold mb-3 text-right">إدارة الأحداث الخاصة</h2>
-              {sortedPersonalEvents.length === 0 ? (
-                <div className="text-sm text-content-secondary text-right">
-                  لا توجد أحداث خاصة حالياً في الفترة المعروضة.
-                </div>
-              ) : (
-                <div className="space-y-3 max-h-80 overflow-y-auto">
-                  {sortedPersonalEvents.map((ev) =>
-                    editingEventId === ev.EventID ? (
-                      <form
-                        key={ev.EventID}
-                        onSubmit={handleUpdatePersonalEvent}
-                        className="flex flex-col gap-2 border rounded-md p-2 bg-content/5"
-                      >
-                        <input
-                          type="text"
-                          value={editTitle}
-                          onChange={(e) => setEditTitle(e.target.value)}
-                          className="border border-content/20 rounded px-2 py-1 text-sm text-right bg-white dark:bg-gray-800"
-                          disabled={submittingEvent}
-                        />
-                        <input
-                          type="date"
-                          value={editDate}
-                          onChange={(e) => setEditDate(e.target.value)}
-                          className="border border-content/20 rounded px-2 py-1 text-sm text-right bg-white dark:bg-gray-800"
-                          disabled={submittingEvent}
-                        />
-                        <div className="flex justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingEventId(null);
-                              setEditTitle('');
-                              setEditDate('');
-                            }}
-                            className="px-3 py-1 rounded-md border border-content/30 text-sm"
-                            disabled={submittingEvent}
-                          >
-                            إلغاء
-                          </button>
-                          <button
-                            type="submit"
-                            disabled={submittingEvent || !editTitle.trim()}
-                            className="px-3 py-1 rounded-md bg-primary text-white text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-                          >
-                            حفظ
-                          </button>
-                        </div>
-                      </form>
-                    ) : (
-                      <div
-                        key={ev.EventID}
-                        className="flex items-center justify-between border border-content/10 rounded-md px-3 py-2 text-sm bg-white/70 dark:bg-gray-800/70"
-                      >
-                        <div className="flex-1 text-right">
-                          <div className="font-semibold text-green-800 dark:text-green-200">
-                            {ev.Title}
-                          </div>
-                          <div className="text-xs text-content-secondary">
-                            {new Date(ev.EventDate).toLocaleDateString('ar-EG', {
-                              weekday: 'long',
-                              day: 'numeric',
-                              month: 'long',
-                              year: 'numeric',
-                            })}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2 ml-3">
-                          <button
-                            type="button"
-                            onClick={() => startEditEvent(ev)}
-                            className="px-2 py-1 text-xs rounded-md border border-primary text-primary hover:bg-primary/10"
-                            disabled={submittingEvent}
-                          >
-                            تعديل
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeletePersonalEvent(ev.EventID)}
-                            className="px-2 py-1 text-xs rounded-md border border-red-500 text-red-600 hover:bg-red-500/10"
-                            disabled={submittingEvent}
-                          >
-                            حذف
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
         </>
       )}
     </div>

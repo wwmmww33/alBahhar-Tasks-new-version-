@@ -18,6 +18,9 @@ type Props = {
   taskId: number;
   userId: string;
   isAdmin: boolean;
+  isPersonal?: boolean;
+  originalUserId?: string;
+  deptId?: number | null;
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -36,7 +39,7 @@ const STATUS_COLORS: Record<string, string> = {
   external: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
 };
 
-const RelatedTasksSection = ({ taskId, userId, isAdmin }: Props) => {
+const RelatedTasksSection = ({ taskId, userId, isAdmin, isPersonal = false, originalUserId, deptId }: Props) => {
   const [relatedTasks, setRelatedTasks] = useState<RelatedTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [showSearch, setShowSearch] = useState(false);
@@ -71,9 +74,11 @@ const RelatedTasksSection = ({ taskId, userId, isAdmin }: Props) => {
     searchTimeoutRef.current = setTimeout(async () => {
       setIsSearching(true);
       try {
-        const res = await fetch(
-          getApiUrl(`tasks/search?q=${encodeURIComponent(val.trim())}&userId=${userId}&isAdmin=${isAdmin}&excludeTaskId=${taskId}`)
-        );
+        const deptParam = (!isPersonal && deptId != null) ? `&deptId=${deptId}` : '';
+        const searchUrl = isPersonal
+          ? getApiUrl(`tasks/search?q=${encodeURIComponent(val.trim())}&userId=${userId}&excludeTaskId=${taskId}&personalOnly=true&originalUserId=${encodeURIComponent(originalUserId || userId)}`)
+          : getApiUrl(`tasks/search?q=${encodeURIComponent(val.trim())}&userId=${userId}&isAdmin=${isAdmin}&excludeTaskId=${taskId}${deptParam}`);
+        const res = await fetch(searchUrl);
         if (res.ok) setSearchResults(await res.json());
       } catch (_) {
         setSearchResults([]);

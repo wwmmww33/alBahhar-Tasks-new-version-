@@ -24,6 +24,9 @@ type TaskCardTask = {
   Priority: string;
   CategoryName?: string | null;
   URL?: string | null;
+  PersonalOwnerUserID?: string | null;
+  DepartmentID?: number | null;
+  IsPersonalTask?: number | boolean;
   subtasks?: Subtask[];
   comments?: { CommentID?: number; Content: string; UserName?: string | null; UserID?: string; CreatedAt: string }[];
   HasNewSubtasks?: boolean;
@@ -59,10 +62,13 @@ const TaskCard: React.FC<TaskCardProps> = ({
 }) => {
   const style = statusStyles[task.Status] || statusStyles.open;
   
-  // تحديد لون الحدود والخلفية حسب الأولوية
-  const priorityStyles = task.Priority === 'urgent'
-    ? 'border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20 dark:border-red-400'
-    : 'border-l-4 border-blue-500 bg-white dark:bg-gray-800 dark:border-blue-400';
+  const isPersonalTask = !!(task.IsPersonalTask) || !!(task.PersonalOwnerUserID) || !task.DepartmentID;
+
+  const priorityStyles = isPersonalTask
+    ? 'border-l-4 border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 dark:border-emerald-400'
+    : task.Priority === 'urgent'
+      ? 'border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20 dark:border-red-400'
+      : 'border-l-4 border-blue-500 bg-white dark:bg-gray-800 dark:border-blue-400';
 
   // الحصول على المهام الفرعية غير المكتملة مع إظهار مهام المستخدم أولاً
   const incompleteSubtasksRaw = task.subtasks?.filter(subtask => !subtask.IsCompleted) || [];
@@ -113,13 +119,13 @@ const TaskCard: React.FC<TaskCardProps> = ({
   const navigate = useNavigate();
 
   const getCardClassName = () => {
-    let baseClasses = 'bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 hover:shadow-md dark:hover:shadow-lg transition-all duration-200 relative cursor-pointer';
+    // لا bg ولا border-color في الأساس — كل فرع يُحدد ألوانه بنفسه لتجنب التعارض
+    let baseClasses = 'rounded-lg shadow-sm border hover:shadow-md dark:hover:shadow-lg transition-all duration-200 relative cursor-pointer';
 
-    
     if (isSelectionMode) {
+      baseClasses += ' bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700';
       baseClasses += isSelected ? ' ring-2 ring-blue-500 dark:ring-blue-400 bg-blue-50 dark:bg-blue-900/30' : ' hover:bg-gray-50 dark:hover:bg-gray-700';
     } else {
-      // تطبيق ألوان البطاقة حسب نوع الإشعارات
       if (hasCommentNotifications) {
         baseClasses += ' border-l-4 border-green-500 dark:border-green-400 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 shadow-green-100 dark:shadow-green-900/20';
       } else if (hasAssignmentNotifications) {
@@ -129,7 +135,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
       }
       baseClasses += ' hover:shadow-lg dark:hover:shadow-xl';
     }
-    
+
     return baseClasses;
   };
 
@@ -148,6 +154,14 @@ const TaskCard: React.FC<TaskCardProps> = ({
         </div>
 
         <div className="p-4">
+          {/* شارة المهمة الشخصية */}
+          {isPersonalTask && (
+            <div className="mb-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-600 text-white dark:bg-emerald-500 dark:text-white">
+              <User size={11} />
+              مهمة خاصة
+            </div>
+          )}
+
           {/* العنوان وأزرار الأولوية */}
           <div className="flex justify-between items-start mb-3">
             <h3 className="font-bold text-lg text-gray-800 dark:text-gray-100 flex-1">#{task.TaskID} - {task.Title}</h3>
@@ -191,7 +205,9 @@ const TaskCard: React.FC<TaskCardProps> = ({
 
           {/* معلومات المهمة */}
           <div className="mt-4 space-y-3 text-sm text-gray-600 dark:text-gray-100">
-            <div className="flex items-center gap-2"><User size={14} /><span>المنشيء: {(task.CreatedByName || task.CreatedBy || 'غير محدد')}{task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}</span></div>
+            {!isPersonalTask && (
+              <div className="flex items-center gap-2"><User size={14} /><span>المنشيء: {(task.CreatedByName || task.CreatedBy || 'غير محدد')}{task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}</span></div>
+            )}
             <div className="flex items-center gap-2"><Calendar size={14} /><span>تاريخ الاستحقاق: {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG') : 'غير محدد'}</span></div>
             {task.Priority === 'urgent' && (<div className="flex items-center gap-2 text-red-600 font-semibold"><AlertTriangle size={14} /><span>أولوية عاجلة</span></div>)}
             

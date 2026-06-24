@@ -34,7 +34,7 @@ export type Task = {
   CreatedByVacancyID?: number | string | null;
   ActedBy?: string;
   LastActedByVacancyID?: number | string | null;
-  DepartmentID: number;
+  DepartmentID: number | null;
   CategoryID?: number | null;
   URL?: string | null;
   CreatedAt: string;
@@ -47,6 +47,7 @@ export type Task = {
   DepartmentName?: string;
   CategoryName?: string;
   Subtasks?: Subtask[];
+  PersonalOwnerUserID?: string | null;
 };
 
 // Category related types

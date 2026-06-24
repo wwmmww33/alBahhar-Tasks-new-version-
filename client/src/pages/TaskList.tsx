@@ -26,6 +26,9 @@ type Task = {
   comments?: Comment[];
   HasAssignmentNotifications?: number;
   HasCommentNotifications?: number;
+  PersonalOwnerUserID?: string | null;
+  DepartmentID?: number | null;
+  IsPersonalTask?: number | boolean;
 };
 
 type ExportMode = 'title_creator' | 'tasks_incomplete_subtasks' | 'full';
@@ -200,7 +203,16 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     });
   };
 
+  // المهمة شخصية: IsPersonalTask من الخادم (المصدر الأوثق) أو فحوصات بديلة
+  const isPersonalTaskOfActor = (task: Task) => {
+    if (task.IsPersonalTask) return true;
+    if (task.PersonalOwnerUserID && actorUserIdStrict && task.PersonalOwnerUserID === actorUserIdStrict) return true;
+    if (!task.DepartmentID) return true;
+    return false;
+  };
+
   const isTaskRelatedToActor = (task: Task) => {
+    if (isPersonalTaskOfActor(task)) return true;
     if (isTaskCreatedByActor(task)) return true;
     if ((task.subtasks || []).some(st => isSubtaskAssignedToActor(st))) return true;
     if (isCommentByActor(task)) return true;
@@ -383,7 +395,11 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     try {
       const isAdmin = currentUser.IsAdmin;
       const actingUserId = actorId;
-      const tasksRes = await fetch(`/api/tasks/with-notifications?userId=${actingUserId}&isAdmin=${isAdmin}`);
+      // في وضع التفويض: أرسل معرّف المفوَّض له الفعلي لمنع ظهور المهام الشخصية للمفوِّض
+      const delegateParam = isDelegationMode
+        ? `&delegateUserId=${encodeURIComponent(currentVacancyId || currentUserIdStrict)}`
+        : '';
+      const tasksRes = await fetch(`/api/tasks/with-notifications?userId=${actingUserId}&isAdmin=${isAdmin}${delegateParam}`);
       const effectiveActorHeader = tasksRes.headers.get('x-effective-actor-id') || tasksRes.headers.get('X-Effective-Actor-ID') || '';
       if (effectiveActorHeader) {
         setEffectiveActorIdFromApi(String(effectiveActorHeader).trim());
@@ -415,7 +431,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
           tasksData = primaryData as Task[];
         } else {
           console.warn('with-notifications returned non-JSON or invalid; falling back to /api/tasks');
-          const fallbackRes = await fetch(`/api/tasks?userId=${actingUserId}&isAdmin=${isAdmin}`);
+          const fallbackRes = await fetch(`/api/tasks?userId=${actingUserId}&isAdmin=${isAdmin}${delegateParam}`);
           const fallbackEffectiveActor = fallbackRes.headers.get('x-effective-actor-id') || fallbackRes.headers.get('X-Effective-Actor-ID') || '';
           if (fallbackEffectiveActor) {
             setEffectiveActorIdFromApi(String(fallbackEffectiveActor).trim());
@@ -920,6 +936,8 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
   const activeTasks = filteredTasks.filter(task => {
     if (!isOpenStatus(task)) return false;
+    // المهام الشخصية دائماً نشطة بصرف النظر عن المنصب الحالي
+    if (isPersonalTaskOfActor(task)) return true;
     const subtasks = task.subtasks || [];
     if (subtasks.some(subtask => isSubtaskAssignedToActor(subtask) && !subtask.IsCompleted)) return true;
     if (subtasks.length === 0 && isTaskCreatedByActor(task)) return true;
@@ -928,11 +946,11 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
   const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
 
-  // المهام المتعلقة بي ولا يوجد فيها إجراء معلق (سواء أنشأتها أو أنهيت جميع مهامي الفرعية)
   // "أنجزت إجرائي فيها": مفتوحة + متعلقة بي + لا توجد مهام فرعية معلقة لي
-  // يشمل: مهام أنشأتها بلا مهام فرعية لي، ومهام أنهيت فيها جميع مهامي الفرعية
+  // المهام الشخصية مستثناة — تنتمي دائماً للتبويب النشط
   const actionedTasks = filteredTasks.filter(task => {
     if (!isOpenStatus(task)) return false;
+    if (isPersonalTaskOfActor(task)) return false;
     const subtasks = task.subtasks || [];
     const hasMyIncompleteSubtasks = subtasks.some(
       subtask => isSubtaskAssignedToActor(subtask) && !subtask.IsCompleted

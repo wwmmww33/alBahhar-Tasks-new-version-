@@ -310,8 +310,10 @@ const UnifiedTimeline = ({
   };
 
   const handleToggleStatus = async (subtask: Subtask) => {
-    if (!isSubtaskAssignedToActor(subtask)) {
-      alert('فقط الشخص المسندت له المهمة الفرعية يمكنه تغيير حالة الإكمال.');
+    const isPersonalOwner = !!(task?.PersonalOwnerUserID) &&
+      String(task.PersonalOwnerUserID).trim() === String(currentUser.UserID).trim();
+    if (!isSubtaskAssignedToActor(subtask) && !isPersonalOwner) {
+      alert('فقط الشخص المسند له المهمة الفرعية يمكنه تغيير حالة الإكمال.');
       return;
     }
 
@@ -555,8 +557,11 @@ const UnifiedTimeline = ({
     const canDelete = isSubtaskCreatorActor(subtask);
     const canEditTitle = true;
     const canEditDue = true;
-    const canToggleStatus = isSubtaskAssignedToActor(subtask);
-    const canManageAssignments = isSubtaskCreatorActor(subtask);
+    // في المهام الشخصية: صاحب المهمة يستطيع إكمال مهامه الفرعية حتى لو غيّر منصبه
+    const isPersonalOwner = !!(task?.PersonalOwnerUserID) &&
+      String(task.PersonalOwnerUserID).trim() === String(currentUser.UserID).trim();
+    const canToggleStatus = isSubtaskAssignedToActor(subtask) || isPersonalOwner;
+    const canManageAssignments = isSubtaskCreatorActor(subtask) || isPersonalOwner;
     const assignedId = subtaskAssignedId(subtask);
     const assignedInUsersList = !!safeUsers.find(user => userActorId(user) === assignedId);
     const assignedFallbackLabel = subtask.AssignedToName || (assignedId ? `منصب #${assignedId}` : '');
@@ -652,33 +657,39 @@ const UnifiedTimeline = ({
             <div className="flex flex-wrap gap-4 text-xs text-content-secondary">
               <div className="flex items-center gap-2">
                 <UserPlus size={14} />
-                <select
-                  value={assignedId}
-                  onChange={(e) => handleAssign(subtask, e.target.value)}
-                  disabled={!canManageAssignments}
-                  className="bg-transparent text-xs focus:outline-none disabled:opacity-70 dark:text-gray-300 max-w-[120px]"
-                >
-                  <option value="">غير مسندة</option>
-                  <option value="bulk" className="font-bold text-primary">👥 إسناد متعدد...</option>
-                  {assignedId && !assignedInUsersList && (
-                    <option value={assignedId}>{assignedFallbackLabel}</option>
-                  )}
-                  {safeUsers.map(user => (
-                    <option key={userActorId(user)} value={userActorId(user)}>{user.FullName}</option>
-                  ))}
-                </select>
-                {canManageAssignments && (
-                  <button
-                    onClick={() => {
-                      setSelectedSubtaskForBulk(subtask);
-                      setBulkSelectedUsers(subtaskAssignedId(subtask) ? [subtaskAssignedId(subtask)] : []);
-                      setIsBulkModalOpen(true);
-                    }}
-                    className="p-1 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                    title="إسناد متعدد / تكرار المهمة"
-                  >
-                    <Users size={14} />
-                  </button>
+                {isPersonalOwner ? (
+                  <span className="text-xs text-content-secondary">مسندة إليك</span>
+                ) : (
+                  <>
+                    <select
+                      value={assignedId}
+                      onChange={(e) => handleAssign(subtask, e.target.value)}
+                      disabled={!canManageAssignments}
+                      className="bg-transparent text-xs focus:outline-none disabled:opacity-70 dark:text-gray-300 max-w-[120px]"
+                    >
+                      <option value="">غير مسندة</option>
+                      <option value="bulk" className="font-bold text-primary">👥 إسناد متعدد...</option>
+                      {assignedId && !assignedInUsersList && (
+                        <option value={assignedId}>{assignedFallbackLabel}</option>
+                      )}
+                      {safeUsers.map(user => (
+                        <option key={userActorId(user)} value={userActorId(user)}>{user.FullName}</option>
+                      ))}
+                    </select>
+                    {canManageAssignments && (
+                      <button
+                        onClick={() => {
+                          setSelectedSubtaskForBulk(subtask);
+                          setBulkSelectedUsers(subtaskAssignedId(subtask) ? [subtaskAssignedId(subtask)] : []);
+                          setIsBulkModalOpen(true);
+                        }}
+                        className="p-1 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                        title="إسناد متعدد / تكرار المهمة"
+                      >
+                        <Users size={14} />
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
               

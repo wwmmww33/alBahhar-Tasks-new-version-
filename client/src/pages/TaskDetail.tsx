@@ -390,6 +390,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
           رجوع
         </button>
         <div className="flex items-center gap-2 flex-wrap justify-end">
+          {!task.PersonalOwnerUserID && (
           <button
             onClick={() => setShowMergeModal(true)}
             className="text-xs px-3 py-1.5 rounded-full border border-purple-400 text-purple-600 dark:text-purple-400 dark:border-purple-500 hover:bg-purple-50 dark:hover:bg-purple-900/20 flex items-center gap-1 transition-colors"
@@ -398,6 +399,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             <GitMerge size={12} />
             دمج مهمة
           </button>
+          )}
           <button
             onClick={() => exportTaskToPdf({
               TaskID: task.TaskID,
@@ -466,7 +468,12 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         </div>
       </div>
       <div className="flex justify-between items-start">
-        <div>
+        <div className="w-full">
+          {!!task.PersonalOwnerUserID && (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-semibold bg-emerald-600 text-white mb-3">
+              مهمة خاصة
+            </div>
+          )}
           {isEditingTitle ? (
             <input
               type="text"
@@ -516,19 +523,15 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
               {task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}
             </span>
             <span className="text-sm">•</span>
-            <span><strong>الحالة:</strong> <span className="font-semibold">{task.Status}</span></span>
-            <span className="text-sm">•</span>
-            <span><strong>الأولوية:</strong> {task.Priority}</span>
-            <span className="text-sm">•</span>
-            <span><strong>تاريخ الاستحقاق:</strong> {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG') : 'غير محدد'}</span>
+            <span><strong>تاريخ الإنشاء:</strong> {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG') : 'غير محدد'}</span>
           </div>
           
           {/* Category + URL — سطر واحد */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-content-secondary mb-2">
 
-            {/* التصنيف */}
-            <span><strong>التصنيف:</strong></span>
-            {isEditingCategory ? (
+            {/* التصنيف — مخفي في المهام الخاصة */}
+            {!task.PersonalOwnerUserID && <span><strong>التصنيف:</strong></span>}
+            {!task.PersonalOwnerUserID && (isEditingCategory ? (
               <div className="flex items-center gap-2">
                 <select
                   value={selectedCategoryId || ''}
@@ -591,10 +594,10 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                   </>
                 )}
               </div>
-            )}
+            ))}
 
             {/* فاصل */}
-            {!isEditingCategory && !isEditingURL && (
+            {!task.PersonalOwnerUserID && !isEditingCategory && !isEditingURL && (
               <span className="text-sm">•</span>
             )}
 
@@ -754,6 +757,9 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         taskId={task.TaskID}
         userId={actorId}
         isAdmin={currentUser.IsAdmin}
+        isPersonal={!!task.PersonalOwnerUserID}
+        originalUserId={task.PersonalOwnerUserID ? String(task.PersonalOwnerUserID) : String(currentUser.UserID)}
+        deptId={task.DepartmentID ?? null}
       />
 
 
@@ -779,6 +785,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
           targetTaskTitle={task.Title}
           userId={String(actorId)}
           isAdmin={!!currentUser.IsAdmin}
+          deptId={task.DepartmentID ?? null}
           onClose={() => setShowMergeModal(false)}
           onMerged={() => { setShowMergeModal(false); fetchAllDetails(); refreshTasks(); }}
         />

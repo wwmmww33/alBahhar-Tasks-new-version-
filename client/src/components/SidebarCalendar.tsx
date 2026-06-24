@@ -14,9 +14,9 @@ type CalendarItem = {
   EndDate?: string | null;
   AssignedToName?: string;
   AssignedToID?: string | null;
+  PersonalOwnerUserID?: string | null;
 };
 
-type PersonalEventItem = { EventID: number; Title: string; EventDate: string };
 type SpanPos = 'single' | 'start' | 'middle' | 'end';
 type CalendarItemWithSpan = CalendarItem & { _spanPos: SpanPos };
 
@@ -27,6 +27,7 @@ type CalendarCommentItem = {
   Content: string;
   CreatedAt: string;
   CommentedByName?: string;
+  PersonalOwnerUserID?: string | null;
 };
 
 type SidebarCalendarProps = {
@@ -41,26 +42,12 @@ const getSpanColor = (subtaskId: number) => SPAN_COLORS[subtaskId % SPAN_COLORS.
 
 const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   const actorId = resolveCurrentActorId(currentUser) || currentUser.UserID;
-  const personalUserId = currentUser.UserID;
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [extraItems, setExtraItems] = useState<CalendarItem[]>([]);
-  const [personalEvents, setPersonalEvents] = useState<PersonalEventItem[]>([]);
-  const [extraPersonalEvents, setExtraPersonalEvents] = useState<PersonalEventItem[]>([]);
   const [commentEvents, setCommentEvents] = useState<CalendarCommentItem[]>([]);
   const [extraCommentEvents, setExtraCommentEvents] = useState<CalendarCommentItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [newEventTitle, setNewEventTitle] = useState('');
-  // وضع الفلترة للتقويم: مشترك، خاص، أو كلاهما
   const [viewFilter, setViewFilter] = useState<'both' | 'shared' | 'vacancy' | 'personal'>('both');
-  const getTodayStr = () => {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${dd}`;
-  };
-  const [newEventDate, setNewEventDate] = useState(getTodayStr());
-  const [submittingEvent, setSubmittingEvent] = useState(false);
   const navigate = useNavigate();
   const openTaskInNewTab = (taskId: number) => {
     window.open(`/task/${taskId}`, '_blank', 'noopener,noreferrer');
@@ -116,19 +103,6 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       setItems(Array.isArray(data) ? data : []);
 
       try {
-        const perRes = await fetch(`/api/calendar/personal-events?userId=${personalUserId}&startDate=${startStr}&days=30`);
-        if (perRes.ok) {
-          const pct = perRes.headers.get('content-type') || '';
-          const perData = pct.includes('application/json') ? await perRes.json() : [];
-          setPersonalEvents(Array.isArray(perData) ? perData : []);
-        } else {
-          setPersonalEvents([]);
-        }
-      } catch (_) {
-        setPersonalEvents([]);
-      }
-
-      try {
         const commentsRes = await fetch(`/api/calendar/comments?userId=${actorId}&startDate=${startStr}&days=30`);
         if (commentsRes.ok) {
           const cct = commentsRes.headers.get('content-type') || '';
@@ -159,19 +133,6 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       }
 
       try {
-        const extraPerRes = await fetch(`/api/calendar/personal-events?userId=${personalUserId}&startDate=${gridEndStr}&days=365`);
-        if (extraPerRes.ok) {
-          const epct = extraPerRes.headers.get('content-type') || '';
-          const extraPerData = epct.includes('application/json') ? await extraPerRes.json() : [];
-          setExtraPersonalEvents(Array.isArray(extraPerData) ? extraPerData : []);
-        } else {
-          setExtraPersonalEvents([]);
-        }
-      } catch (_) {
-        setExtraPersonalEvents([]);
-      }
-
-      try {
         const extraCommentsRes = await fetch(`/api/calendar/comments?userId=${actorId}&startDate=${gridEndStr}&days=365`);
         if (extraCommentsRes.ok) {
           const ecct = extraCommentsRes.headers.get('content-type') || '';
@@ -187,8 +148,6 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     } catch (err) {
       setItems([]);
       setExtraItems([]);
-      setPersonalEvents([]);
-      setExtraPersonalEvents([]);
       setCommentEvents([]);
       setExtraCommentEvents([]);
     } finally {
@@ -235,9 +194,21 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   const toLocalYMD = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
+  const personalByDay = useMemo(() => {
+    const map: Record<string, CalendarItemWithSpan[]> = {};
+    for (const it of items) {
+      if (!it.PersonalOwnerUserID) continue;
+      const key = toLocalYMD(new Date(it.DueDate));
+      if (!map[key]) map[key] = [];
+      map[key].push({ ...it, _spanPos: 'single' });
+    }
+    return map;
+  }, [items]);
+
   const itemsByDay = useMemo(() => {
     const map: Record<string, CalendarItemWithSpan[]> = {};
     for (const it of items) {
+      if (it.PersonalOwnerUserID) continue;
       const due = new Date(it.DueDate);
       const dueNorm = new Date(due.getFullYear(), due.getMonth(), due.getDate());
       const endRaw = it.EndDate ? new Date(it.EndDate) : null;
@@ -279,7 +250,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   // تعيين lane ثابت لكل حدث ممتد بحيث لا تتداخل الخطوط أفقياً
   const laneMap = useMemo(() => {
     const spans = items
-      .filter(it => !!it.EndDate)
+      .filter(it => !!it.EndDate && !it.PersonalOwnerUserID)
       .map(it => {
         const d = new Date(it.DueDate);
         const e = new Date(it.EndDate!);
@@ -360,66 +331,15 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
           >الخاص</button>
         </div>
       </div>
-      {/* نموذج إضافة حدث خاص */}
-      <form
-        onSubmit={async (e) => {
-          e.preventDefault();
-          if (!newEventTitle.trim()) return;
-          setSubmittingEvent(true);
-          try {
-            const resp = await fetch('/api/calendar/personal-events', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ userId: currentUser.UserID, title: newEventTitle.trim(), eventDate: newEventDate })
-            });
-            if (resp.ok) {
-              setNewEventTitle('');
-              setNewEventDate(getTodayStr());
-              window.dispatchEvent(new CustomEvent('calendar:refresh'));
-            } else {
-              const txt = await resp.text().catch(() => '');
-              alert(`فشل إضافة الحدث الخاص (${resp.status}). ${txt}`);
-            }
-          } catch (err) {
-            console.error('Network error adding personal event:', err);
-            alert('تعذر الاتصال بالخادم. تأكد من أن الخادم يعمل على المنفذ 5001 والبروكسي مفعل.');
-          } finally {
-            setSubmittingEvent(false);
-          }
-        }}
-        className="mb-3 p-2 border rounded bg-white/70 dark:bg-gray-800/70 border-content/10"
-      >
-        <div className="text-xs font-semibold mb-2 text-right">إضافة حدث خاص</div>
-        <div className="flex flex-col gap-2">
-          <input
-            type="text"
-            value={newEventTitle}
-            onChange={(e) => setNewEventTitle(e.target.value)}
-            placeholder="عنوان الحدث..."
-            className="p-2 border rounded bg-bkg text-sm"
-          />
-          <input
-            type="date"
-            value={newEventDate}
-            onChange={(e) => setNewEventDate(e.target.value)}
-            className="p-2 border rounded bg-bkg text-sm"
-          />
-          <button
-            type="submit"
-            disabled={submittingEvent}
-            className="px-3 py-1 bg-primary text-white rounded text-sm disabled:opacity-70"
-          >إضافة</button>
-        </div>
-      </form>
       {loading ? (
         <div className="text-sm text-content-secondary">جاري التحميل...</div>
       ) : (
         <div className="space-y-4">
           {(viewFilter === 'shared'
-            ? items.length === 0
+            ? items.filter(it => !it.PersonalOwnerUserID).length === 0
             : viewFilter === 'personal'
-            ? personalEvents.length === 0 && commentEvents.length === 0
-            : items.length === 0 && personalEvents.length === 0 && commentEvents.length === 0) && (
+            ? items.filter(it => it.PersonalOwnerUserID).length === 0 && commentEvents.filter(c => c.PersonalOwnerUserID).length === 0
+            : items.length === 0 && commentEvents.length === 0) && (
             <div className="p-2 rounded bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 text-xs text-yellow-800 dark:text-yellow-200">
               لا توجد أحداث في هذا النطاق.
               تأكد من وجود مهام فرعية بتاريخ استحقاق ضمن 30 يومًا وتفعيل خيار "إظهار في التقويم".
@@ -435,17 +355,16 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
           <div className="space-y-1">
             {dateRange.map((d) => {
               const dayItems = itemsByDay[d.key] || [];
-              const dayPersonal = personalEvents.filter(pe => {
-                const ev = new Date(pe.EventDate);
-                const key = `${ev.getFullYear()}-${String(ev.getMonth() + 1).padStart(2, '0')}-${String(ev.getDate()).padStart(2, '0')}`;
-                return key === d.key;
-              });
               const dayComments = commentsByDay[d.key] || [];
               const visibleShared = viewFilter === 'personal' ? []
                 : viewFilter === 'vacancy' ? dayItems.filter(it => String(it.AssignedToID) === String(actorId))
                 : dayItems;
-              const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? dayPersonal : [];
-              const visibleComments = viewFilter !== 'personal' ? dayComments : [];
+              const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? (personalByDay[d.key] || []) : [];
+              const visibleComments = viewFilter === 'personal'
+                ? dayComments.filter(c => c.PersonalOwnerUserID)
+                : viewFilter === 'both'
+                  ? dayComments
+                  : dayComments.filter(c => !c.PersonalOwnerUserID);
               // hasEvents = true فقط عندما يوجد محتوى حقيقي يُعرض في المربع
               // (أيام الامتداد الوسطى والنهائية لا تُلوَّن — يكفيها الخط الجانبي)
               const hasEvents =
@@ -567,10 +486,16 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                         )}
                         {visiblePersonal.length > 0 && (
                           <div className="space-y-1 text-right mt-1">
-                            {visiblePersonal.map((pe) => (
-                              <div key={pe.EventID} className="text-xs">
-                                <span className="font-semibold text-green-800 dark:text-green-200 text-right">{pe.Title}</span>
-                                <span className="ml-1 inline-block text-[10px] text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 px-1 py-[1px] rounded">(خاص)</span>
+                            {visiblePersonal.map((it) => (
+                              <div key={it.SubtaskID} className="text-xs">
+                                <button
+                                  type="button"
+                                  onClick={() => openTaskInNewTab(it.TaskID)}
+                                  className="font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block"
+                                >
+                                  {it.SubtaskTitle}
+                                </button>
+                                <div className="text-[10px] text-emerald-600 dark:text-emerald-400">ضمن: {it.TaskTitle}</div>
                               </div>
                             ))}
                           </div>
@@ -598,21 +523,30 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
             })}
           </div>
 
-          {((viewFilter !== 'personal' && extraItems.length > 0) ||
-            ((viewFilter === 'both' || viewFilter === 'personal') && (extraPersonalEvents.length > 0)) ||
-            (viewFilter !== 'personal' && extraCommentEvents.length > 0)) && (() => {
+          {(() => {
             type ExtraEntry =
               | { kind: 'subtask';  date: string; item: CalendarItem }
-              | { kind: 'personal'; date: string; pe: PersonalEventItem }
+              | { kind: 'personal'; date: string; item: CalendarItem }
               | { kind: 'comment';  date: string; comment: CalendarCommentItem };
 
-            const filteredExtraItems = viewFilter === 'personal' ? []
-              : viewFilter === 'vacancy' ? extraItems.filter(it => String(it.AssignedToID) === String(actorId))
-              : extraItems;
+            const filteredExtraWork = viewFilter === 'personal' ? []
+              : viewFilter === 'vacancy' ? extraItems.filter(it => !it.PersonalOwnerUserID && String(it.AssignedToID) === String(actorId))
+              : extraItems.filter(it => !it.PersonalOwnerUserID);
+            const filteredExtraPersonal = (viewFilter === 'both' || viewFilter === 'personal')
+              ? extraItems.filter(it => it.PersonalOwnerUserID)
+              : [];
+            const filteredExtraComments = viewFilter === 'personal'
+              ? extraCommentEvents.filter(c => c.PersonalOwnerUserID)
+              : viewFilter === 'both'
+                ? extraCommentEvents
+                : extraCommentEvents.filter(c => !c.PersonalOwnerUserID);
+
+            if (filteredExtraWork.length === 0 && filteredExtraPersonal.length === 0 && filteredExtraComments.length === 0) return null;
+
             const merged: ExtraEntry[] = [
-              ...filteredExtraItems.map(item => ({ kind: 'subtask'  as const, date: item.DueDate,       item })),
-              ...((viewFilter === 'both' || viewFilter === 'personal') ? extraPersonalEvents.map(pe => ({ kind: 'personal' as const, date: pe.EventDate,   pe })) : []),
-              ...(viewFilter !== 'personal' ? extraCommentEvents.map(comment => ({ kind: 'comment' as const, date: comment.CreatedAt, comment })) : []),
+              ...filteredExtraWork.map(item => ({ kind: 'subtask' as const, date: item.DueDate, item })),
+              ...filteredExtraPersonal.map(item => ({ kind: 'personal' as const, date: item.DueDate, item })),
+              ...filteredExtraComments.map(comment => ({ kind: 'comment' as const, date: comment.CreatedAt, comment })),
             ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
             return (
@@ -639,13 +573,19 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                         </li>
                       );
                     } else if (entry.kind === 'personal') {
-                      const pe = entry.pe;
+                      const it = entry.item;
                       return (
-                        <li key={`p-${pe.EventID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
+                        <li key={`p-${it.SubtaskID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-emerald-200 dark:border-emerald-800 text-right">
                           <div className="text-xs text-content-secondary mb-1">{dateLabel}</div>
                           <div className="text-xs">
-                            <span className="font-semibold text-green-800 dark:text-green-200 text-right">{pe.Title}</span>
-                            <span className="ml-1 inline-block text-[10px] text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/30 px-1 py-[1px] rounded">(خاص)</span>
+                            <button
+                              type="button"
+                              onClick={() => openTaskInNewTab(it.TaskID)}
+                              className="font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block"
+                            >
+                              {it.SubtaskTitle}
+                            </button>
+                            <div className="text-[10px] text-emerald-600 dark:text-emerald-400">ضمن: {it.TaskTitle}</div>
                           </div>
                         </li>
                       );

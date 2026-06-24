@@ -2,6 +2,27 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 
+// يحوّل VacancyID رقمي → UserID حقيقي لمقارنة PersonalOwnerUserID
+async function resolveUserIDFromActor(pool, rawActorId) {
+  const text = String(rawActorId || '').trim();
+  if (!text || !/^\d+$/.test(text)) return text;
+  try {
+    const res = await pool.request()
+      .input('VacancyID', sql.Int, parseInt(text, 10))
+      .query(`
+        IF OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL
+          SELECT TOP 1 LTRIM(RTRIM(UserID)) AS UserID
+          FROM dbo.Assignments
+          WHERE VacancyID = @VacancyID
+          ORDER BY CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
+                   ISNULL(StartDate, '1900-01-01') DESC;
+      `);
+    const uid = res.recordset[0]?.UserID;
+    if (uid) return String(uid).trim();
+  } catch (_) {}
+  return text;
+}
+
 async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
   const normalizedBaseDepartmentId = String(baseDepartmentId || '').trim();
   if (!normalizedBaseDepartmentId || !/^\d+$/.test(normalizedBaseDepartmentId)) return [];
@@ -258,6 +279,18 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
     }
     const hasEndDate = !!colCheck.recordset[0].EndDateLen;
     const endDateSelect = hasEndDate ? 'CAST(s.EndDate AS DATE) AS EndDate,' : '';
+
+    // فحص وجود عمود المهام الشخصية وإعداد شرط OR لإدراجها في التقويم
+    const personalTaskColCheck = await pool.request().query(
+      `SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`
+    );
+    const hasPersonalCol = !!(personalTaskColCheck.recordset[0]?.Len);
+    // حلّ UserID الأصلي (userId قد يكون VacancyID رقمياً)
+    const personalUserId = await resolveUserIDFromActor(pool, userId);
+    const personalOrClause = hasPersonalCol
+      ? `OR (t.PersonalOwnerUserID IS NOT NULL AND t.PersonalOwnerUserID = @PersonalUserID)`
+      : '';
+
     // شرط النطاق: يشمل الأحداث الممتدة التي تتداخل مع الفترة المرئية
     const dateRangeWhere = hasEndDate
       ? `CAST(s.DueDate AS DATE) < @EndDate
@@ -277,7 +310,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
         ? `t.DepartmentID IN (${scopeParams})`
         : `t.DepartmentID = @DepartmentID`;
 
-      const request = pool.request().input('DepartmentID', sql.NVarChar, String(departmentId || '').trim()).input('Limit', sql.Int, safeLimit).input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0);
+      const request = pool.request().input('DepartmentID', sql.NVarChar, String(departmentId || '').trim()).input('Limit', sql.Int, safeLimit).input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0).input('PersonalUserID', sql.NVarChar, personalUserId);
       scopeDepartmentIds.forEach((deptId, index) => {
         request.input(`ScopeDepartmentID${index}`, sql.NVarChar, deptId);
       });
@@ -294,6 +327,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             ${endDateSelect}
             t.Title as TaskTitle,
             t.DepartmentID,
+            t.PersonalOwnerUserID,
             s.${assignedCol} as AssignedToID,
             ${assignedNameSelect}
           FROM Subtasks s
@@ -303,7 +337,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
             AND s.DueDate IS NOT NULL
             AND ${dateRangeWhere}
-            AND ${departmentScopeCondition}
+            AND (${departmentScopeCondition} ${personalOrClause})
           ORDER BY s.DueDate ASC
         `;
       } else {
@@ -316,6 +350,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             ${endDateSelect}
             t.Title as TaskTitle,
             t.DepartmentID,
+            t.PersonalOwnerUserID,
             s.${assignedCol} as AssignedToID,
             ${assignedNameSelect}
           FROM Subtasks s
@@ -325,7 +360,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
             AND s.DueDate IS NOT NULL
             AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
-            AND ${departmentScopeCondition}
+            AND (${departmentScopeCondition} ${personalOrClause})
           ORDER BY s.DueDate ASC
         `;
       }
@@ -342,7 +377,8 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
         const fallbackReq = pool.request()
           .input('ActorID', sql.NVarChar, currentActorId)
           .input('Limit', sql.Int, safeLimit)
-          .input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0);
+          .input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0)
+          .input('PersonalUserID', sql.NVarChar, personalUserId);
         if (hasLegacyAssignedCol) {
           fallbackReq.input('LegacyUserID', sql.NVarChar, currentLegacyUserId);
         }
@@ -359,6 +395,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             ${endDateSelect}
             t.Title as TaskTitle,
             t.DepartmentID,
+            t.PersonalOwnerUserID,
             s.${assignedCol} as AssignedToID,
             ${assignedNameSelect}
           FROM Subtasks s
@@ -368,7 +405,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
             AND s.DueDate IS NOT NULL
             AND ${dateRangeWhere}
-            AND ${actorMatchCondition}
+            AND (${actorMatchCondition} ${personalOrClause})
           ORDER BY s.DueDate ASC
         ` : `
           SELECT TOP(@Limit)
@@ -379,6 +416,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             ${endDateSelect}
             t.Title as TaskTitle,
             t.DepartmentID,
+            t.PersonalOwnerUserID,
             s.${assignedCol} as AssignedToID,
             ${assignedNameSelect}
           FROM Subtasks s
@@ -388,7 +426,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
             AND s.DueDate IS NOT NULL
             AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
-            AND ${actorMatchCondition}
+            AND (${actorMatchCondition} ${personalOrClause})
           ORDER BY s.DueDate ASC
         `;
         const fbResult = await fallbackReq.query(fallbackQuery);
@@ -403,7 +441,8 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
       const request = pool.request()
         .input('ActorID', sql.NVarChar, currentActorId)
         .input('Limit', sql.Int, safeLimit)
-        .input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0);
+        .input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0)
+        .input('PersonalUserID', sql.NVarChar, personalUserId);
       if (hasLegacyAssignedCol) {
         request.input('LegacyUserID', sql.NVarChar, currentLegacyUserId);
       }
@@ -429,7 +468,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
         WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
           AND s.DueDate IS NOT NULL
           AND ${dateRangeWhere}
-          AND ${actorMatchCondition}
+          AND (${actorMatchCondition} ${personalOrClause})
         ORDER BY s.DueDate ASC
       ` : `
         SELECT TOP(@Limit)
@@ -449,7 +488,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
         WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
           AND s.DueDate IS NOT NULL
           AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
-          AND ${actorMatchCondition}
+          AND (${actorMatchCondition} ${personalOrClause})
         ORDER BY s.DueDate ASC
       `;
       const result = await request.query(query);
@@ -774,10 +813,17 @@ exports.getCalendarComments = async (req, res) => {
 
     const includeAllFlag = typeof includeAllComments === 'string' && includeAllComments.toLowerCase() === 'true';
 
+    // دعم التعليقات على المهام الشخصية
+    const commentPersonalProbe = await pool.request().query(`SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`);
+    const hasPersonalColCmt = !!(commentPersonalProbe.recordset[0]?.Len);
+    const personalUserIdCmt = await resolveUserIDFromActor(pool, userId);
+    const commentPersonalOrClause = hasPersonalColCmt
+      ? `OR (t.PersonalOwnerUserID IS NOT NULL AND t.PersonalOwnerUserID = @PersonalUserID)`
+      : '';
+
     let items = [];
 
     if (resolvedDepartmentId != null) {
-      // Show ShowInCalendar comments from all departments in the unit scope
       const scopeDepartmentIds = await resolveDirectorateScopeByDepartment(pool, resolvedDepartmentId);
       const scopeParams = scopeDepartmentIds.map((_, i) => `@ScopeDepartmentID${i}`).join(', ');
       const departmentScopeCondition = scopeDepartmentIds.length > 0
@@ -787,6 +833,7 @@ exports.getCalendarComments = async (req, res) => {
       const request = pool.request()
         .input('DepartmentID', sql.NVarChar, String(resolvedDepartmentId))
         .input('IncludeAllComments', sql.Bit, includeAllFlag ? 1 : 0);
+      if (hasPersonalColCmt) request.input('PersonalUserID', sql.NVarChar, personalUserIdCmt);
       scopeDepartmentIds.forEach((deptId, i) => {
         request.input(`ScopeDepartmentID${i}`, sql.NVarChar, deptId);
       });
@@ -805,26 +852,27 @@ exports.getCalendarComments = async (req, res) => {
           c.${commentActorCol} as UserID,
           c.Content,
           c.CreatedAt,
-          t.Title as TaskTitle
+          t.Title as TaskTitle,
+          t.PersonalOwnerUserID
         FROM Comments c
         INNER JOIN Tasks t ON c.TaskID = t.TaskID
         WHERE (@IncludeAllComments = 1 OR c.ShowInCalendar = 1)
           ${dateFilter}
-          AND ${departmentScopeCondition}
+          AND (${departmentScopeCondition} ${commentPersonalOrClause})
         ORDER BY c.CreatedAt ASC, c.CommentID ASC
       `);
       items = result.recordset;
     } else {
-      // No department resolved — fall back to actor's own ShowInCalendar comments
       let actorId = loginId;
       if (usesVacancySchema && currentProfile?.VacancyID != null) {
         actorId = String(currentProfile.VacancyID).trim();
       }
-      if (!actorId) return res.status(200).json([]);
+      if (!actorId && !hasPersonalColCmt) return res.status(200).json([]);
 
       const request = pool.request()
-        .input('ActorID', sql.NVarChar, actorId)
         .input('IncludeAllComments', sql.Bit, includeAllFlag ? 1 : 0);
+      if (actorId) request.input('ActorID', sql.NVarChar, actorId);
+      if (hasPersonalColCmt) request.input('PersonalUserID', sql.NVarChar, personalUserIdCmt);
       if (useRange) {
         request.input('StartDate', sql.Date, startDateParam).input('EndDate', sql.Date, endDateParam);
       }
@@ -833,6 +881,7 @@ exports.getCalendarComments = async (req, res) => {
         ? `AND CAST(c.CreatedAt AS DATE) >= @StartDate AND CAST(c.CreatedAt AS DATE) < @EndDate`
         : `AND CAST(c.CreatedAt AS DATE) >= CAST(GETDATE() AS DATE)`;
 
+      const actorClause = actorId ? `c.${commentActorCol} = @ActorID` : '1=0';
       const result = await request.query(`
         SELECT
           c.CommentID,
@@ -840,11 +889,12 @@ exports.getCalendarComments = async (req, res) => {
           c.${commentActorCol} as UserID,
           c.Content,
           c.CreatedAt,
-          t.Title as TaskTitle
+          t.Title as TaskTitle,
+          t.PersonalOwnerUserID
         FROM Comments c
         INNER JOIN Tasks t ON c.TaskID = t.TaskID
         WHERE (@IncludeAllComments = 1 OR c.ShowInCalendar = 1)
-          AND c.${commentActorCol} = @ActorID
+          AND (${actorClause} ${commentPersonalOrClause})
           ${dateFilter}
         ORDER BY c.CreatedAt ASC, c.CommentID ASC
       `);
