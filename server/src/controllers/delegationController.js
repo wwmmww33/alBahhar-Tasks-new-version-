@@ -158,17 +158,8 @@ exports.createDelegation = async (req, res) => {
     let delegatorPrincipal, delegatePrincipal;
 
     if (cols.isVacancy) {
-      // المخطط الجديد: DelegateID القادم من الواجهة هو VacancyID مباشرةً
-      // (لأن listByDepartmentScope يُعيد CAST(VacancyID AS NVARCHAR) في حقل UserID)
-
-      // التحقق من وجود المفوِّض في Users
-      const delegatorCheck = await pool.request()
-        .input('UID', sql.NVarChar, currentUserId)
-        .query(`SELECT UserID FROM dbo.Users WHERE UserID = @UID`);
-      if (!delegatorCheck.recordset.length)
-        return res.status(400).json({ message: 'المفوض غير موجود في قاعدة البيانات.' });
-
-      // تحويل UserID المفوِّض → VacancyID عبر Assignments
+      // المخطط الجديد: currentUserId قد يكون VacancyID رقمي أو UserID نصي
+      // resolveVacancyId يتعامل مع كلا الحالتين
       delegatorPrincipal = await resolveVacancyId(pool, currentUserId);
       if (delegatorPrincipal == null)
         return res.status(400).json({ message: 'تعذّر تحديد منصبك. تأكد من وجود إسناد نشط لك.' });

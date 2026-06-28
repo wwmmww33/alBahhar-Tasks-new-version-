@@ -1027,6 +1027,8 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   };
   
   sortTasks(activeTasks);
+  sortTasks(workActiveTasks);
+  sortTasks(personalActiveTasks);
   sortTasks(actionedTasks);
   sortTasks(completedTasks);
 

@@ -50,3 +50,51 @@ Stop-Process -Name "bahar" -Force -ErrorAction SilentlyContinue; Start-Sleep -Se
 cd "c:\Users\RNO\Desktop\NewTask - V10 url - Copy (3) - cluade\server"
 node pack-only.mjs
 الفرق: يتجاوز خطوة esbuild ويستخدم bundle.js الموجود مسبقاً، ويكمل فقط خطوات SEA (4 و5 و6). مفيد عندما عدّلت كود الـ Server فقط وتريد تجنب الضغط على الذاكرة.
+
+
+
+
+
+حذف وانشاء القاعدة
+-- 0) اشتغل من master
+USE master;
+GO
+
+DECLARE @db sysname = N'AlBaharTaskManagement';
+
+-- 1) توليد أوامر KILL لكل الجلسات المرتبطة بالقاعدة (ما عدا جلستك)
+DECLARE @kill nvarchar(MAX) = N'';
+SELECT @kill = STRING_AGG(CONCAT('KILL ', session_id, ';'), ' ')
+FROM sys.dm_exec_sessions
+WHERE session_id <> @@SPID
+  AND DB_NAME(database_id) = @db;
+
+-- 2) تنفيذ الـ KILLs (إن وُجدت)
+IF @kill <> N'' 
+    EXEC(@kill);
+
+-- 3) إجبار القاعدة على مستخدم واحد وإنهاء أي معاملات فورية
+DECLARE @sql nvarchar(MAX) = N'ALTER DATABASE ' + QUOTENAME(@db) + 
+N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE;';
+EXEC(@sql);
+
+-- 4) حذف القاعدة
+SET @sql = N'DROP DATABASE ' + QUOTENAME(@db) + N';';
+EXEC(@sql);
+GO
+
+USE master;
+GO
+
+IF EXISTS (SELECT name FROM sys.databases WHERE name = 'AlBaharTaskManagement')
+BEGIN
+    ALTER DATABASE AlBaharTaskManagement SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE AlBaharTaskManagement;
+END
+GO
+
+CREATE DATABASE AlBaharTaskManagement COLLATE Arabic_CI_AS;
+GO
+
+USE AlBaharTaskManagement;
+GO

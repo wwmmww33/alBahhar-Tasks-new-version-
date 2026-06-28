@@ -585,8 +585,9 @@ exports.assignSubtask = async (req, res) => {
 
     const subtask = subtaskResult.recordset[0];
     const actingUserId = resolveActingUserId(req);
+    const isAdminAssign = resolveIsAdmin(req);
     const isCreator = await isActorSubtaskCreator(pool, subtask, actingUserId);
-    if (!isCreator) {
+    if (!isCreator && !isAdminAssign) {
       return res.status(403).json({ message: 'فقط منشئ المهمة الفرعية يمكنه تغيير الإسناد.' });
     }
 
@@ -682,8 +683,9 @@ exports.bulkAssignSubtask = async (req, res) => {
 
     const originalSubtask = subtaskResult.recordset[0];
     const actingUserId = resolveActingUserId(req);
+    const isAdmin = resolveIsAdmin(req);
     const isCreator = await isActorSubtaskCreator(pool, originalSubtask, actingUserId);
-    if (!isCreator) {
+    if (!isCreator && !isAdmin) {
       return res.status(403).json({ message: 'فقط منشئ المهمة الفرعية يمكنه تغيير الإسناد.' });
     }
 

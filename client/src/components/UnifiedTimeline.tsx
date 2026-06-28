@@ -343,7 +343,7 @@ const UnifiedTimeline = ({
   };
 
   const handleAssign = async (subtask: Subtask, assignedTo: string) => {
-    if (!isSubtaskCreatorActor(subtask)) {
+    if (!isSubtaskCreatorActor(subtask) && !currentUser.IsAdmin) {
       alert('فقط منشئ المهمة الفرعية يمكنه تغيير الإسناد.');
       return;
     }
@@ -367,7 +367,7 @@ const UnifiedTimeline = ({
 
   const submitBulkAssign = async () => {
       if (!selectedSubtaskForBulk) return;
-      if (!isSubtaskCreatorActor(selectedSubtaskForBulk)) {
+      if (!isSubtaskCreatorActor(selectedSubtaskForBulk) && !currentUser.IsAdmin) {
         alert('فقط منشئ المهمة الفرعية يمكنه تغيير الإسناد.');
         return;
       }
@@ -561,7 +561,7 @@ const UnifiedTimeline = ({
     const isPersonalOwner = !!(task?.PersonalOwnerUserID) &&
       String(task.PersonalOwnerUserID).trim() === String(currentUser.UserID).trim();
     const canToggleStatus = isSubtaskAssignedToActor(subtask) || isPersonalOwner;
-    const canManageAssignments = isSubtaskCreatorActor(subtask) || isPersonalOwner;
+    const canManageAssignments = isSubtaskCreatorActor(subtask) || isPersonalOwner || !!currentUser.IsAdmin;
     const assignedId = subtaskAssignedId(subtask);
     const assignedInUsersList = !!safeUsers.find(user => userActorId(user) === assignedId);
     const assignedFallbackLabel = subtask.AssignedToName || (assignedId ? `منصب #${assignedId}` : '');
@@ -1000,8 +1000,8 @@ const UnifiedTimeline = ({
               ))}
             </div>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setIsBulkModalOpen(false)} className="px-4 py-2 text-content-secondary hover:bg-content/10 rounded">إلغاء</button>
-              <button onClick={submitBulkAssign} className="px-4 py-2 bg-primary text-white rounded hover:bg-primary-dark shadow-sm">حفظ وتكرار</button>
+              <button type="button" onClick={() => setIsBulkModalOpen(false)} className="px-4 py-2 text-content-secondary hover:bg-content/10 rounded">إلغاء</button>
+              <button type="button" onClick={submitBulkAssign} className="px-4 py-2 bg-primary text-white rounded hover:bg-primary-dark shadow-sm">حفظ وتكرار</button>
             </div>
           </div>
         </div>
