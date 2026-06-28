@@ -126,6 +126,9 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   // التبويب الفرعي داخل "آخر التحديثات"
   const [updatesSubTab, setUpdatesSubTab] = useState<'updates' | 'audit'>('updates');
 
+  // التبويب الفرعي داخل "المهام النشطة"
+  const [activeTaskSubTab, setActiveTaskSubTab] = useState<'work' | 'personal'>('work');
+
   // سجل إجراءات المهام
   type AuditLogEntry = { LogID: number; TaskID: number | null; TaskTitle: string | null; Action: string; ActorName: string | null; ActorPosition: string | null; CreatedAt: string; };
   const [auditItems, setAuditItems] = useState<AuditLogEntry[]>([]);
@@ -936,26 +939,33 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
   const activeTasks = filteredTasks.filter(task => {
     if (!isOpenStatus(task)) return false;
-    // المهام الشخصية دائماً نشطة بصرف النظر عن المنصب الحالي
+    // المهام الشخصية دائماً نشطة
     if (isPersonalTaskOfActor(task)) return true;
+    // منشئ المهمة يراها دائماً في النشطة بغض النظر عن حالة المهام الفرعية
+    if (isTaskCreatedByActor(task)) return true;
     const subtasks = task.subtasks || [];
     if (subtasks.some(subtask => isSubtaskAssignedToActor(subtask) && !subtask.IsCompleted)) return true;
-    if (subtasks.length === 0 && isTaskCreatedByActor(task)) return true;
     return false;
   });
 
+  const workActiveTasks     = activeTasks.filter(task => !isPersonalTaskOfActor(task));
+  const personalActiveTasks = activeTasks.filter(task =>  isPersonalTaskOfActor(task));
+
   const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
 
-  // "أنجزت إجرائي فيها": مفتوحة + متعلقة بي + لا توجد مهام فرعية معلقة لي
-  // المهام الشخصية مستثناة — تنتمي دائماً للتبويب النشط
+  // "أنجزت إجرائي فيها": مفتوحة + مُسندت إليّ مهمة فرعية + جميعها مكتملة
+  // المهام الشخصية ومهام المنشئ مستثناة — تنتمي دائماً للتبويب النشط
   const actionedTasks = filteredTasks.filter(task => {
     if (!isOpenStatus(task)) return false;
     if (isPersonalTaskOfActor(task)) return false;
+    // منشئ المهمة لا ينتقل لهذا التبويب أبداً
+    if (isTaskCreatedByActor(task)) return false;
     const subtasks = task.subtasks || [];
-    const hasMyIncompleteSubtasks = subtasks.some(
-      subtask => isSubtaskAssignedToActor(subtask) && !subtask.IsCompleted
-    );
-    return !hasMyIncompleteSubtasks;
+    // يجب أن يكون لديّ مهمة فرعية واحدة على الأقل (مكتملة أو غير مكتملة)
+    const mySubtasks = subtasks.filter(st => isSubtaskAssignedToActor(st));
+    if (mySubtasks.length === 0) return false;
+    // جميع مهامي الفرعية مكتملة
+    return mySubtasks.every(st => st.IsCompleted);
   });
 
   // دالة للحصول على أكبر معرف للمهام الفرعية الغير مكتملة
@@ -1606,56 +1616,86 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
       {activeTab === 'active' && (
         <div>
-          <div className="flex justify-between items-center mb-6">
-            <div>
-              <h1 className="text-3xl font-bold text-content border-b-2 border-primary pb-2">المهام النشطة</h1>
-              {searchTerm.trim() && (
-                <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">
-                  عُثر على {activeTasks.length} مهمة نشطة تطابق البحث
-                </p>
-              )}
-            </div>
+          <div className="flex justify-between items-center mb-4">
+            <h1 className="text-3xl font-bold text-content border-b-2 border-primary pb-2">المهام النشطة</h1>
           </div>
-          {activeTasks.length > 0 ? (
-            layoutMode === 'grid' ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {activeTasks.map(task => (
-                  <TaskCard 
-                    key={task.TaskID} 
-                    task={task} 
-                    onPriorityChange={updateTaskPriority}
-                    onStatusChange={updateTaskStatus}
-                    isSelectionMode={isSelectionMode}
-                    isSelected={selectedTasks.has(task.TaskID)}
-                    onToggleSelection={toggleTaskSelection}
-                    isMySubtask={isMySubtaskByVacancyId}
-                  />
-                ))}
-              </div>
+
+          {/* التبويبات الفرعية */}
+          <div className="flex gap-1 mb-5 border-b border-content/10">
+            <button
+              onClick={() => setActiveTaskSubTab('work')}
+              className={`px-4 py-2 text-sm font-medium transition-colors rounded-t-md ${
+                activeTaskSubTab === 'work'
+                  ? 'text-primary border-b-2 border-primary bg-blue-50 dark:bg-blue-900/20'
+                  : 'text-gray-500 dark:text-gray-400 hover:text-primary'
+              }`}
+            >
+              مهام الوظيفة
+              {workActiveTasks.length > 0 && (
+                <span className="mr-1.5 inline-flex items-center justify-center rounded-full bg-primary/10 text-primary text-xs px-1.5 py-0.5">
+                  {workActiveTasks.length}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setActiveTaskSubTab('personal')}
+              className={`px-4 py-2 text-sm font-medium transition-colors rounded-t-md ${
+                activeTaskSubTab === 'personal'
+                  ? 'text-emerald-600 border-b-2 border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20'
+                  : 'text-gray-500 dark:text-gray-400 hover:text-emerald-600'
+              }`}
+            >
+              المهام الخاصة
+              {personalActiveTasks.length > 0 && (
+                <span className="mr-1.5 inline-flex items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 text-xs px-1.5 py-0.5">
+                  {personalActiveTasks.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* محتوى التبويب الفرعي */}
+          {(() => {
+            const displayTasks = activeTaskSubTab === 'work' ? workActiveTasks : personalActiveTasks;
+            const emptyMsg = activeTaskSubTab === 'work'
+              ? (searchTerm.trim() ? `لم يتم العثور على مهام وظيفية تطابق البحث "${searchTerm}"` : 'لا توجد مهام وظيفية نشطة حالياً.')
+              : (searchTerm.trim() ? `لم يتم العثور على مهام خاصة تطابق البحث "${searchTerm}"` : 'لا توجد مهام خاصة نشطة حالياً.');
+            return displayTasks.length > 0 ? (
+              layoutMode === 'grid' ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {displayTasks.map(task => (
+                    <TaskCard
+                      key={task.TaskID}
+                      task={task}
+                      onPriorityChange={updateTaskPriority}
+                      onStatusChange={updateTaskStatus}
+                      isSelectionMode={isSelectionMode}
+                      isSelected={selectedTasks.has(task.TaskID)}
+                      onToggleSelection={toggleTaskSelection}
+                      isMySubtask={isMySubtaskByVacancyId}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  {displayTasks.map(task => (
+                    <TaskCard
+                      key={task.TaskID}
+                      task={task}
+                      onPriorityChange={updateTaskPriority}
+                      onStatusChange={updateTaskStatus}
+                      isSelectionMode={isSelectionMode}
+                      isSelected={selectedTasks.has(task.TaskID)}
+                      onToggleSelection={toggleTaskSelection}
+                      isMySubtask={isMySubtaskByVacancyId}
+                    />
+                  ))}
+                </div>
+              )
             ) : (
-              <div className="flex flex-col gap-4">
-                {activeTasks.map(task => (
-                  <TaskCard 
-                    key={task.TaskID} 
-                    task={task} 
-                    onPriorityChange={updateTaskPriority}
-                    onStatusChange={updateTaskStatus}
-                    isSelectionMode={isSelectionMode}
-                    isSelected={selectedTasks.has(task.TaskID)}
-                    onToggleSelection={toggleTaskSelection}
-                    isMySubtask={isMySubtaskByVacancyId}
-                  />
-                ))}
-              </div>
-            )
-          ) : (
-            <p className="text-content-secondary text-center py-4">
-              {searchTerm.trim() 
-                ? `لم يتم العثور على مهام نشطة تطابق البحث "${searchTerm}"`
-                : "لا توجد مهام نشطة حالياً. عمل رائع!"
-              }
-            </p>
-          )}
+              <p className="text-content-secondary text-center py-8">{emptyMsg}</p>
+            );
+          })()}
         </div>
       )}
 
