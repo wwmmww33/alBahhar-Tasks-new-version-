@@ -15,6 +15,15 @@ type CalendarItem = {
   AssignedToName?: string;
   AssignedToID?: string | null;
   PersonalOwnerUserID?: string | null;
+  IsCompleted?: boolean | number;
+};
+
+// تجاوز وقت المهمة اليوم (لها وقت محدد غير 00:00 وحان موعدها)
+const isPastDueToday = (dateStr: string): boolean => {
+  if (!dateStr) return false;
+  const d = new Date(dateStr);
+  if (d.getHours() === 0 && d.getMinutes() === 0) return false;
+  return d.getTime() < Date.now();
 };
 
 type SpanPos = 'single' | 'start' | 'middle' | 'end';
@@ -39,6 +48,15 @@ const SPAN_COLORS = [
   '#ec4899', '#14b8a6', '#ef4444', '#eab308',
 ];
 const getSpanColor = (subtaskId: number) => SPAN_COLORS[subtaskId % SPAN_COLORS.length];
+
+const formatEventTime = (dateStr: string): string => {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  const h = d.getHours();
+  const m = d.getMinutes();
+  if (h === 0 && m === 0) return '';
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} `;
+};
 
 const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   const actorId = resolveCurrentActorId(currentUser) || currentUser.UserID;
@@ -69,8 +87,8 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       const isToday = i === 0;
       const dayLabel = isToday
         ? 'اليوم'
-        : d.toLocaleDateString('ar-EG', { weekday: 'long' });
-      const dateLabel = d.toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' });
+        : d.toLocaleDateString('ar-EG-u-nu-latn', { weekday: 'long' });
+      const dateLabel = d.toLocaleDateString('ar-EG-u-nu-latn', { day: 'numeric', month: 'long' });
       days.push({ key, date: d, label: `${dayLabel} - ${dateLabel}` });
     }
     return days;
@@ -391,20 +409,22 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                   {/* كل حدث متجاوز في مربع مستقل: خط ملون على اليسار + نص كامل حر */}
                   {carryOverItems.map((item) => {
                     const color = getSpanColor(item.SubtaskID);
-                    const startLabel = new Date(item.DueDate).toLocaleDateString('ar-EG', {
+                    const startLabel = new Date(item.DueDate).toLocaleDateString('ar-EG-u-nu-latn', {
                       day: 'numeric', month: 'short', year: 'numeric',
                     });
+                    const pastDue = isPastDueToday(item.DueDate);
+                    const completed = !!item.IsCompleted;
                     return (
                       <div
                         key={item.SubtaskID}
                         dir="rtl"
-                        className="py-0.5 mb-0.5 text-xs min-w-0"
+                        className={`py-0.5 mb-0.5 text-xs min-w-0 ${pastDue ? 'opacity-50' : ''}`}
                         style={{ borderLeft: `3px solid ${color}`, paddingLeft: '6px' }}
                       >
                         <button
                           type="button"
                           style={{ color }}
-                          className="font-semibold hover:underline break-words text-right w-full block min-w-0"
+                          className={`font-semibold hover:underline break-words text-right w-full block min-w-0 ${completed ? 'line-through' : ''}`}
                           onClick={() => openTaskInNewTab(item.TaskID)}
                         >
                           {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
@@ -462,21 +482,26 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                         <div className={`text-xs font-semibold mb-1 ${hasEvents ? 'text-black dark:text-white' : 'text-content'} text-right`}>{d.label}</div>
                         {visibleShared.length > 0 && (
                           <div className="space-y-0.5 text-right">
-                            {visibleShared.map((item) => {
+                            {[...visibleShared]
+                              .sort((a, b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime())
+                              .map((item) => {
                               const pos = item._spanPos;
                               const isFirstVisible = firstVisibleDayMap.get(item.SubtaskID) === d.key;
                               if (pos !== 'single' && !(isFirstVisible && pos === 'start')) return null;
                               const spanning = pos === 'start';
                               const color = spanning ? getSpanColor(item.SubtaskID) : undefined;
+                              const timePrefix = formatEventTime(item.DueDate);
+                              const pastDue = isPastDueToday(item.DueDate);
+                              const completed = !!item.IsCompleted;
                               return (
-                                <div key={`${item.SubtaskID}-${pos}`} className="text-xs">
+                                <div key={`${item.SubtaskID}-${pos}`} className={`text-xs ${pastDue ? 'opacity-50' : ''}`}>
                                   <button
                                     type="button"
                                     style={{ color }}
-                                    className="font-semibold hover:underline cursor-pointer text-right w-full break-words block"
+                                    className={`font-semibold hover:underline cursor-pointer text-right w-full break-words block ${completed ? 'line-through' : ''}`}
                                     onClick={() => openTaskInNewTab(item.TaskID)}
                                   >
-                                    {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                                    {timePrefix}{item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
                                   </button>
                                   <div style={{ color }} className="opacity-70">ضمن: {item.TaskTitle}</div>
                                 </div>
@@ -486,18 +511,24 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                         )}
                         {visiblePersonal.length > 0 && (
                           <div className="space-y-1 text-right mt-1">
-                            {visiblePersonal.map((it) => (
-                              <div key={it.SubtaskID} className="text-xs">
+                            {[...visiblePersonal]
+                              .sort((a, b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime())
+                              .map((it) => {
+                                const pastDue = isPastDueToday(it.DueDate);
+                                const completed = !!it.IsCompleted;
+                                return (
+                              <div key={it.SubtaskID} className={`text-xs ${pastDue ? 'opacity-50' : ''}`}>
                                 <button
                                   type="button"
                                   onClick={() => openTaskInNewTab(it.TaskID)}
-                                  className="font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block"
+                                  className={`font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block ${completed ? 'line-through' : ''}`}
                                 >
-                                  {it.SubtaskTitle}
+                                  {formatEventTime(it.DueDate)}{it.SubtaskTitle}
                                 </button>
                                 <div className="text-[10px] text-emerald-600 dark:text-emerald-400">ضمن: {it.TaskTitle}</div>
                               </div>
-                            ))}
+                                );
+                              })}
                           </div>
                         )}
                         {visibleComments.length > 0 && (
@@ -554,16 +585,19 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                 <h3 className="text-sm font-bold text-content mb-2">أحداث بعد 30 يوم</h3>
                 <ul className="space-y-2">
                   {merged.map((entry) => {
-                    const dateLabel = new Date(entry.date).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' });
+                    const dateLabel = new Date(entry.date).toLocaleDateString('ar-EG-u-nu-latn', { weekday: 'long', day: 'numeric', month: 'long' });
                     if (entry.kind === 'subtask') {
                       const item = entry.item;
+                      const timePrefix = formatEventTime(item.DueDate);
+                      const pastDue = isPastDueToday(item.DueDate);
+                      const completed = !!item.IsCompleted;
                       return (
-                        <li key={`s-${item.SubtaskID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
-                          <div className="text-xs text-content-secondary mb-1">{dateLabel}</div>
+                        <li key={`s-${item.SubtaskID}`} className={`p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right ${pastDue ? 'opacity-50' : ''}`}>
+                          <div className="text-xs text-content-secondary mb-1">{timePrefix}{dateLabel}</div>
                           <div className="text-xs">
                             <button
                               type="button"
-                              className="font-semibold text-blue-800 dark:text-blue-200 hover:underline cursor-pointer text-right"
+                              className={`font-semibold text-blue-800 dark:text-blue-200 hover:underline cursor-pointer text-right ${completed ? 'line-through' : ''}`}
                               onClick={() => openTaskInNewTab(item.TaskID)}
                             >
                               {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
@@ -574,14 +608,17 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                       );
                     } else if (entry.kind === 'personal') {
                       const it = entry.item;
+                      const timePrefix = formatEventTime(it.DueDate);
+                      const pastDue = isPastDueToday(it.DueDate);
+                      const completed = !!it.IsCompleted;
                       return (
-                        <li key={`p-${it.SubtaskID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-emerald-200 dark:border-emerald-800 text-right">
-                          <div className="text-xs text-content-secondary mb-1">{dateLabel}</div>
+                        <li key={`p-${it.SubtaskID}`} className={`p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-emerald-200 dark:border-emerald-800 text-right ${pastDue ? 'opacity-50' : ''}`}>
+                          <div className="text-xs text-content-secondary mb-1">{timePrefix}{dateLabel}</div>
                           <div className="text-xs">
                             <button
                               type="button"
                               onClick={() => openTaskInNewTab(it.TaskID)}
-                              className="font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block"
+                              className={`font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block ${completed ? 'line-through' : ''}`}
                             >
                               {it.SubtaskTitle}
                             </button>

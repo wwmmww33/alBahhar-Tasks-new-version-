@@ -1,10 +1,47 @@
 // src/components/UnifiedTimeline.tsx
-import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users } from 'lucide-react';
+import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell } from 'lucide-react';
 import React, { useState, useMemo, useCallback, useRef } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId, resolveUserActorId } from '../utils/actorIdentity';
+
+// قائمتا اختيار الساعة (00-23) والدقيقة (00-59) بنظام 24 ساعة مستقل عن الـ locale
+const renderTimeSelects = (
+  dateTimeValue: string,
+  setDateTimeValue: (v: string) => void,
+  className = ''
+) => {
+  const parts = (dateTimeValue.split('T')[1] || '00:00').split(':');
+  const currentH = parseInt(parts[0] || '0', 10);
+  const currentM = parseInt(parts[1] || '0', 10);
+  const datePart = dateTimeValue.split('T')[0];
+  return (
+    <span className={`flex items-center gap-0.5 ${className}`}>
+      <select
+        value={String(currentH).padStart(2, '0')}
+        onChange={(e) => setDateTimeValue(datePart + 'T' + e.target.value + ':' + String(currentM).padStart(2, '0'))}
+        title="الساعة (00-23)"
+        className="p-1 border rounded bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm text-center w-14"
+      >
+        {Array.from({ length: 24 }, (_, i) => (
+          <option key={i} value={String(i).padStart(2, '0')}>{String(i).padStart(2, '0')}</option>
+        ))}
+      </select>
+      <span className="text-sm font-mono select-none px-0.5">:</span>
+      <select
+        value={String(currentM).padStart(2, '0')}
+        onChange={(e) => setDateTimeValue(datePart + 'T' + String(currentH).padStart(2, '0') + ':' + e.target.value)}
+        title="الدقيقة"
+        className="p-1 border rounded bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm text-center w-14"
+      >
+        {Array.from({ length: 60 }, (_, i) => (
+          <option key={i} value={String(i).padStart(2, '0')}>{String(i).padStart(2, '0')}</option>
+        ))}
+      </select>
+    </span>
+  );
+};
 
 type Comment = {
   CommentID: number;
@@ -22,6 +59,7 @@ type TimelineItem = {
   id: string;
   type: 'subtask' | 'comment';
   createdAt: string;
+  sortDate: string;
   data: Subtask | Comment;
 };
 
@@ -83,7 +121,23 @@ const UnifiedTimeline = ({
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
+    return `${y}-${m}-${day}T00:00`;
+  };
+  const formatToDateTimeLocal = (d: Date) => {
+    const y = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const da = String(d.getDate()).padStart(2, '0');
+    const h = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${y}-${mo}-${da}T${h}:${mi}`;
+  };
+  const formatDateTimeDisplay = (dateStr: string) => {
+    const d = new Date(dateStr);
+    const dateLabel = d.toLocaleDateString('ar-EG-u-nu-latn');
+    const h = d.getHours();
+    const mi = d.getMinutes();
+    if (h === 0 && mi === 0) return dateLabel;
+    return `${dateLabel} ${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
   };
   const getCurrentDateTime = () => {
     const now = new Date();
@@ -100,6 +154,8 @@ const UnifiedTimeline = ({
   const [newSubtaskEndDate, setNewSubtaskEndDate] = useState('');
   const [assignTo, setAssignTo] = useState('');
   const [showInCalendar, setShowInCalendar] = useState(false);
+  const [reminderEnabled, setReminderEnabled] = useState(false);
+  const [reminderMinutes, setReminderMinutes] = useState(15);
   const [newComment, setNewComment] = useState('');
   const [useCustomDateTime, setUseCustomDateTime] = useState(false);
   const [customDateTime, setCustomDateTime] = useState(getCurrentDateTime());
@@ -114,6 +170,9 @@ const UnifiedTimeline = ({
   const [editingDueValue, setEditingDueValue] = useState<string>('');
   const [editingEndSubtaskId, setEditingEndSubtaskId] = useState<number | null>(null);
   const [editingEndValue, setEditingEndValue] = useState<string>('');
+  const [editingReminderSubtaskId, setEditingReminderSubtaskId] = useState<number | null>(null);
+  const [editingReminderEnabled, setEditingReminderEnabled] = useState(false);
+  const [editingReminderMinutes, setEditingReminderMinutes] = useState(15);
   const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
   const [editingCommentValue, setEditingCommentValue] = useState('');
 
@@ -195,32 +254,38 @@ const UnifiedTimeline = ({
 
   const canAddSubtasks = Boolean(task);
 
-  // دمج المهام الفرعية والتعليقات وترتيبها حسب التاريخ
+  // دمج المهام الفرعية والتعليقات وترتيبها حسب تاريخ الاستحقاق (الأحدث أولاً)
   const timelineItems: TimelineItem[] = useMemo(() => {
     const items: TimelineItem[] = [];
 
-    // إضافة المهام الفرعية
+    // إضافة المهام الفرعية — تُرتب بتاريخ الاستحقاق، وبدون تاريخ تذهب للأسفل
     subtasks.forEach(subtask => {
       items.push({
         id: `subtask-${subtask.SubtaskID}`,
         type: 'subtask',
         createdAt: subtask.CreatedAt,
+        sortDate: (subtask as any).DueDate || '',
         data: subtask
       });
     });
 
-    // إضافة التعليقات
+    // إضافة التعليقات — تُرتب بتاريخ إنشائها
     comments.forEach(comment => {
       items.push({
         id: `comment-${comment.CommentID}`,
         type: 'comment',
         createdAt: comment.CreatedAt,
+        sortDate: comment.CreatedAt,
         data: comment
       });
     });
 
-    // ترتيب العناصر حسب التاريخ (الأحدث أولاً)
-    return items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // ترتيب من الأحدث إلى الأقدم (عناصر بلا تاريخ تنزل للأسفل)
+    return items.sort((a, b) => {
+      const aTime = a.sortDate ? new Date(a.sortDate).getTime() : 0;
+      const bTime = b.sortDate ? new Date(b.sortDate).getTime() : 0;
+      return bTime - aTime;
+    });
   }, [subtasks, comments]);
 
   const handleAddSubtask = async (e: React.FormEvent) => {
@@ -245,6 +310,8 @@ const UnifiedTimeline = ({
                         TaskID: taskId, Title: newSubtaskTitle, CreatedBy: actingUserId, ActedBy: actedByValue,
                         DueDate: newSubtaskDueDate || null, EndDate: newSubtaskEndDate || null, AssignedTo: userId,
                         ShowInCalendar: showInCalendar,
+                        ReminderEnabled: reminderEnabled,
+                        ReminderMinutes: reminderEnabled ? reminderMinutes : null,
                         UserID: actingUserId, isAdmin: currentUser.IsAdmin
                     }),
                 });
@@ -264,6 +331,7 @@ const UnifiedTimeline = ({
         }
 
         setNewSubtaskTitle(''); setNewSubtaskDueDate(getTodayString()); setNewSubtaskEndDate(''); setAssignTo(''); setShowInCalendar(false);
+        setReminderEnabled(false); setReminderMinutes(15);
         setNewSubtaskBulkUsers([]);
 
         if (successCount > 0) {
@@ -291,6 +359,8 @@ const UnifiedTimeline = ({
         EndDate: newSubtaskEndDate || null,
         AssignedTo: assignTo || actingUserId,
         ShowInCalendar: showInCalendar,
+        ReminderEnabled: reminderEnabled,
+        ReminderMinutes: reminderEnabled ? reminderMinutes : null,
         UserID: actingUserId,
         isAdmin: currentUser.IsAdmin
       }),
@@ -300,6 +370,8 @@ const UnifiedTimeline = ({
     setNewSubtaskEndDate('');
     setAssignTo('');
     setShowInCalendar(false);
+    setReminderEnabled(false);
+    setReminderMinutes(15);
     onSubtaskUpdate();
     if (resp.ok) {
       window.dispatchEvent(new CustomEvent('calendar:subtask:created', { detail: { ShowInCalendar: showInCalendar, DueDate: newSubtaskDueDate } }));
@@ -406,7 +478,7 @@ const UnifiedTimeline = ({
   };
 
   // حفظ تفاصيل المهمة الفرعية (العنوان / تاريخ الاستحقاق)
-  const saveSubtaskDetails = async (subtaskId: number, payload: Partial<Pick<Subtask, 'Title' | 'DueDate' | 'EndDate'>>) => {
+  const saveSubtaskDetails = async (subtaskId: number, payload: Partial<Pick<Subtask, 'Title' | 'DueDate' | 'EndDate' | 'ReminderEnabled' | 'ReminderMinutes'>>) => {
     try {
       const resp = await fetch(`/api/subtasks/${subtaskId}/details`, {
         method: 'PATCH',
@@ -417,6 +489,11 @@ const UnifiedTimeline = ({
         const text = await resp.text().catch(() => '');
         alert(`فشل حفظ التغييرات (${resp.status}). ${text}`);
         return false;
+      }
+      // أي تعديل يؤثر على موعد التذكير (الاستحقاق أو إعدادات التذكير نفسها) يُعيد تفعيله
+      // حتى لو سبق إظهار النافذة المنبثقة لهذه المهمة من قبل
+      if ('DueDate' in payload || 'ReminderEnabled' in payload || 'ReminderMinutes' in payload) {
+        window.dispatchEvent(new CustomEvent('subtask:reminder:edited', { detail: { subtaskId } }));
       }
       onSubtaskUpdate();
       refreshTasks();
@@ -654,7 +731,8 @@ const UnifiedTimeline = ({
               )}
             </div>
             
-            <div className="flex flex-wrap gap-4 text-xs text-content-secondary">
+            <div className="flex flex-col gap-2 text-xs text-content-secondary">
+              <div className="flex flex-wrap gap-4 items-center">
               <div className="flex items-center gap-2">
                 <UserPlus size={14} />
                 {isPersonalOwner ? (
@@ -701,58 +779,64 @@ const UnifiedTimeline = ({
                   </span>
                 </div>
               )}
-              
-              <div className="flex items-center gap-3">
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-1">
                   <Calendar size={14} />
                   {editingDueSubtaskId === subtask.SubtaskID ? (
-                    <input
-                      type="date"
-                      autoFocus
-                      value={editingDueValue}
-                      onChange={(e) => setEditingDueValue(e.target.value)}
-                      onBlur={async () => {
+                    <span
+                      className="flex items-center gap-1"
+                      onBlur={async (e) => {
+                        // إذا انتقل التركيز لعنصر داخل نفس الحاوية لا نغلق
+                        if (e.currentTarget.contains(e.relatedTarget as Node)) return;
                         const next = editingDueValue || '';
-                        const original = subtask.DueDate ? new Date(subtask.DueDate).toISOString().slice(0, 10) : '';
+                        const original = subtask.DueDate ? formatToDateTimeLocal(new Date(subtask.DueDate)) : '';
                         if (next !== original) {
                           await saveSubtaskDetails(subtask.SubtaskID, { DueDate: next || null as any });
                         }
                         setEditingDueSubtaskId(null);
                       }}
-                      onKeyDown={async (e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          const next = editingDueValue || '';
-                          const original = subtask.DueDate ? new Date(subtask.DueDate).toISOString().slice(0, 10) : '';
-                          if (next !== original) {
-                            await saveSubtaskDetails(subtask.SubtaskID, { DueDate: next || null as any });
+                    >
+                      <input
+                        type="date"
+                        autoFocus
+                        value={editingDueValue.split('T')[0]}
+                        onChange={(e) => setEditingDueValue(e.target.value + 'T' + (editingDueValue.split('T')[1] || '00:00'))}
+                        onKeyDown={async (e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const next = editingDueValue || '';
+                            const original = subtask.DueDate ? formatToDateTimeLocal(new Date(subtask.DueDate)) : '';
+                            if (next !== original) {
+                              await saveSubtaskDetails(subtask.SubtaskID, { DueDate: next || null as any });
+                            }
+                            setEditingDueSubtaskId(null);
+                          } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            setEditingDueSubtaskId(null);
                           }
-                          setEditingDueSubtaskId(null);
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault();
-                          setEditingDueSubtaskId(null);
-                        }
-                      }}
-                      className="text-xs bg-bkg border border-content/20 rounded px-2 py-1 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
-                    />
+                        }}
+                        className="text-xs bg-bkg border border-content/20 rounded px-2 py-1 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                      />
+                      {renderTimeSelects(editingDueValue, setEditingDueValue, 'text-xs')}
+                    </span>
                   ) : (
                     <span
                       className="cursor-text"
                       onClick={() => {
                         if (!canEditDue) return;
                         setEditingDueSubtaskId(subtask.SubtaskID);
-                        const original = subtask.DueDate ? new Date(subtask.DueDate).toISOString().slice(0, 10) : getTodayString();
-                        setEditingDueValue(original);
+                        setEditingDueValue(subtask.DueDate ? formatToDateTimeLocal(new Date(subtask.DueDate)) : getTodayString());
                       }}
                       onDoubleClick={() => {
                         if (!canEditDue) return;
                         setEditingDueSubtaskId(subtask.SubtaskID);
-                        const original = subtask.DueDate ? new Date(subtask.DueDate).toISOString().slice(0, 10) : getTodayString();
-                        setEditingDueValue(original);
+                        setEditingDueValue(subtask.DueDate ? formatToDateTimeLocal(new Date(subtask.DueDate)) : getTodayString());
                       }}
                       title={canEditDue ? 'انقر لتعديل تاريخ الاستحقاق' : undefined}
                     >
-                      الاستحقاق: {subtask.DueDate ? new Date(subtask.DueDate).toLocaleDateString('ar-EG') : '—'}
+                      الاستحقاق: {subtask.DueDate ? formatDateTimeDisplay(subtask.DueDate) : '—'}
                     </span>
                   )}
                   {editingEndSubtaskId === subtask.SubtaskID ? (
@@ -798,7 +882,7 @@ const UnifiedTimeline = ({
                       title="انقر لتعديل تاريخ الانتهاء"
                     >
                       {subtask.EndDate
-                        ? `— نهاية: ${new Date(subtask.EndDate).toLocaleDateString('ar-EG')}`
+                        ? `— نهاية: ${new Date(subtask.EndDate).toLocaleDateString('ar-EG-u-nu-latn')}`
                         : '— (انتهاء)'}
                     </span>
                   )}
@@ -811,6 +895,73 @@ const UnifiedTimeline = ({
                   />
                   <span>إظهار في التقويم</span>
                 </label>
+                {editingReminderSubtaskId === subtask.SubtaskID ? (
+                  <span
+                    className="flex items-center gap-1.5"
+                    onBlur={async (e) => {
+                      if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                      const origEnabled = !!subtask.ReminderEnabled;
+                      const origMinutes = subtask.ReminderMinutes ?? 15;
+                      if (editingReminderEnabled !== origEnabled || (editingReminderEnabled && editingReminderMinutes !== origMinutes)) {
+                        await saveSubtaskDetails(subtask.SubtaskID, {
+                          ReminderEnabled: editingReminderEnabled,
+                          ReminderMinutes: editingReminderEnabled ? editingReminderMinutes : null,
+                        });
+                      }
+                      setEditingReminderSubtaskId(null);
+                    }}
+                  >
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        autoFocus
+                        checked={editingReminderEnabled}
+                        onChange={(e) => setEditingReminderEnabled(e.target.checked)}
+                      />
+                      <span>تذكير</span>
+                    </label>
+                    {editingReminderEnabled && (
+                      <>
+                        <input
+                          type="number"
+                          min={1}
+                          max={1440}
+                          value={editingReminderMinutes}
+                          onChange={(e) => setEditingReminderMinutes(Math.max(1, parseInt(e.target.value) || 15))}
+                          onKeyDown={async (e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              await saveSubtaskDetails(subtask.SubtaskID, {
+                                ReminderEnabled: editingReminderEnabled,
+                                ReminderMinutes: editingReminderMinutes,
+                              });
+                              setEditingReminderSubtaskId(null);
+                            } else if (e.key === 'Escape') {
+                              setEditingReminderSubtaskId(null);
+                            }
+                          }}
+                          className="w-14 text-xs bg-bkg border border-content/20 rounded px-1 py-0.5 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-center"
+                        />
+                        <span className="text-xs">د قبل</span>
+                      </>
+                    )}
+                  </span>
+                ) : (
+                  <span
+                    className="flex items-center gap-1 cursor-pointer"
+                    onClick={() => {
+                      setEditingReminderSubtaskId(subtask.SubtaskID);
+                      setEditingReminderEnabled(!!subtask.ReminderEnabled);
+                      setEditingReminderMinutes(subtask.ReminderMinutes ?? 15);
+                    }}
+                    title="انقر لتعديل التذكير"
+                  >
+                    <Bell size={14} className={subtask.ReminderEnabled ? 'text-orange-500' : 'opacity-40'} />
+                    {subtask.ReminderEnabled
+                      ? `تذكير قبل ${subtask.ReminderMinutes ?? 15} د`
+                      : <span className="opacity-40">بلا تذكير</span>}
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -818,7 +969,7 @@ const UnifiedTimeline = ({
           <div className="flex items-center gap-2 mt-2 text-xs text-content-secondary">
             <Clock size={12} />
             <span>
-              تم الإنشاء: {new Date(subtask.CreatedAt).toLocaleString('ar-EG', {
+              تم الإنشاء: {new Date(subtask.CreatedAt).toLocaleString('ar-EG-u-nu-latn', {
                 year: 'numeric',
                 month: '2-digit',
                 day: '2-digit',
@@ -958,7 +1109,7 @@ const UnifiedTimeline = ({
           <div className="flex items-center gap-2 mt-2 text-xs text-content-secondary">
             <Clock size={12} />
             <span>
-              تاريخ الإدراج: {new Date(comment.CreatedAt).toLocaleString('ar-EG', {
+              تاريخ الإدراج: {new Date(comment.CreatedAt).toLocaleString('ar-EG-u-nu-latn', {
                 year: 'numeric',
                 month: '2-digit',
                 day: '2-digit',
@@ -1058,63 +1209,69 @@ const UnifiedTimeline = ({
           </div>
           
           {showSubtaskForm && (
-          <form onSubmit={handleAddSubtask} className="grid grid-cols-1 md:grid-cols-12 gap-2">
-            <div className="md:col-span-4">
+          <form onSubmit={handleAddSubtask} className="mt-3 space-y-2">
+            {/* السطر الأول: العنوان + الإسناد */}
+            <div className="flex flex-wrap gap-2">
               <input
                 type="text"
                 value={newSubtaskTitle}
                 onChange={(e) => setNewSubtaskTitle(e.target.value)}
                 placeholder="عنوان المهمة الفرعية..."
                 required
-                className="w-full p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                className="flex-1 min-w-[180px] p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
               />
-            </div>
-            <div className="md:col-span-4 flex gap-1">
-              <input
-                type="date"
-                value={newSubtaskDueDate}
-                onChange={(e) => setNewSubtaskDueDate(e.target.value)}
-                title="تاريخ الاستحقاق"
-                className="flex-1 p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm"
-              />
-              <input
-                type="date"
-                value={newSubtaskEndDate}
-                onChange={(e) => setNewSubtaskEndDate(e.target.value)}
-                title="تاريخ الانتهاء (اختياري)"
-                className="flex-1 p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm opacity-70"
-              />
-            </div>
-            <div className="md:col-span-3 flex items-center gap-1">
-              <select
-                value={assignTo}
-                onChange={e => {
+              <div className="flex gap-1 items-center">
+                <select
+                  value={assignTo}
+                  onChange={e => {
                     if (e.target.value === 'bulk') {
-                        setIsNewTaskBulkModalOpen(true);
-                        setAssignTo('bulk');
+                      setIsNewTaskBulkModalOpen(true);
+                      setAssignTo('bulk');
                     } else {
-                        setAssignTo(e.target.value);
+                      setAssignTo(e.target.value);
                     }
-                }}
-                className="p-2 border rounded-md bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 w-full"
-              >
-                <option value="">إسناد لـ: (نفسي)</option>
-                <option value="bulk" className="font-bold text-primary">👥 إسناد متعدد...</option>
-                {safeUsers.map(user => (
-                  <option key={userActorId(user)} value={userActorId(user)}>{user.FullName}</option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => { setIsNewTaskBulkModalOpen(true); setAssignTo('bulk'); }}
-                className="p-2 bg-primary/10 hover:bg-primary/20 rounded-md text-primary transition-colors flex-shrink-0"
-                title="إسناد متعدد"
-              >
-                <Users size={20} />
-              </button>
+                  }}
+                  className="p-2 border rounded-md bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                >
+                  <option value="">إسناد لـ: (نفسي)</option>
+                  <option value="bulk" className="font-bold text-primary">👥 إسناد متعدد...</option>
+                  {safeUsers.map(user => (
+                    <option key={userActorId(user)} value={userActorId(user)}>{user.FullName}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => { setIsNewTaskBulkModalOpen(true); setAssignTo('bulk'); }}
+                  className="p-2 bg-primary/10 hover:bg-primary/20 rounded-md text-primary transition-colors flex-shrink-0"
+                  title="إسناد متعدد"
+                >
+                  <Users size={20} />
+                </button>
+              </div>
             </div>
-            <div className="md:col-span-2 flex items-center justify-center">
-              <label className="flex items-center gap-2 text-sm px-2 cursor-pointer">
+            {/* السطر الثاني: التواريخ + الوقت + التقويم + الإضافة */}
+            <div className="flex flex-wrap gap-2 items-center">
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-content-secondary whitespace-nowrap">الاستحقاق:</span>
+                <input
+                  type="date"
+                  value={newSubtaskDueDate.split('T')[0]}
+                  onChange={(e) => setNewSubtaskDueDate(e.target.value + 'T' + (newSubtaskDueDate.split('T')[1] || '00:00'))}
+                  className="p-1.5 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm"
+                />
+                {renderTimeSelects(newSubtaskDueDate, setNewSubtaskDueDate)}
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-content-secondary whitespace-nowrap opacity-70">الانتهاء:</span>
+                <input
+                  type="date"
+                  value={newSubtaskEndDate}
+                  onChange={(e) => setNewSubtaskEndDate(e.target.value)}
+                  title="تاريخ الانتهاء (اختياري)"
+                  className="p-1.5 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm opacity-70"
+                />
+              </div>
+              <label className="flex items-center gap-1.5 text-sm cursor-pointer whitespace-nowrap">
                 <input
                   type="checkbox"
                   checked={showInCalendar}
@@ -1122,11 +1279,30 @@ const UnifiedTimeline = ({
                 />
                 إظهار في التقويم
               </label>
-            </div>
-            <div className="md:col-span-12 flex justify-end">
+              <label className="flex items-center gap-1.5 text-sm cursor-pointer whitespace-nowrap">
+                <input
+                  type="checkbox"
+                  checked={reminderEnabled}
+                  onChange={(e) => setReminderEnabled(e.target.checked)}
+                />
+                تذكير
+              </label>
+              {reminderEnabled && (
+                <div className="flex items-center gap-1 text-sm">
+                  <input
+                    type="number"
+                    min={1}
+                    max={1440}
+                    value={reminderMinutes}
+                    onChange={(e) => setReminderMinutes(Math.max(1, parseInt(e.target.value) || 15))}
+                    className="w-16 p-1.5 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-center text-sm"
+                  />
+                  <span className="text-xs text-content-secondary whitespace-nowrap">دقيقة قبل</span>
+                </div>
+              )}
               <button
                 type="submit"
-                className="bg-primary text-white px-6 py-2 rounded-md hover:bg-primary-dark w-full md:w-auto"
+                className="bg-primary text-white px-5 py-1.5 rounded-md hover:bg-primary-dark text-sm"
               >
                 إضافة
               </button>

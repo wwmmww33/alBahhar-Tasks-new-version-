@@ -3,6 +3,7 @@ import React from 'react';
 import { useLocation } from 'react-router-dom';
 import Navbar from '../components/Navbar';
 import SidebarCalendar from '../components/SidebarCalendar';
+import SubtaskReminder from '../components/SubtaskReminder';
 import type { CurrentUser } from '../types';
 
 type MainLayoutProps = {
@@ -25,6 +26,7 @@ const MainLayout = ({ children, currentUser, onLogout }: MainLayoutProps) => {
           {children}
         </main>
       </div>
+      <SubtaskReminder currentUser={currentUser} />
     </div>
   );
 };

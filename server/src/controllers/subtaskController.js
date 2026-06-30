@@ -325,7 +325,7 @@ exports.getAllSubtasks = async (req, res) => {
 exports.createSubtask = async (req, res) => {
   const pool = req.app.locals.db;
   // --- تأكد من أننا نستقبل كل هذه الحقول ---
-  const { TaskID, Title, CreatedBy, ActedBy, DueDate, EndDate, AssignedTo, ShowInCalendar } = req.body;
+  const { TaskID, Title, CreatedBy, ActedBy, DueDate, EndDate, AssignedTo, ShowInCalendar, ReminderEnabled, ReminderMinutes } = req.body;
   
   if (!TaskID || !Title || !CreatedBy) {
     return res.status(400).json({ message: 'TaskID, Title, and CreatedBy are required.' });
@@ -360,6 +360,8 @@ exports.createSubtask = async (req, res) => {
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'IsCompleted') IS NOT NULL THEN 1 ELSE 0 END AS HasIsCompleted,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedAt') IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedAt,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'ReminderEnabled') IS NOT NULL THEN 1 ELSE 0 END AS HasReminderEnabled,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'ReminderMinutes') IS NOT NULL THEN 1 ELSE 0 END AS HasReminderMinutes,
         CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifAssignedToVacancy,
         CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifAssignedToUser,
         CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifAssignedByVacancy,
@@ -384,12 +386,8 @@ exports.createSubtask = async (req, res) => {
       ? await resolveActorId(pool, actorUserId, !!schema.HasCreatedByVacancy)
       : '';
 
-    // تطبيع DueDate وEndDate إلى تاريخ محلي فقط لتجنب انحراف المنطقة الزمنية
-    let dueDateNormalized = null;
-    if (DueDate) {
-      const d = new Date(DueDate);
-      dueDateNormalized = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    }
+    // DueDate يُحفظ كـ DATETIME لدعم الوقت، EndDate يبقى DATE (يوم فقط)
+    let dueDateNormalized = DueDate ? new Date(DueDate) : null;
     let endDateNormalized = null;
     if (EndDate) {
       const d = new Date(EndDate);
@@ -419,7 +417,7 @@ exports.createSubtask = async (req, res) => {
       insertValues.push('0');
     }
     if (schema.HasDueDate) {
-      createReq.input('DueDate', sql.Date, dueDateNormalized);
+      createReq.input('DueDate', sql.DateTime, dueDateNormalized);
       insertColumns.push('DueDate');
       insertValues.push('@DueDate');
     }
@@ -436,6 +434,14 @@ exports.createSubtask = async (req, res) => {
       createReq.input('ShowInCalendar', sql.Bit, ShowInCalendar === true ? 1 : 0);
       insertColumns.push('ShowInCalendar');
       insertValues.push('@ShowInCalendar');
+    }
+    if (schema.HasReminderEnabled) {
+      const remEnabled = ReminderEnabled === true || ReminderEnabled === 1 ? 1 : 0;
+      const remMinutes = remEnabled ? (parseInt(ReminderMinutes) > 0 ? parseInt(ReminderMinutes) : 15) : null;
+      createReq.input('ReminderEnabled', sql.Bit, remEnabled);
+      createReq.input('ReminderMinutes', sql.Int, remMinutes);
+      insertColumns.push('ReminderEnabled', 'ReminderMinutes');
+      insertValues.push('@ReminderEnabled', '@ReminderMinutes');
     }
 
     const result = await createReq.query(`
@@ -659,6 +665,8 @@ exports.bulkAssignSubtask = async (req, res) => {
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'EndDate')             IS NOT NULL THEN 1 ELSE 0 END AS HasEndDate,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'ShowInCalendar')      IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'ReminderEnabled')     IS NOT NULL THEN 1 ELSE 0 END AS HasReminderEnabled,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'ReminderMinutes')     IS NOT NULL THEN 1 ELSE 0 END AS HasReminderMinutes,
         CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifToVacancy,
         CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToUserID')    IS NOT NULL THEN 1 ELSE 0 END AS HasNotifToUser,
         CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifByVacancy,
@@ -743,7 +751,7 @@ exports.bulkAssignSubtask = async (req, res) => {
         insertCols.push('LastActedByVacancyID'); insertVals.push('@cp_LastActedBy');
       }
       if (originalSubtask.DueDate) {
-        copyReq.input('cp_DueDate', sql.Date, originalSubtask.DueDate);
+        copyReq.input('cp_DueDate', sql.DateTime, originalSubtask.DueDate);
         insertCols.push('DueDate'); insertVals.push('@cp_DueDate');
       }
       if (schema.HasEndDate && originalSubtask.EndDate) {
@@ -753,6 +761,12 @@ exports.bulkAssignSubtask = async (req, res) => {
       if (schema.HasShowInCalendar) {
         copyReq.input('cp_ShowInCalendar', sql.Bit, originalSubtask.ShowInCalendar || 0);
         insertCols.push('ShowInCalendar'); insertVals.push('@cp_ShowInCalendar');
+      }
+      if (schema.HasReminderEnabled) {
+        copyReq.input('cp_ReminderEnabled', sql.Bit, originalSubtask.ReminderEnabled || 0);
+        copyReq.input('cp_ReminderMinutes', sql.Int, originalSubtask.ReminderMinutes ?? null);
+        insertCols.push('ReminderEnabled', 'ReminderMinutes');
+        insertVals.push('@cp_ReminderEnabled', '@cp_ReminderMinutes');
       }
 
       await copyReq.query(`INSERT INTO Subtasks (${insertCols.join(', ')}) VALUES (${insertVals.join(', ')})`);
@@ -817,10 +831,11 @@ exports.deleteSubtask = async (req, res) => {
 exports.updateSubtaskDetails = async (req, res) => {
   const pool = req.app.locals.db;
   const { subtaskId } = req.params;
-  const { Title, DueDate, EndDate } = req.body;
+  const { Title, DueDate, EndDate, ReminderEnabled, ReminderMinutes } = req.body;
 
-  if (typeof Title === 'undefined' && typeof DueDate === 'undefined' && typeof EndDate === 'undefined') {
-    return res.status(400).json({ message: 'Provide Title and/or DueDate and/or EndDate to update.' });
+  if (typeof Title === 'undefined' && typeof DueDate === 'undefined' && typeof EndDate === 'undefined'
+      && typeof ReminderEnabled === 'undefined' && typeof ReminderMinutes === 'undefined') {
+    return res.status(400).json({ message: 'Provide Title and/or DueDate and/or EndDate and/or Reminder to update.' });
   }
 
   try {
@@ -865,25 +880,31 @@ exports.updateSubtaskDetails = async (req, res) => {
     const hasDue = typeof DueDate !== 'undefined';
     const hasEnd = typeof EndDate !== 'undefined';
     const encryptedTitle = hasTitle ? encryptionConfig.encrypt(Title) : null;
-    let dueDateNormalized = null;
-    if (hasDue && DueDate) {
-      const d = new Date(DueDate);
-      dueDateNormalized = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    }
+    // DueDate يُحفظ كـ DATETIME لدعم الوقت، EndDate يبقى DATE (يوم فقط)
+    const dueDateNormalized = (hasDue && DueDate) ? new Date(DueDate) : null;
     let endDateNormalized = null;
     if (hasEnd && EndDate) {
       const d = new Date(EndDate);
       endDateNormalized = new Date(d.getFullYear(), d.getMonth(), d.getDate());
     }
 
+    const hasReminder = typeof ReminderEnabled !== 'undefined';
+    const remEnabled = hasReminder ? (ReminderEnabled === true || ReminderEnabled === 1 ? 1 : 0) : 0;
+    const remMinutes = hasReminder && remEnabled
+      ? (parseInt(ReminderMinutes) > 0 ? parseInt(ReminderMinutes) : 15)
+      : null;
+
     await pool.request()
       .input('SubtaskID', sql.Int, subtaskId)
       .input('HasTitle', sql.Bit, hasTitle ? 1 : 0)
       .input('Title', sql.NVarChar, encryptedTitle)
       .input('HasDue', sql.Bit, hasDue ? 1 : 0)
-      .input('DueDate', sql.Date, dueDateNormalized)
+      .input('DueDate', sql.DateTime, dueDateNormalized)
       .input('HasEnd', sql.Bit, hasEnd ? 1 : 0)
       .input('EndDate', sql.Date, endDateNormalized)
+      .input('HasReminder', sql.Bit, hasReminder ? 1 : 0)
+      .input('ReminderEnabled', sql.Bit, remEnabled)
+      .input('ReminderMinutes', sql.Int, remMinutes)
       .query(`
         UPDATE Subtasks
         SET
@@ -893,6 +914,9 @@ exports.updateSubtaskDetails = async (req, res) => {
 
         IF COL_LENGTH('dbo.Subtasks','EndDate') IS NOT NULL AND @HasEnd = 1
           UPDATE Subtasks SET EndDate = @EndDate WHERE SubtaskID = @SubtaskID;
+
+        IF COL_LENGTH('dbo.Subtasks','ReminderEnabled') IS NOT NULL AND @HasReminder = 1
+          UPDATE Subtasks SET ReminderEnabled = @ReminderEnabled, ReminderMinutes = @ReminderMinutes WHERE SubtaskID = @SubtaskID;
       `);
 
     const result = await pool.request()

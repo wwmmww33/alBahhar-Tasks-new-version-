@@ -78,7 +78,7 @@ export function exportCalendarToPdf(p: CalendarPdfParams): void {
   });
 
   function fmtDate(d: string) {
-    return new Date(d).toLocaleDateString('ar-EG', { year:'numeric', month:'long', day:'numeric' });
+    return new Date(d).toLocaleDateString('ar-EG-u-nu-latn', { year:'numeric', month:'long', day:'numeric' });
   }
 
   const priorSectionHTML = priorSpans.length ? `
@@ -184,7 +184,7 @@ export function exportCalendarToPdf(p: CalendarPdfParams): void {
     return `<div class="week-row">${dayCellsHTML}</div>`;
   }).join('');
 
-  const printed = new Date().toLocaleString('ar-EG');
+  const printed = new Date().toLocaleString('ar-EG-u-nu-latn');
 
   const html = `<!DOCTYPE html>
 <html dir="rtl" lang="ar">

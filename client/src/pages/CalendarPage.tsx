@@ -60,6 +60,15 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
   ];
   const getSpanColor = (subtaskId: number) => SPAN_COLORS[subtaskId % SPAN_COLORS.length];
 
+  const formatEventTime = (dateStr: string): string => {
+    if (!dateStr) return '';
+    const d = new Date(dateStr);
+    const h = d.getHours();
+    const m = d.getMinutes();
+    if (h === 0 && m === 0) return '';
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} `;
+  };
+
   const toLocalYMD = (d: Date) => {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -177,7 +186,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     for (let i = 0; i < days; i++) {
       const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
       const key = toLocalYMD(d);
-      const label = d.toLocaleDateString('ar-EG', {
+      const label = d.toLocaleDateString('ar-EG-u-nu-latn', {
         weekday: 'long',
         day: 'numeric',
         month: 'long',
@@ -342,7 +351,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
 
   const rangeLabel = useMemo(() => {
     if (viewMode === 'day') {
-      return currentDate.toLocaleDateString('ar-EG', {
+      return currentDate.toLocaleDateString('ar-EG-u-nu-latn', {
         weekday: 'long',
         day: 'numeric',
         month: 'long',
@@ -352,18 +361,18 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     const { start, days } = computeRange(viewMode, currentDate);
     if (viewMode === 'week') {
       const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + days - 1);
-      const startStr = start.toLocaleDateString('ar-EG', {
+      const startStr = start.toLocaleDateString('ar-EG-u-nu-latn', {
         day: 'numeric',
         month: 'long',
       });
-      const endStr = end.toLocaleDateString('ar-EG', {
+      const endStr = end.toLocaleDateString('ar-EG-u-nu-latn', {
         day: 'numeric',
         month: 'long',
         year: 'numeric',
       });
       return `من ${startStr} إلى ${endStr}`;
     }
-    return currentDate.toLocaleDateString('ar-EG', {
+    return currentDate.toLocaleDateString('ar-EG-u-nu-latn', {
       month: 'long',
       year: 'numeric',
     });
@@ -587,7 +596,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                       {it.SubtaskID}
                     </button>
                     <span className="text-content-secondary flex-shrink-0 text-[11px]">
-                      {new Date(it.DueDate).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' })}
+                      {formatEventTime(it.DueDate)}{new Date(it.DueDate).toLocaleDateString('ar-EG-u-nu-latn', { year: 'numeric', month: 'long', day: 'numeric' })}
                     </span>
                     <button
                       type="button"
@@ -785,7 +794,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                                       className="font-bold hover:underline text-right w-full block break-words"
                                       title={`${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} — ضمن: ${it.TaskTitle}`}
                                     >
-                                      {it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
+                                      {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
                                     </button>
                                   ))}
                                   {/* 3. مهام يوم واحد */}
@@ -798,15 +807,15 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                                       className="font-semibold hover:underline text-right w-full block break-words"
                                       title={`${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} — ضمن: ${it.TaskTitle}`}
                                     >
-                                      {it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
+                                      {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
                                     </button>
                                   ))}
                                   {/* 4. مهام شخصية */}
-                                  {personalForDay.map(it => (
+                                  {[...personalForDay].sort((a, b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime()).map(it => (
                                     <button key={it.SubtaskID} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
                                       className="w-full text-right break-words hover:underline font-semibold"
                                       style={{ color: '#059669' }}>
-                                      ★ {it.SubtaskTitle || it.TaskTitle}
+                                      {formatEventTime(it.DueDate)}★ {it.SubtaskTitle || it.TaskTitle}
                                     </button>
                                   ))}
                                   {/* 5. تعليقات */}
@@ -944,7 +953,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                           <div key={`start-${it.SubtaskID}`} className="text-xs">
                             <button type="button" onClick={() => openTaskInNewTab(it.TaskID)}
                               style={{ color: getSpanColor(it.SubtaskID) }} className="font-bold hover:underline break-words text-right">
-                              {it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
+                              {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
                             </button>
                           </div>
                         ))}
@@ -952,15 +961,15 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                           <div key={`single-${it.SubtaskID}`} className="text-xs">
                             <button type="button" onClick={() => openTaskInNewTab(it.TaskID)}
                               style={{ color: getSpanColor(it.SubtaskID) }} className="font-semibold hover:underline break-words text-right">
-                              {it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
+                              {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
                             </button>
                           </div>
                         ))}
-                        {visiblePersonal.map(it => (
+                        {[...visiblePersonal].sort((a, b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime()).map(it => (
                           <button key={it.SubtaskID} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
                             className="text-xs font-semibold hover:underline text-right w-full break-words"
                             style={{ color: '#059669' }}>
-                            ★ {it.SubtaskTitle || it.TaskTitle}
+                            {formatEventTime(it.DueDate)}★ {it.SubtaskTitle || it.TaskTitle}
                           </button>
                         ))}
                         {visibleComments.map(cm => (

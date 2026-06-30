@@ -1,3 +1,11 @@
+git init
+git clone https://github.com/wwmmww33/Hykala.git
+git add .
+git commit -m "Initial commit"
+git push origin main
+
+
+
 git log --oneline
 
 git status      # تشوف وش تغير

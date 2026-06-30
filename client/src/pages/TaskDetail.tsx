@@ -523,7 +523,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
               {task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}
             </span>
             <span className="text-sm">•</span>
-            <span><strong>تاريخ الإنشاء:</strong> {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG') : 'غير محدد'}</span>
+            <span><strong>تاريخ الإنشاء:</strong> {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG-u-nu-latn') : 'غير محدد'}</span>
           </div>
           
           {/* Category + URL — سطر واحد */}

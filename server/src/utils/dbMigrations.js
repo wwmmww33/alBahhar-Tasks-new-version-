@@ -641,4 +641,55 @@ module.exports = {
       throw err;
     }
   },
+
+  // إضافة عمودَي ReminderEnabled و ReminderMinutes إلى Subtasks لدعم التذكير المخصص
+  ensureSubtaskReminderColumns: async function ensureSubtaskReminderColumns(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT
+          COL_LENGTH('dbo.Subtasks','ReminderEnabled') AS HasEnabled,
+          COL_LENGTH('dbo.Subtasks','ReminderMinutes') AS HasMinutes
+      `);
+      const r = check.recordset[0] || {};
+      if (r.HasEnabled && r.HasMinutes) {
+        return { changed: false };
+      }
+      if (!r.HasEnabled) {
+        await pool.request().query(
+          `ALTER TABLE dbo.Subtasks ADD ReminderEnabled BIT NOT NULL CONSTRAINT DF_Subtasks_ReminderEnabled DEFAULT(0)`
+        );
+      }
+      if (!r.HasMinutes) {
+        await pool.request().query(
+          `ALTER TABLE dbo.Subtasks ADD ReminderMinutes INT NULL`
+        );
+      }
+      console.log('✅ Added ReminderEnabled / ReminderMinutes columns to Subtasks.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring Subtasks reminder columns:', err);
+      throw err;
+    }
+  },
+
+  // تحويل عمود DueDate في Subtasks من DATE إلى DATETIME لدعم الوقت
+  ensureSubtaskDueDateTimeType: async function ensureSubtaskDueDateTimeType(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'Subtasks' AND COLUMN_NAME = 'DueDate'
+      `);
+      const dataType = (check.recordset[0]?.DATA_TYPE || '').toLowerCase();
+      if (dataType !== 'date') {
+        console.log(`ℹ️ Subtasks.DueDate is already '${dataType || 'not found'}' — no change needed.`);
+        return { changed: false };
+      }
+      await pool.request().query(`ALTER TABLE dbo.Subtasks ALTER COLUMN DueDate DATETIME NULL`);
+      console.log('✅ Changed Subtasks.DueDate from DATE to DATETIME.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring Subtasks.DueDate is DATETIME:', err);
+      throw err;
+    }
+  },
 };

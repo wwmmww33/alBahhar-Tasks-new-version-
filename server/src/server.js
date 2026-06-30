@@ -117,6 +117,8 @@ const {
   ensureNotesColumns,
   ensureTaskAuditLogTable,
   ensurePersonalTasksSupport,
+  ensureSubtaskDueDateTimeType,
+  ensureSubtaskReminderColumns,
 } = require('./utils/dbMigrations');
 
 
@@ -268,6 +270,20 @@ const startServer = async () => {
       await ensurePersonalTasksSupport(pool);
     } catch (personalErr) {
       console.error('⚠️ Database migration (PersonalTasks) failed. Server continues running.', personalErr);
+    }
+
+    // --- تحويل DueDate في Subtasks إلى DATETIME لدعم الوقت ---
+    try {
+      await ensureSubtaskDueDateTimeType(pool);
+    } catch (dueDateErr) {
+      console.error('⚠️ Database migration (Subtasks.DueDate→DATETIME) failed. Server continues running.', dueDateErr);
+    }
+
+    // --- أعمدة التذكير المخصص في Subtasks ---
+    try {
+      await ensureSubtaskReminderColumns(pool);
+    } catch (reminderErr) {
+      console.error('⚠️ Database migration (Subtasks ReminderEnabled/ReminderMinutes) failed. Server continues running.', reminderErr);
     }
 
     app.listen(port, '0.0.0.0', () => {

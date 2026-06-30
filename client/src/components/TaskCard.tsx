@@ -83,8 +83,20 @@ const TaskCard: React.FC<TaskCardProps> = ({
   const hasAssignmentNotifications = (task.HasAssignmentNotifications || 0) > 0;
   const hasCommentNotifications = (task.HasCommentNotifications || 0) > 0;
 
+  // تنسيق تاريخ/وقت استحقاق المهمة الفرعية لعرضه في البطاقة (الوقت يُخفى إن كان 00:00)
+  const formatSubtaskDue = (dateStr?: string | null): string => {
+    if (!dateStr) return '';
+    const d = new Date(dateStr);
+    const datePart = d.toLocaleDateString('ar-EG-u-nu-latn', { day: 'numeric', month: 'short' });
+    const h = d.getHours();
+    const m = d.getMinutes();
+    const timePart = (h === 0 && m === 0) ? '' : ` ${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    return `${datePart}${timePart}`;
+  };
+
   const renderSubtaskRow = (subtask: Subtask) => {
     const isMine = isMySubtask ? isMySubtask(subtask) : false;
+    const dueLabel = formatSubtaskDue(subtask.DueDate);
     if (isMine) {
       return (
         <div
@@ -93,6 +105,9 @@ const TaskCard: React.FC<TaskCardProps> = ({
         >
           <div className="w-2 h-2 bg-blue-500 rounded-full flex-shrink-0 ring-2 ring-blue-300 dark:ring-blue-500"></div>
           <span className="truncate flex-1">{subtask.Title}</span>
+          {dueLabel && (
+            <span className="text-blue-500 dark:text-blue-300 whitespace-nowrap text-[10px]">{dueLabel}</span>
+          )}
           <span className="text-blue-500 dark:text-blue-400 font-bold whitespace-nowrap">← أنا</span>
         </div>
       );
@@ -101,6 +116,9 @@ const TaskCard: React.FC<TaskCardProps> = ({
       <div key={subtask.SubtaskID} className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-100">
         <div className="w-2 h-2 bg-orange-400 rounded-full flex-shrink-0"></div>
         <span className="truncate">{subtask.Title}</span>
+        {dueLabel && (
+          <span className="text-gray-400 dark:text-gray-400 whitespace-nowrap text-[10px]">{dueLabel}</span>
+        )}
         {subtask.AssignedToName && (
           <span className="text-gray-500 dark:text-gray-300">({subtask.AssignedToName})</span>
         )}
@@ -208,7 +226,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
             {!isPersonalTask && (
               <div className="flex items-center gap-2"><User size={14} /><span>المنشيء: {(task.CreatedByName || task.CreatedBy || 'غير محدد')}{task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}</span></div>
             )}
-            <div className="flex items-center gap-2"><Calendar size={14} /><span>تاريخ الاستحقاق: {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG') : 'غير محدد'}</span></div>
+            <div className="flex items-center gap-2"><Calendar size={14} /><span>تاريخ الاستحقاق: {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG-u-nu-latn') : 'غير محدد'}</span></div>
             {task.Priority === 'urgent' && (<div className="flex items-center gap-2 text-red-600 font-semibold"><AlertTriangle size={14} /><span>أولوية عاجلة</span></div>)}
             
             {/* عرض المهام الفرعية غير المكتملة */}
@@ -334,7 +352,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
         {/* معلومات المهمة */}
         <div className="mt-4 space-y-3 text-sm text-gray-600 dark:text-gray-100">
           <div className="flex items-center gap-2"><User size={14} /><span>المنشيء: {(task.CreatedByName || task.CreatedBy || 'غير محدد')}{task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}</span></div>
-          <div className="flex items-center gap-2"><Calendar size={14} /><span>تاريخ الاستحقاق: {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG') : 'غير محدد'}</span></div>
+          <div className="flex items-center gap-2"><Calendar size={14} /><span>تاريخ الاستحقاق: {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG-u-nu-latn') : 'غير محدد'}</span></div>
           {task.Priority === 'urgent' && (<div className="flex items-center gap-2 text-red-600 font-semibold"><AlertTriangle size={14} /><span>أولوية عاجلة</span></div>)}
           
           {/* عرض المهام الفرعية غير المكتملة */}

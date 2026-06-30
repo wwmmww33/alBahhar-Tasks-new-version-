@@ -19,6 +19,8 @@ export type Subtask = {
   CreatedAt: string;
   UpdatedAt: string;
   ShowInCalendar?: boolean;
+  ReminderEnabled?: boolean | number;
+  ReminderMinutes?: number | null;
   Notes?: string | null;
 };
 

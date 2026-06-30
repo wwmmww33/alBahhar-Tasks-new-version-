@@ -246,7 +246,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       endDate.setDate(endDate.getDate() - (pageIndex * 7));
       const startDate = new Date(endDate);
       startDate.setDate(startDate.getDate() - 7);
-      const fmt = (d: Date) => d.toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' });
+      const fmt = (d: Date) => d.toLocaleDateString('ar-EG-u-nu-latn', { year: 'numeric', month: 'short', day: 'numeric' });
       const rangeLabel = `${fmt(startDate)} — ${fmt(endDate)}`;
 
       // تغذية راجعة عند وجود أسبوع بلا نشاط — حتى لا يبدو الزر كأنه لا يعمل
@@ -1415,7 +1415,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                       reopened:    { label: 'إعادة فتح المهمة',     color: 'bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800',  icon: '🔓' },
                     };
                     const a = actionMap[entry.Action] || { label: entry.Action, color: 'bg-white border-gray-200 dark:bg-gray-800', icon: '📌' };
-                    const dateStr = new Date(entry.CreatedAt).toLocaleString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    const dateStr = new Date(entry.CreatedAt).toLocaleString('ar-EG-u-nu-latn', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                     return (
                       <div key={entry.LogID} className={`flex items-start gap-3 border rounded-lg px-4 py-3 ${a.color}`}>
                         <span className="text-xl mt-0.5 flex-shrink-0">{a.icon}</span>
@@ -1506,7 +1506,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                       </div>
                       <span className="text-xs text-content-secondary flex items-center gap-1 flex-shrink-0">
                         <Clock size={11} />
-                        {new Date(group.latestAt).toLocaleString('ar-EG')}
+                        {new Date(group.latestAt).toLocaleString('ar-EG-u-nu-latn')}
                       </span>
                     </div>
 
@@ -1543,7 +1543,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                                   {isMulti && (
                                     <span className="text-xs text-content-secondary flex items-center gap-1">
                                       <Clock size={10} />
-                                      {new Date(item.CreatedAt).toLocaleString('ar-EG')}
+                                      {new Date(item.CreatedAt).toLocaleString('ar-EG-u-nu-latn')}
                                     </span>
                                   )}
                                 </div>

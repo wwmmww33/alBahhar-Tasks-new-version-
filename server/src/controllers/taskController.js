@@ -2616,7 +2616,7 @@ exports.mergeTasks = async (req, res) => {
             }
         } catch (_) {}
 
-        const actionDateStr = new Date().toLocaleDateString('ar-EG', {
+        const actionDateStr = new Date().toLocaleDateString('ar-EG-u-nu-latn', {
             year: 'numeric', month: 'short', day: 'numeric',
             hour: '2-digit', minute: '2-digit'
         });
@@ -2654,7 +2654,7 @@ exports.mergeTasks = async (req, res) => {
         try { srcDesc  = encryptionConfig.decrypt(srcDesc);  } catch (_) {}
 
         const srcCreatedAt = src.CreatedAt
-            ? new Date(src.CreatedAt).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' })
+            ? new Date(src.CreatedAt).toLocaleDateString('ar-EG-u-nu-latn', { year:'numeric', month:'short', day:'numeric' })
             : '';
         const creatorName = src.CreatorName || String(src.CreatorKey || '');
 

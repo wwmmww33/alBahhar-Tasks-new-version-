@@ -61,12 +61,12 @@ function fmt(d?: string | null, withTime = false): string {
   if (!d) return 'غير محدد';
   const date = new Date(d);
   if (withTime) {
-    return date.toLocaleString('ar-EG', {
+    return date.toLocaleString('ar-EG-u-nu-latn', {
       year: 'numeric', month: 'long', day: 'numeric',
       hour: '2-digit', minute: '2-digit',
     });
   }
-  return date.toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' });
+  return date.toLocaleDateString('ar-EG-u-nu-latn', { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
 function esc(s: string): string {
@@ -207,7 +207,7 @@ h2{font-size:14px;color:#2563eb;border-bottom:1px solid #dbeafe;padding-bottom:6
 ${descSection}
 ${timelineHtml}
 
-<div class="footer">نظام إدارة المهام &nbsp;•&nbsp; ${new Date().toLocaleString('ar-EG')}</div>
+<div class="footer">نظام إدارة المهام &nbsp;•&nbsp; ${new Date().toLocaleString('ar-EG-u-nu-latn')}</div>
 <script>window.onload=function(){window.print()}</script>
 </body>
 </html>`;

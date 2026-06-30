@@ -278,8 +278,8 @@ const DelegationManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
 
   const formatDate = (dateString: string) => {
     const d = new Date(dateString);
-    // فرض التقويم الميلادي حتى مع اللغة العربية السعودية
-    return d.toLocaleDateString('ar-SA-u-ca-gregory', {
+    // فرض التقويم الميلادي والأرقام اللاتينية حتى مع اللغة العربية السعودية
+    return d.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit'
