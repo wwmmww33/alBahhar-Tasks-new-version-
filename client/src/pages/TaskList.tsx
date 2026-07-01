@@ -941,8 +941,13 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     if (!isOpenStatus(task)) return false;
     // المهام الشخصية دائماً نشطة
     if (isPersonalTaskOfActor(task)) return true;
-    // منشئ المهمة يراها دائماً في النشطة بغض النظر عن حالة المهام الفرعية
-    if (isTaskCreatedByActor(task)) return true;
+    // منشئ المهمة: نشطة إلا إذا كانت هناك مهام فرعية غير مكتملة ليست مسندة له
+    if (isTaskCreatedByActor(task)) {
+      const subtasks = task.subtasks || [];
+      if (subtasks.length === 0) return true;                          // لا مهام فرعية → نشطة
+      if (subtasks.every(st => st.IsCompleted)) return true;          // كلها مكتملة → نشطة
+      return subtasks.some(st => isSubtaskAssignedToActor(st) && !st.IsCompleted); // لديّ غير مكتملة → نشطة
+    }
     const subtasks = task.subtasks || [];
     if (subtasks.some(subtask => isSubtaskAssignedToActor(subtask) && !subtask.IsCompleted)) return true;
     return false;
@@ -953,18 +958,21 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
   const completedTasks = filteredTasks.filter(task => task.Status === 'completed' || task.Status === 'cancelled');
 
-  // "أنجزت إجرائي فيها": مفتوحة + مُسندت إليّ مهمة فرعية + جميعها مكتملة
-  // المهام الشخصية ومهام المنشئ مستثناة — تنتمي دائماً للتبويب النشط
+  // "أنجزت إجرائي فيها": مفتوحة + أنهيت دوري (مهامي الفرعية مكتملة) + لا تزال هناك مهام لغيري
+  // المهام الشخصية مستثناة دائماً
   const actionedTasks = filteredTasks.filter(task => {
     if (!isOpenStatus(task)) return false;
     if (isPersonalTaskOfActor(task)) return false;
-    // منشئ المهمة لا ينتقل لهذا التبويب أبداً
-    if (isTaskCreatedByActor(task)) return false;
     const subtasks = task.subtasks || [];
-    // يجب أن يكون لديّ مهمة فرعية واحدة على الأقل (مكتملة أو غير مكتملة)
+    // منشئ المهمة: ينتقل هنا فقط إذا كانت هناك مهام فرعية غير مكتملة ليست مسندة له
+    if (isTaskCreatedByActor(task)) {
+      if (subtasks.length === 0) return false;                        // لا مهام فرعية → يبقى نشطاً
+      if (subtasks.every(st => st.IsCompleted)) return false;        // كلها مكتملة → يبقى نشطاً
+      return !subtasks.some(st => isSubtaskAssignedToActor(st) && !st.IsCompleted); // لا غير مكتملة لي → هنا
+    }
+    // غير المنشئ: يجب أن يكون لديّ مهمة فرعية واحدة على الأقل مسندة لي وجميعها مكتملة
     const mySubtasks = subtasks.filter(st => isSubtaskAssignedToActor(st));
     if (mySubtasks.length === 0) return false;
-    // جميع مهامي الفرعية مكتملة
     return mySubtasks.every(st => st.IsCompleted);
   });
 
