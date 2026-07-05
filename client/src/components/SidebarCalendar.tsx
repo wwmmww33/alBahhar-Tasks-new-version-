@@ -59,6 +59,9 @@ const formatEventTime = (dateStr: string): string => {
 };
 
 const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
+  // calendarUserId: always the user's own UserID for department-scope resolution (matches CalendarPage)
+  // actorId: may be VacancyID (used only for client-side AssignedToID filtering)
+  const calendarUserId = currentUser.UserID;
   const actorId = resolveCurrentActorId(currentUser) || currentUser.UserID;
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [extraItems, setExtraItems] = useState<CalendarItem[]>([]);
@@ -107,7 +110,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
         return `${y}-${m}-${dd}`;
       };
       const startStr = toLocalYMD(start);
-      const res = await fetch(`/api/calendar/subtasks?userId=${actorId}&startDate=${startStr}&days=30`);
+      const res = await fetch(`/api/calendar/subtasks?userId=${calendarUserId}&startDate=${startStr}&days=30`);
       if (!res.ok) {
         throw new Error(`Calendar fetch failed: ${res.status}`);
       }
@@ -121,7 +124,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       setItems(Array.isArray(data) ? data : []);
 
       try {
-        const commentsRes = await fetch(`/api/calendar/comments?userId=${actorId}&startDate=${startStr}&days=30`);
+        const commentsRes = await fetch(`/api/calendar/comments?userId=${calendarUserId}&startDate=${startStr}&days=30`);
         if (commentsRes.ok) {
           const cct = commentsRes.headers.get('content-type') || '';
           const commentsData = cct.includes('application/json') ? await commentsRes.json() : [];
@@ -135,7 +138,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
 
       const gridEnd = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 30);
       const gridEndStr = toLocalYMD(gridEnd);
-      const extraRes = await fetch(`/api/calendar/subtasks?userId=${actorId}&startDate=${gridEndStr}&days=365`);
+      const extraRes = await fetch(`/api/calendar/subtasks?userId=${calendarUserId}&startDate=${gridEndStr}&days=365`);
       if (!extraRes.ok) {
         // عدم رمي الاستثناء هنا، فقط تجاهل العناصر الإضافية
         setExtraItems([]);
@@ -151,7 +154,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       }
 
       try {
-        const extraCommentsRes = await fetch(`/api/calendar/comments?userId=${actorId}&startDate=${gridEndStr}&days=365`);
+        const extraCommentsRes = await fetch(`/api/calendar/comments?userId=${calendarUserId}&startDate=${gridEndStr}&days=365`);
         if (extraCommentsRes.ok) {
           const ecct = extraCommentsRes.headers.get('content-type') || '';
           const extraCommentsData = ecct.includes('application/json') ? await extraCommentsRes.json() : [];
@@ -175,7 +178,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
 
   useEffect(() => {
     fetchCalendarRange();
-  }, [actorId]);
+  }, [calendarUserId]);
 
   // تحديث فوري عند إنشاء مهمة فرعية جديدة أو طلب تحديث يدوي
   useEffect(() => {
@@ -207,7 +210,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
       window.removeEventListener('calendar:refresh', handler);
       window.removeEventListener('calendar:comment:updated', commentHandler as EventListener);
     };
-  }, [actorId]);
+  }, [calendarUserId]);
 
   const toLocalYMD = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;

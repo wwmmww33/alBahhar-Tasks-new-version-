@@ -66,6 +66,12 @@ async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
   }
   if (!rootDepartmentId || !/^\d+$/.test(String(rootDepartmentId))) return [normalizedBaseDepartmentId];
 
+  // When Type info exists, stop expanding into sub-departments that are themselves Type=1
+  // (they are independent groups and must not bleed into each other's scope)
+  const typeStopClause = s.HasDepartmentType
+    ? `AND (TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)`
+    : '';
+
   const tree = await pool.request()
       .input('RootDepartmentID', sql.NVarChar, rootDepartmentId)
     .query(`
@@ -77,6 +83,7 @@ async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
         SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
         FROM dbo.Departments d
         INNER JOIN DeptTree dt ON d.${parentCol} = dt.DepartmentID
+        ${typeStopClause}
       )
       SELECT DISTINCT DepartmentID
       FROM DeptTree
@@ -141,6 +148,9 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
           WHERE (${whereParts.join(' OR ')})
              OR (TRY_CAST(@LoginID AS INT) IS NOT NULL AND p.VacancyID = TRY_CAST(@LoginID AS INT))
+          ORDER BY
+            CASE WHEN LTRIM(RTRIM(u.UserID)) = @LoginID THEN 0 ELSE 1 END ASC,
+            CASE WHEN p.VacancyID IS NOT NULL THEN 0 ELSE 1 END ASC
         `);
     }
 
@@ -769,6 +779,9 @@ exports.getCalendarComments = async (req, res) => {
           LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
           WHERE (${whereParts.join(' OR ')})
              OR (TRY_CAST(@LoginID AS INT) IS NOT NULL AND p.VacancyID = TRY_CAST(@LoginID AS INT))
+          ORDER BY
+            CASE WHEN LTRIM(RTRIM(u.UserID)) = @LoginID THEN 0 ELSE 1 END ASC,
+            CASE WHEN p.VacancyID IS NOT NULL THEN 0 ELSE 1 END ASC
         `);
       currentProfile = profileRes.recordset[0] || null;
       if (currentProfile) {
@@ -965,6 +978,9 @@ exports.getSubtaskReminders = async (req, res) => {
           LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
           WHERE (${whereParts.join(' OR ')})
              OR (TRY_CAST(@LoginID AS INT) IS NOT NULL AND p.VacancyID = TRY_CAST(@LoginID AS INT))
+          ORDER BY
+            CASE WHEN LTRIM(RTRIM(u.UserID)) = @LoginID THEN 0 ELSE 1 END ASC,
+            CASE WHEN p.VacancyID IS NOT NULL THEN 0 ELSE 1 END ASC
         `);
       const row = profileRes.recordset[0];
       if (row) {
