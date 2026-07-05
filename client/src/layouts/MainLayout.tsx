@@ -27,6 +27,9 @@ const MainLayout = ({ children, currentUser, onLogout }: MainLayoutProps) => {
         </main>
       </div>
       <SubtaskReminder currentUser={currentUser} />
+      <footer dir="ltr" className="text-center py-3 text-xs text-gray-400 dark:text-gray-600 select-none border-t border-gray-100 dark:border-gray-800">
+        ///ARAJHI©2026
+      </footer>
     </div>
   );
 };

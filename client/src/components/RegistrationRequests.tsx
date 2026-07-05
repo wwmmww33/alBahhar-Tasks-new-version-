@@ -12,8 +12,23 @@ type Request = {
   Rank?: string | number | null;
 };
 
+type ConflictInfo = {
+  requestId: number;
+  vacancyName: string;
+  currentUserName: string;
+};
+
+type Vacancy = {
+  VacancyID: number;
+  Name: string;
+};
+
 const RegistrationRequests = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const [requests, setRequests] = useState<Request[]>([]);
+  const [conflict, setConflict] = useState<ConflictInfo | null>(null);
+  const [vacancies, setVacancies] = useState<Vacancy[]>([]);
+  const [selectedVacancyId, setSelectedVacancyId] = useState<number | ''>('');
+  const [showVacancyPicker, setShowVacancyPicker] = useState(false);
 
   const isDeptManager = (currentUser?.Role ?? 0) === 2;
   const managerDeptId = isDeptManager ? currentUser?.DepartmentID : null;
@@ -24,17 +39,61 @@ const RegistrationRequests = ({ currentUser }: { currentUser?: CurrentUser }) =>
       : '/api/users/requests';
     const res = await fetch(url);
     if (!res.ok) return;
-    const data = await res.json();
-    setRequests(data);
+    setRequests(await res.json());
   }, [managerDeptId]);
 
-  useEffect(() => {
-    fetchRequests();
-  }, [fetchRequests]);
+  useEffect(() => { fetchRequests(); }, [fetchRequests]);
 
-  const handleApprove = async (requestId: number) => {
-    await fetch(`/api/users/requests/${requestId}/approve`, { method: 'POST' });
+  const doApprove = async (requestId: number, action?: string, overrideVacancyId?: number) => {
+    const body: Record<string, unknown> = {};
+    if (action) body.action = action;
+    if (overrideVacancyId) body.overrideVacancyId = overrideVacancyId;
+
+    const res = await fetch(`/api/users/requests/${requestId}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 409) {
+      const data = await res.json();
+      if (data.occupied) {
+        setConflict({
+          requestId,
+          vacancyName: data.vacancyName || '—',
+          currentUserName: data.currentUserName || data.currentUserId || '—',
+        });
+        return;
+      }
+    }
+
+    closeConflict();
     fetchRequests();
+  };
+
+  const closeConflict = () => {
+    setConflict(null);
+    setShowVacancyPicker(false);
+    setSelectedVacancyId('');
+    setVacancies([]);
+  };
+
+  const handleApprove = (requestId: number) => doApprove(requestId);
+
+  const handleConflictReplace = () => conflict && doApprove(conflict.requestId, 'replace');
+  const handleConflictNoVacancy = () => conflict && doApprove(conflict.requestId, 'no_vacancy');
+
+  const handleShowVacancyPicker = async () => {
+    if (!vacancies.length) {
+      const res = await fetch('/api/vacancies/all');
+      if (res.ok) setVacancies(await res.json());
+    }
+    setShowVacancyPicker(true);
+  };
+
+  const handleConflictNewVacancy = () => {
+    if (!conflict || !selectedVacancyId) return;
+    doApprove(conflict.requestId, 'new_vacancy', Number(selectedVacancyId));
   };
 
   const handleDelete = async (requestId: number) => {
@@ -46,6 +105,72 @@ const RegistrationRequests = ({ currentUser }: { currentUser?: CurrentUser }) =>
   return (
     <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
       <h2 className="text-2xl font-semibold mb-4 text-content">طلبات التسجيل المعلقة</h2>
+
+      {conflict && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-6 max-w-sm w-full mx-4">
+            <h3 className="text-lg font-semibold text-content mb-2">المنصب مشغول</h3>
+            <p className="text-sm text-content-secondary mb-4">
+              المنصب <strong>"{conflict.vacancyName}"</strong> مشغول حالياً بـ{' '}
+              <strong>{conflict.currentUserName}</strong>. كيف تريد المتابعة؟
+            </p>
+
+            {showVacancyPicker && (
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-content mb-1">اختر منصباً آخر:</label>
+                <select
+                  className="w-full border border-gray-300 dark:border-gray-600 rounded-lg p-2 text-sm bg-white dark:bg-gray-700 text-content"
+                  value={selectedVacancyId}
+                  onChange={e => setSelectedVacancyId(Number(e.target.value) || '')}
+                >
+                  <option value="">— اختر منصباً —</option>
+                  {vacancies.map(v => (
+                    <option key={v.VacancyID} value={v.VacancyID}>{v.Name}</option>
+                  ))}
+                </select>
+                {selectedVacancyId && (
+                  <button
+                    onClick={handleConflictNewVacancy}
+                    className="mt-2 w-full py-2 px-4 rounded-lg bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium"
+                  >
+                    تأكيد المنصب الجديد
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={handleConflictReplace}
+                className="w-full py-2 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium"
+              >
+                استبدال {conflict.currentUserName} بالمستخدم الجديد
+              </button>
+              {!showVacancyPicker && (
+                <button
+                  onClick={handleShowVacancyPicker}
+                  className="w-full py-2 px-4 rounded-lg bg-blue-100 hover:bg-blue-200 dark:bg-blue-900 dark:hover:bg-blue-800 text-blue-700 dark:text-blue-200 text-sm font-medium"
+                >
+                  اختيار منصب آخر...
+                </button>
+              )}
+              <button
+                onClick={handleConflictNoVacancy}
+                className="w-full py-2 px-4 rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-content text-sm font-medium"
+              >
+                اعتماد بدون تعيين منصب
+              </button>
+              <button
+                onClick={closeConflict}
+                className="w-full py-2 px-4 rounded-lg border border-gray-300 dark:border-gray-600 text-content-secondary text-sm"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {requests.length === 0 ? (
         <p className="text-content-secondary">لا توجد طلبات تسجيل معلقة حالياً.</p>
       ) : (

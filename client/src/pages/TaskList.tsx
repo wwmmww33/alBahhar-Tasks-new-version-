@@ -106,6 +106,24 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   );
   // 3.1 إضافة فلتر الأشخاص (اختياري)
   const [assigneeFilterUserId, setAssigneeFilterUserId] = useState<string | null>(null);
+  const [scopeVacancyIds, setScopeVacancyIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const deptId = (currentUser as any).DepartmentID;
+    if (!deptId) return;
+    fetch(`/api/vacancies/department/${deptId}/independent-scope`)
+      .then(r => r.ok ? r.json() : [])
+      .then((data: any[]) => {
+        if (Array.isArray(data) && data.length > 0) {
+          const ids = new Set<string>();
+          data.forEach(v => {
+            if (v.VacancyID != null) ids.add(String(v.VacancyID));
+            if (v.CurrentUserID != null) ids.add(String(v.CurrentUserID));
+          });
+          setScopeVacancyIds(ids);
+        }
+      })
+      .catch(() => {});
+  }, [(currentUser as any).DepartmentID]);
   
   // 4. حالة جديدة للتبويبات — تُعاد من sessionStorage عند العودة من صفحة تفاصيل المهمة
   const [activeTab, setActiveTab] = useState<'active' | 'completed' | 'actioned' | 'updates'>(
@@ -886,16 +904,19 @@ const TaskList = ({ currentUser }: TaskListProps) => {
       (task.subtasks || []).forEach(st => {
         const stAssignedTo = subtaskAssigneeId(st as any);
         if (stAssignedTo) {
-          // استخدام الاسم إن وجد، وإلا نبقي المعرف فقط
           map.set(stAssignedTo, (st as any).AssignedToName);
         }
       });
     });
-    // ترتيب أبجدي حسب الاسم إن وجد، وإلا حسب المعرف
-    return Array.from(map.entries())
+    const all = Array.from(map.entries())
       .map(([id, name]) => ({ id, name: name || id }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [tasks]);
+    // تصفية حسب نطاق القسم المستقل إذا كان متاحاً
+    if (scopeVacancyIds.size > 0) {
+      return all.filter(opt => scopeVacancyIds.has(opt.id));
+    }
+    return all;
+  }, [tasks, scopeVacancyIds]);
 
   const filteredTasks = tasks.filter(task => {
     const isRelated = isTaskRelatedToActor(task);

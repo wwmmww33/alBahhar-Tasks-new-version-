@@ -531,7 +531,7 @@ exports.getRegistrationRequests = async (req, res) => {
         const orderBy        = cp.HasRequestDate ? 'r.RequestDate DESC' : 'r.RequestID DESC';
         const parentCol      = cp.HasParentDeptID ? 'ParentDepartmentID' : (cp.HasParentID ? 'ParentID' : null);
 
-        const selectCols = `r.RequestID, r.UserID, r.FullName, r.DepartmentID, d.Name as DepartmentName, ${vacancyNameSel}, ${rankSel}`;
+        const selectCols = `r.RequestID, r.UserID, r.FullName, r.DepartmentID, COALESCE(d.Name, N'—') as DepartmentName, ${vacancyNameSel}, ${rankSel}`;
         const request = pool.request();
         let query;
 
@@ -546,9 +546,10 @@ exports.getRegistrationRequests = async (req, res) => {
                 )
                 SELECT ${selectCols}
                 FROM dbo.RegistrationRequests r
-                JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
-                JOIN DeptTree dt       ON r.DepartmentID = dt.DepartmentID
+                LEFT JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
+                LEFT JOIN DeptTree dt       ON r.DepartmentID = dt.DepartmentID
                 WHERE r.Status = 'Pending'
+                  AND (dt.DepartmentID IS NOT NULL OR r.DepartmentID IS NULL)
                 ORDER BY ${orderBy}
             `;
         } else if (managerDeptId) {
@@ -557,15 +558,15 @@ exports.getRegistrationRequests = async (req, res) => {
             query = `
                 SELECT ${selectCols}
                 FROM dbo.RegistrationRequests r
-                JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
-                WHERE r.Status = 'Pending' AND r.DepartmentID = @ManagerDeptID
+                LEFT JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
+                WHERE r.Status = 'Pending' AND (r.DepartmentID = @ManagerDeptID OR r.DepartmentID IS NULL)
                 ORDER BY ${orderBy}
             `;
         } else {
             query = `
                 SELECT ${selectCols}
                 FROM dbo.RegistrationRequests r
-                JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
+                LEFT JOIN dbo.Departments d ON r.DepartmentID = d.DepartmentID
                 WHERE r.Status = 'Pending'
                 ORDER BY ${orderBy}
             `;
@@ -596,13 +597,15 @@ exports.deleteRegistrationRequest = async (req, res) => {
 };
 
 // الموافقة على طلب تسجيل
-// UserID يُولَّد تسلسلياً (رقم)، واسم المستخدم يُخزَّن في ServiceID.
+// action (اختياري في body): 'replace' | 'no_vacancy' | 'new_vacancy'
+// overrideVacancyId (مع new_vacancy): رقم المنصب البديل
 exports.approveRegistrationRequest = async (req, res) => {
     const pool = req.app.locals.db;
     if (!pool) {
         return res.status(503).send({ message: 'Database connection is not available.' });
     }
-    const { id } = req.params; // RequestID
+    const { id } = req.params;
+    const { action, overrideVacancyId } = req.body || {};
     const transaction = new sql.Transaction(pool);
     try {
         await transaction.begin();
@@ -617,10 +620,44 @@ exports.approveRegistrationRequest = async (req, res) => {
             return res.status(404).json({ message: 'Request not found or already processed.' });
         }
 
-        // اسم المستخدم المدخل في طلب التسجيل (سيُخزَّن في ServiceID)
         const username = String(requestData.UserID || '').trim();
 
-        // توليد UserID تسلسلي عددي: MAX(الأرقام الموجودة) + 1، يبدأ من 1000
+        // تحديد المنصب المستهدف: من body.overrideVacancyId أو من الطلب الأصلي
+        const targetVacancyId = (action === 'new_vacancy' && overrideVacancyId)
+            ? parseInt(overrideVacancyId, 10)
+            : (requestData.VacancyID ? parseInt(requestData.VacancyID, 10) : null);
+
+        // فحص إذا كان المنصب مشغولاً (قبل بدء أي تغيير فعلي)
+        if (schema.hasAssignments && targetVacancyId && action !== 'no_vacancy') {
+            const colProbe = await new sql.Request(transaction).query(`
+                SELECT CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent') IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent
+            `);
+            const hasIsCurrent = colProbe.recordset[0]?.HasIsCurrent;
+            const occupancyWhere = hasIsCurrent ? 'AND a.IsCurrent = 1' : '';
+
+            const occupantRes = await new sql.Request(transaction)
+                .input('VID2', sql.Int, targetVacancyId)
+                .query(`
+                    SELECT TOP 1 a.UserID, u.FullName, j.Name AS VacancyName
+                    FROM dbo.Assignments a
+                    LEFT JOIN dbo.Users u ON a.UserID = u.UserID
+                    LEFT JOIN dbo.JobVacancies j ON a.VacancyID = j.VacancyID
+                    WHERE a.VacancyID = @VID2 ${occupancyWhere}
+                `);
+
+            if (occupantRes.recordset.length > 0 && action !== 'replace') {
+                const occ = occupantRes.recordset[0];
+                await transaction.rollback();
+                return res.status(409).json({
+                    occupied: true,
+                    currentUserId: occ.UserID,
+                    currentUserName: occ.FullName || occ.UserID,
+                    vacancyName: occ.VacancyName || String(targetVacancyId),
+                });
+            }
+        }
+
+        // توليد UserID تسلسلي
         const maxIdRes = await new sql.Request(transaction).query(`
             SELECT ISNULL(MAX(TRY_CAST(UserID AS INT)), 999) + 1 AS NextID
             FROM dbo.Users
@@ -641,8 +678,6 @@ exports.approveRegistrationRequest = async (req, res) => {
             userVals.push('@DepartmentID');
             insertReq.input('DepartmentID', sql.Int, requestData.DepartmentID);
         }
-
-        // تخزين اسم المستخدم في ServiceID ليُستخدَم للدخول
         if (schema.hasServiceID && username) {
             userCols.push('ServiceID');
             userVals.push('@ServiceID');
@@ -651,8 +686,8 @@ exports.approveRegistrationRequest = async (req, res) => {
 
         await insertReq.query(`INSERT INTO Users (${userCols.join(', ')}) VALUES (${userVals.join(', ')})`);
 
-        // إسناد المستخدم للمنصب المختار (إن وُجد)
-        if (schema.hasAssignments && requestData.VacancyID) {
+        // إسناد المستخدم للمنصب (إن لم يُختر no_vacancy)
+        if (schema.hasAssignments && targetVacancyId && action !== 'no_vacancy') {
             try {
                 const probe = await new sql.Request(transaction).query(`
                     SELECT
@@ -662,13 +697,20 @@ exports.approveRegistrationRequest = async (req, res) => {
                 `);
                 const p = probe.recordset[0] || {};
 
+                // عند الاستبدال: إلغاء تفعيل الإسناد الحالي أولاً
+                if (action === 'replace' && p.HasIsCurrent) {
+                    await new sql.Request(transaction)
+                        .input('VID3', sql.Int, targetVacancyId)
+                        .query(`UPDATE dbo.Assignments SET IsCurrent = 0 WHERE VacancyID = @VID3 AND IsCurrent = 1`);
+                }
+
                 const insertCols = ['UserID', 'VacancyID', 'CreatedAt'];
-                const insertVals = ['@UserID', '@VacancyID', 'GETDATE()'];
+                const insertVals = ['@NewUID', '@VID4', 'GETDATE()'];
                 const assignReq = new sql.Request(transaction)
-                    .input('UserID', sql.NVarChar(50), newUserId)
-                    .input('VacancyID', sql.Int, parseInt(requestData.VacancyID, 10));
-                if (p.HasIsCurrent) { insertCols.push('IsCurrent'); insertVals.push('1'); }
-                if (p.HasStartDate) { insertCols.push('StartDate'); insertVals.push('GETDATE()'); }
+                    .input('NewUID', sql.NVarChar(50), newUserId)
+                    .input('VID4', sql.Int, targetVacancyId);
+                if (p.HasIsCurrent)  { insertCols.push('IsCurrent'); insertVals.push('1'); }
+                if (p.HasStartDate)  { insertCols.push('StartDate'); insertVals.push('GETDATE()'); }
                 if (p.HasAssUpdatedAt) { insertCols.push('UpdatedAt'); insertVals.push('GETDATE()'); }
 
                 await assignReq.query(
@@ -683,7 +725,6 @@ exports.approveRegistrationRequest = async (req, res) => {
                 });
             }
         }
-        // إذا لم يُختر منصب → يُترك بدون إسناد ليُعيَّن لاحقاً من المدير
 
         await new sql.Request(transaction)
             .input('RequestID', sql.Int, id)

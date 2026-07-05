@@ -121,7 +121,9 @@ const UnifiedTimeline = ({
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}T00:00`;
+    const h = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${y}-${m}-${day}T${h}:${min}`;
   };
   const formatToDateTimeLocal = (d: Date) => {
     const y = d.getFullYear();
@@ -1049,22 +1051,37 @@ const UnifiedTimeline = ({
                 rows={3}
               />
             ) : (
-              <p
-                className={`text-content mb-2 break-words whitespace-pre-wrap ${canManage ? 'cursor-text' : ''}`}
-                onClick={() => {
-                  if (!canManage) return;
-                  setEditingCommentId(comment.CommentID);
-                  setEditingCommentValue(comment.Content || '');
-                }}
-                onDoubleClick={() => {
-                  if (!canManage) return;
-                  setEditingCommentId(comment.CommentID);
-                  setEditingCommentValue(comment.Content || '');
-                }}
-                title={canManage ? 'انقر لتعديل هذا التعليق' : undefined}
-              >
-                {renderWithLinks(comment.Content)}
-              </p>
+              <>
+                <p
+                  className={`text-content mb-2 break-words whitespace-pre-wrap ${canManage ? 'cursor-text' : ''}`}
+                  onClick={() => {
+                    if (!canManage) return;
+                    setEditingCommentId(comment.CommentID);
+                    setEditingCommentValue(comment.Content || '');
+                  }}
+                  onDoubleClick={() => {
+                    if (!canManage) return;
+                    setEditingCommentId(comment.CommentID);
+                    setEditingCommentValue(comment.Content || '');
+                  }}
+                  title={canManage ? 'انقر لتعديل هذا التعليق' : undefined}
+                >
+                  {renderWithLinks(comment.Content)}
+                </p>
+                {!!comment.ShowInCalendar && comment.CreatedAt && (() => {
+                  const d = new Date(comment.CreatedAt);
+                  const y = d.getFullYear();
+                  const m = d.getMonth() + 1;
+                  const day = d.getDate();
+                  const h = String(d.getHours()).padStart(2, '0');
+                  const min = String(d.getMinutes()).padStart(2, '0');
+                  return (
+                    <p className="text-xs text-purple-600 dark:text-purple-400 mb-2">
+                      📅 {y}/{m}/{day} {h}:{min}
+                    </p>
+                  );
+                })()}
+              </>
             )}
             <div className="flex justify-between items-center">
               <div className="flex flex-col gap-1">

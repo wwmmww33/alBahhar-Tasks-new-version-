@@ -540,7 +540,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                                 onClick={() => openTaskInNewTab(comment.TaskID)}
                                 className="text-xs font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
                               >
-                                {comment.Content}
+                                {formatEventTime(comment.CreatedAt)}{comment.Content}
                                 <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
                               </button>
                             ))}
@@ -580,6 +580,11 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
               ...filteredExtraComments.map(comment => ({ kind: 'comment' as const, date: comment.CreatedAt, comment })),
             ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
+            // آخر يوم مرئي في النطاق (اليوم + 30)
+            const gridEndDate = dateRange.length > 0
+              ? new Date(dateRange[dateRange.length - 1].date.getTime() + 86400000)
+              : null;
+
             return (
               <div>
                 <h3 className="text-sm font-bold text-content mb-2">أحداث بعد 30 يوم</h3>
@@ -588,7 +593,9 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                     const dateLabel = new Date(entry.date).toLocaleDateString('ar-EG-u-nu-latn', { weekday: 'long', day: 'numeric', month: 'long' });
                     if (entry.kind === 'subtask') {
                       const item = entry.item;
-                      const timePrefix = formatEventTime(item.DueDate);
+                      // (نهاية): مهمة بدأت ضمن الـ30 يوم ونهايتها بعدها
+                      const isEndMarker = !!item.EndDate && !!gridEndDate && new Date(item.DueDate) < gridEndDate;
+                      const timePrefix = formatEventTime(isEndMarker ? item.EndDate! : item.DueDate);
                       const pastDue = isPastDueToday(item.DueDate);
                       const completed = !!item.IsCompleted;
                       return (
@@ -600,7 +607,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                               className={`font-semibold text-blue-800 dark:text-blue-200 hover:underline cursor-pointer text-right ${completed ? 'line-through' : ''}`}
                               onClick={() => openTaskInNewTab(item.TaskID)}
                             >
-                              {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                              {isEndMarker ? '(نهاية) ' : ''}{item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
                             </button>
                             <div className="text-blue-600 dark:text-blue-300">ضمن: {item.TaskTitle}</div>
                           </div>
@@ -630,7 +637,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                       const comment = entry.comment;
                       return (
                         <li key={`c-${comment.CommentID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
-                          <div className="text-xs text-content-secondary mb-1">{dateLabel}</div>
+                          <div className="text-xs text-content-secondary mb-1">{formatEventTime(comment.CreatedAt)}{dateLabel}</div>
                           <div className="text-xs">
                             <button
                               type="button"
