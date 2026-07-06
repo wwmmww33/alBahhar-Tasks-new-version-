@@ -1,5 +1,6 @@
 // src/pages/TaskList.tsx
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { writeClipboard } from '../utils/clipboard';
 import { Link } from 'react-router-dom';
 import TaskCard from '../components/TaskCard';
 import SearchBar from '../components/SearchBar';
@@ -896,7 +897,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   const copyToClipboard = async () => {
     if (exportText) {
       try {
-        await navigator.clipboard.writeText(exportText);
+        await writeClipboard(exportText);
         setExportText(null);
       } catch (err) {
         console.error('Failed to copy text: ', err);

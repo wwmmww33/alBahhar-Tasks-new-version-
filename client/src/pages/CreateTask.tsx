@@ -1,5 +1,6 @@
 // src/pages/CreateTask.tsx
 import React, { useState, useEffect } from 'react';
+import { readClipboard } from '../utils/clipboard';
 import { useNavigate } from 'react-router-dom';
 import type { CurrentUser } from '../types';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
@@ -298,7 +299,7 @@ const handleSubmit = async (e: React.FormEvent) => {
               type="button"
               onClick={async () => {
                 try {
-                  const text = await navigator.clipboard.readText();
+                  const text = await readClipboard();
                   if (text.trim()) setTaskUrl(text.trim());
                 } catch {}
               }}

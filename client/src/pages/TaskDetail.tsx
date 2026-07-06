@@ -1,5 +1,6 @@
 // src/pages/TaskDetail.tsx
 import { useEffect, useState, useCallback } from 'react';
+import { writeClipboard, readClipboard } from '../utils/clipboard';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import UnifiedTimeline from '../components/UnifiedTimeline';
 import RelatedTasksSection from '../components/RelatedTasksSection';
@@ -54,7 +55,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
 
   const copyToClipboard = async (text: string) => {
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboard(text);
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 2000);
     } catch (err) {
@@ -615,7 +616,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                 <button
                   onClick={async () => {
                     try {
-                      const text = await navigator.clipboard.readText();
+                      const text = await readClipboard();
                       if (text.trim()) setUrlInput(text.trim());
                     } catch {}
                   }}
@@ -675,7 +676,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
                       <button
                         onClick={async () => {
                           try {
-                            const text = await navigator.clipboard.readText();
+                            const text = await readClipboard();
                             if (text.trim()) {
                               await handleUpdateTaskURL(text.trim());
                             }

@@ -4,6 +4,23 @@ const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission,
 const encryptionConfig = require('../config/encryption.config');
 const { detectSchema, resolveVacancyId, ensureVacancyId, resolveActorContext, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
 
+// ─── In-memory cache لتقليل استعلامات فحص المخطط المتكررة ──────────
+const SCHEMA_TTL = 5 * 60_000; // 5 دقائق — المخطط لا يتغير إلا عند migration
+const USER_TTL   =     60_000; // دقيقة واحدة — بيانات المستخدم نادراً ما تتغير
+const _tcache = {
+  schema:    null, schemaTs:    0,
+  schemaN:   null, schemaNTs:   0,
+  personal:  null, personalTs:  0,
+  actors: new Map(),   // userId → { val, ts }
+  depts:  new Map(),   // userId → { val, ts }
+};
+function _cacheGet(map, key, ttl) {
+  const e = map.get ? map.get(key) : (map.key === key ? map : null);
+  if (e && Date.now() - e.ts < ttl) return { hit: true, val: e.val };
+  return { hit: false };
+}
+function _cacheSet(map, key, val) { map.set(key, { val, ts: Date.now() }); }
+
 // تسجيل إجراء مهمة في جدول TaskAuditLog (العنوان يُحفظ مشفّراً كما هو في DB)
 async function logTaskAction(pool, { taskId, taskTitle, departmentId, action, userId }) {
     try {
@@ -64,10 +81,7 @@ async function resolveUserIDFromActor(pool, rawActorId) {
     return text;
 }
 
-async function resolveEffectiveActorId(pool, rawUserId) {
-    const loginId = String(rawUserId || '').trim();
-    if (!loginId) return '';
-
+async function _resolveEffectiveActorIdCore(pool, loginId) {
     const probe = await pool.request().query(`
         SELECT
           CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS UsesVacancySchema,
@@ -77,82 +91,57 @@ async function resolveEffectiveActorId(pool, rawUserId) {
           CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
           CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
     `);
-
     const p = probe.recordset[0] || {};
     const usesVacancySchema = !!p.UsesVacancySchema;
-
-    // إذا كان المخطط يستخدم VacancyID والقيمة الواردة رقم صحيح،
-    // نتحقق أولاً هل هي VacancyID مباشر (يحدث عندما يُرسل العميل VacancyID بدل UserID).
-    // هذا يمنع الخطأ: البحث عن UserID="3" قد يجد مستخدماً آخر له VacancyID مختلف.
     if (usesVacancySchema && p.HasJobVacancies && /^\d+$/.test(loginId)) {
         try {
             const vacancyCheck = await pool.request()
                 .input('VacancyID', sql.Int, parseInt(loginId, 10))
                 .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
-            if (vacancyCheck.recordset.length > 0) {
-                return loginId; // القيمة VacancyID صالح — نُعيدها مباشرةً
-            }
-        } catch (_) { /* تجاهل الخطأ ومتابعة المسار الاعتيادي */ }
+            if (vacancyCheck.recordset.length > 0) return loginId;
+        } catch (_) {}
     }
-
     const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
     if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
     if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
     const whereClause = whereParts.join(' OR ');
-
     if (usesVacancySchema && p.HasProfileView) {
         const mapped = await pool.request()
             .input('LoginID', sql.NVarChar, loginId)
-            .query(`
-                SELECT TOP 1 u.UserID, p.VacancyID
-                FROM dbo.Users u
-                LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
-                WHERE ${whereClause}
-            `);
-
+            .query(`SELECT TOP 1 u.UserID, p.VacancyID FROM dbo.Users u LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID WHERE ${whereClause}`);
         const row = mapped.recordset[0];
         if (!row) return loginId;
-        if (row.VacancyID !== null && row.VacancyID !== undefined && String(row.VacancyID).trim() !== '') {
+        if (row.VacancyID !== null && row.VacancyID !== undefined && String(row.VacancyID).trim() !== '')
             return String(row.VacancyID).trim();
-        }
-
         if (p.HasAssignmentsTable) {
-            const latestAssignment = await pool.request()
+            const la = await pool.request()
                 .input('UserID', sql.NVarChar, String(row.UserID || loginId).trim())
-                .query(`
-                    SELECT TOP 1 VacancyID
-                    FROM dbo.Assignments
-                    WHERE UserID = @UserID
-                      AND VacancyID IS NOT NULL
-                    ORDER BY
-                      CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
-                      ISNULL(StartDate, '1900-01-01') DESC,
-                      AssignmentID DESC
-                `);
-
-            const fallbackVacancyId = latestAssignment.recordset[0]?.VacancyID;
-            if (fallbackVacancyId !== null && fallbackVacancyId !== undefined && String(fallbackVacancyId).trim() !== '') {
-                return String(fallbackVacancyId).trim();
-            }
+                .query(`SELECT TOP 1 VacancyID FROM dbo.Assignments WHERE UserID = @UserID AND VacancyID IS NOT NULL ORDER BY CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END, ISNULL(StartDate,'1900-01-01') DESC, AssignmentID DESC`);
+            const fv = la.recordset[0]?.VacancyID;
+            if (fv !== null && fv !== undefined && String(fv).trim() !== '') return String(fv).trim();
         }
-
         return String(row.UserID || loginId).trim();
     }
-
     const mapped = await pool.request()
         .input('LoginID', sql.NVarChar, loginId)
-        .query(`
-            SELECT TOP 1 UserID
-            FROM dbo.Users u
-            WHERE ${whereClause}
-        `);
-
+        .query(`SELECT TOP 1 UserID FROM dbo.Users u WHERE ${whereClause}`);
     return String(mapped.recordset[0]?.UserID || loginId).trim();
+}
+async function resolveEffectiveActorId(pool, rawUserId) {
+    const loginId = String(rawUserId || '').trim();
+    if (!loginId) return '';
+    const cc = _cacheGet(_tcache.actors, loginId, USER_TTL);
+    if (cc.hit) return cc.val;
+    const val = await _resolveEffectiveActorIdCore(pool, loginId);
+    _cacheSet(_tcache.actors, loginId, val);
+    return val;
 }
 
 async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
     const loginId = String(rawUserId || '').trim();
     if (!loginId) return [];
+    const dc = _cacheGet(_tcache.depts, loginId, USER_TTL);
+    if (dc.hit) return dc.val;
 
     const probeResult = await pool.request().query(`
         SELECT
@@ -304,9 +293,11 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
             OPTION (MAXRECURSION 300)
         `);
 
-    return (deptTreeResult.recordset || [])
+    const deptIds = (deptTreeResult.recordset || [])
         .map(r => String(r.DepartmentID || '').trim())
         .filter(v => /^\d+$/.test(v));
+    _cacheSet(_tcache.depts, loginId, deptIds);
+    return deptIds;
 }
 
 async function canUserViewTaskByListRules(pool, rawUserId, isAdmin, taskId) {
@@ -427,20 +418,24 @@ exports.getTaskActivity = async (req, res) => {
     try {
         const effectiveActorId = await resolveEffectiveActorId(pool, userId);
 
-        const schemaProbe = await pool.request().query(`
-            SELECT
-              CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskCreatedByVacancy,
-              CASE WHEN COL_LENGTH('dbo.Tasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskAssignedToVacancy,
-                            CASE WHEN COL_LENGTH('dbo.Tasks', 'AssignedTo') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskAssignedToUser,
-              CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubCreatedByVacancy,
-              CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubAssignedToVacancy,
-              CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
-              CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
-                     AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDelegations,
-              CASE WHEN COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner
-        `);
-
-        const s = schemaProbe.recordset[0] || {};
+        let schemaProbeRow = _tcache.schema && (Date.now() - _tcache.schemaTs < SCHEMA_TTL) ? _tcache.schema : null;
+        if (!schemaProbeRow) {
+            const schemaProbe = await pool.request().query(`
+                SELECT
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskCreatedByVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskAssignedToVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'AssignedTo') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskAssignedToUser,
+                  CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubCreatedByVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubAssignedToVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+                  CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
+                         AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDelegations,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner
+            `);
+            schemaProbeRow = schemaProbe.recordset[0] || {};
+            _tcache.schema = schemaProbeRow; _tcache.schemaTs = Date.now();
+        }
+        const s = schemaProbeRow;
         const taskCreatedCol = s.HasTaskCreatedByVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
         const hasTaskAssignedToUser = !!s.HasTaskAssignedToUser;
         const taskAssignedCol = s.HasTaskAssignedToVacancy ? 'AssignedToVacancyID' : (hasTaskAssignedToUser ? 'AssignedTo' : null);
@@ -1777,21 +1772,26 @@ exports.getTasksWithNotifications = async (req, res) => {
     try {
         const effectiveActorId = await resolveEffectiveActorId(pool, userId);
         res.set('X-Effective-Actor-ID', String(effectiveActorId || ''));
-        const schema = await pool.request().query(`
-            SELECT
-              CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskVacancy,
-              CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubVacancy,
-              CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
-                     AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasDelegationVacancy,
-              CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignNotifVacancy,
-              CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentNotifVacancy,
-              CASE WHEN COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskViewsVacancy,
-              CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentVacancy,
-              CASE WHEN COL_LENGTH('dbo.Tasks', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasActedBy,
-              CASE WHEN COL_LENGTH('dbo.Tasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy
-        `);
-
-        const s = schema.recordset[0] || {};
+        let sN = _tcache.schemaN && (Date.now() - _tcache.schemaNTs < SCHEMA_TTL) ? _tcache.schemaN : null;
+        if (!sN) {
+            const schemaRes = await pool.request().query(`
+                SELECT
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubVacancy,
+                  CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
+                         AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasDelegationVacancy,
+                  CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignNotifVacancy,
+                  CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentNotifVacancy,
+                  CASE WHEN COL_LENGTH('dbo.TaskViews', 'ViewedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskViewsVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasActedBy,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner
+            `);
+            sN = schemaRes.recordset[0] || {};
+            _tcache.schemaN = sN; _tcache.schemaNTs = Date.now();
+        }
+        const s = sN;
         const isVacancy = !!(s.HasTaskVacancy || s.HasSubVacancy || s.HasDelegationVacancy);
 
         const taskCreatorCol = isVacancy ? 'CreatedByVacancyID' : 'CreatedBy';
@@ -1823,9 +1823,8 @@ exports.getTasksWithNotifications = async (req, res) => {
 
         const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
 
-        // دعم المهام الشخصية
-        const personalColProbeN = await pool.request().query(`SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`);
-        const hasPersonalColN = !!(personalColProbeN.recordset[0]?.Len);
+        // دعم المهام الشخصية — القيمة متوفرة من الـ probe المُخزَّن
+        const hasPersonalColN = !!s.HasPersonalOwner;
         const personalUserIdN = isDelegationRequest ? null : await resolveUserIDFromActor(pool, userId);
 
         const delegationAccessExpr = hasPersonalColN

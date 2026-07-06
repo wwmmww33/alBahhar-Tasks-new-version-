@@ -1,6 +1,11 @@
 // src/utils/delegationUtils.js
 const sql = require('mssql');
 
+// cache لفحص المخطط — لا يتغير المخطط إلا عند migration
+let _identitySchemaCache = null;
+let _identitySchemaCacheTs = 0;
+const _IDENTITY_SCHEMA_TTL = 5 * 60_000;
+
 // يحوّل VacancyID رقمي → UserID حقيقي لمقارنة PersonalOwnerUserID
 async function resolveUserIDFromActor(pool, rawActorId) {
   const text = String(rawActorId || '').trim();
@@ -23,6 +28,9 @@ async function resolveUserIDFromActor(pool, rawActorId) {
 }
 
 async function detectIdentitySchema(pool) {
+  if (_identitySchemaCache && (Date.now() - _identitySchemaCacheTs < _IDENTITY_SCHEMA_TTL)) {
+    return _identitySchemaCache;
+  }
   const result = await pool.request().query(`
     SELECT
       CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskVacancy,
@@ -30,10 +38,9 @@ async function detectIdentitySchema(pool) {
       CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
              AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasDelegationVacancy
   `);
-
   const row = result.recordset[0] || {};
   const isVacancy = !!(row.HasTaskVacancy || row.HasSubtaskVacancy || row.HasDelegationVacancy);
-  return {
+  _identitySchemaCache = {
     isVacancy,
     taskCreatorCol: isVacancy ? 'CreatedByVacancyID' : 'CreatedBy',
     taskAssignedCol: isVacancy ? null : 'AssignedTo',
@@ -44,6 +51,8 @@ async function detectIdentitySchema(pool) {
     identityKey: isVacancy ? 'VacancyID' : 'UserID',
     identityName: isVacancy ? 'Name' : 'FullName'
   };
+  _identitySchemaCacheTs = Date.now();
+  return _identitySchemaCache;
 }
 
 async function resolveAccessActorId(pool, rawUserId, schema) {

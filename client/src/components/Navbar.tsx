@@ -52,8 +52,33 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
     <header className="bg-white/80 dark:bg-gray-900/80 text-content h-16 flex items-center justify-between px-6 sticky top-0 z-50 backdrop-blur-sm border-b border-black/10 dark:border-white/10">
       {/* --- القسم الأيمن: التبويبات (تمت إعادته) --- */}
       <div className="flex items-center gap-8">
-        <Link to="/dashboard">
-<h1 className="text-2xl font-bold text-primary">بحار</h1>
+        <Link to="/dashboard" className="flex items-center gap-2.5 shrink-0">
+          <svg width="36" height="36" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="bahar-nav-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#071E3D"/>
+                <stop offset="100%" stopColor="#0F3D6B"/>
+              </linearGradient>
+            </defs>
+            <rect width="100" height="100" rx="22" fill="url(#bahar-nav-bg)"/>
+            <circle cx="50" cy="50" r="34" fill="none" stroke="#0EA5E9" strokeWidth="5"/>
+            <g stroke="#FFFFFF" strokeWidth="3" strokeLinecap="round">
+              <g transform="rotate(0,50,50)"><line x1="60" y1="50" x2="82" y2="50"/><circle cx="87" cy="50" r="4" fill="#BAE6FD" stroke="none"/></g>
+              <g transform="rotate(45,50,50)"><line x1="60" y1="50" x2="82" y2="50"/><circle cx="87" cy="50" r="4" fill="#BAE6FD" stroke="none"/></g>
+              <g transform="rotate(90,50,50)"><line x1="60" y1="50" x2="82" y2="50"/><circle cx="87" cy="50" r="4" fill="#BAE6FD" stroke="none"/></g>
+              <g transform="rotate(135,50,50)"><line x1="60" y1="50" x2="82" y2="50"/><circle cx="87" cy="50" r="4" fill="#BAE6FD" stroke="none"/></g>
+              <g transform="rotate(180,50,50)"><line x1="60" y1="50" x2="82" y2="50"/><circle cx="87" cy="50" r="4" fill="#BAE6FD" stroke="none"/></g>
+              <g transform="rotate(225,50,50)"><line x1="60" y1="50" x2="82" y2="50"/><circle cx="87" cy="50" r="4" fill="#BAE6FD" stroke="none"/></g>
+              <g transform="rotate(270,50,50)"><line x1="60" y1="50" x2="82" y2="50"/><circle cx="87" cy="50" r="4" fill="#BAE6FD" stroke="none"/></g>
+              <g transform="rotate(315,50,50)"><line x1="60" y1="50" x2="82" y2="50"/><circle cx="87" cy="50" r="4" fill="#BAE6FD" stroke="none"/></g>
+            </g>
+            <circle cx="50" cy="50" r="10" fill="#0EA5E9"/>
+            <circle cx="50" cy="50" r="5"  fill="#FFFFFF"/>
+          </svg>
+          <div className="flex flex-col leading-tight">
+            <span className="text-lg font-bold text-[#071E3D] dark:text-white">بحار</span>
+            <span className="text-[10px] font-medium text-[#0EA5E9]">لإدارة المهام</span>
+          </div>
         </Link>
         <nav className="flex items-center gap-2">
           {/*<NavLink to="/dashboard" className={navLinkStyle}><LayoutDashboard size={18} /><span>الرئيسية</span></NavLink> */}
