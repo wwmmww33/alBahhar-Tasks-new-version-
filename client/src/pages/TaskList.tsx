@@ -249,7 +249,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     setActivityInfoMsg(null);
     try {
       // Fetch 7 days of activity based on pageIndex
-      const res = await fetch(`/api/tasks/activity?userId=${actorId}&isAdmin=${isAdminFlag}&page=${pageIndex}&days=7`);
+      const res = await fetch(`/api/tasks/activity?userId=${currentUser.UserID}&isAdmin=${isAdminFlag}&page=${pageIndex}&days=7`);
       const ct = res.headers.get('content-type') || '';
       if (!res.ok || !ct.includes('application/json')) {
         if (pageIndex === 0) setActivityItems([]);

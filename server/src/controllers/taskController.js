@@ -281,6 +281,10 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
     }
     if (!rootDepartmentId || !/^\d+$/.test(String(rootDepartmentId))) return [];
 
+    const typeStopClause = p.HasDepartmentType
+        ? `AND (TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)`
+        : '';
+
     const deptTreeResult = await pool.request()
         .input('RootDepartmentID', sql.NVarChar, rootDepartmentId)
         .query(`
@@ -293,6 +297,7 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
                 FROM dbo.Departments d
                 INNER JOIN DeptTree dt ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
                                        AND TRY_CAST(d.${parentCol} AS INT) = dt.DepartmentID
+                ${typeStopClause}
             )
             SELECT DISTINCT DepartmentID
             FROM DeptTree
@@ -431,7 +436,8 @@ exports.getTaskActivity = async (req, res) => {
               CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubAssignedToVacancy,
               CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
               CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
-                     AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDelegations
+                     AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDelegations,
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner
         `);
 
         const s = schemaProbe.recordset[0] || {};
@@ -502,6 +508,9 @@ exports.getTaskActivity = async (req, res) => {
             accessCondition = `(${[...accessClauses, ...deptClauses].join(' OR ')})`;
         }
 
+        // المهام الخاصة لا تظهر أبداً في آخر التحديثات — خاصة بصاحبها فقط
+        const personalFilterClause = s.HasPersonalOwner ? `AND t.PersonalOwnerUserID IS NULL` : '';
+
         const taskAssignedIdExpr = taskAssignedCol ? `t.${taskAssignedCol}` : 'CAST(NULL as nvarchar(50))';
         const taskAssignedNameExpr = taskAssignedCol ? `assignee.${identityName}` : 'CAST(NULL as nvarchar(100))';
         const taskAssigneeJoin = taskAssignedCol
@@ -543,6 +552,7 @@ exports.getTaskActivity = async (req, res) => {
                 LEFT JOIN ${identityTable} creator ON COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${taskCreatedCol}) = creator.${identityKey}
                 ${taskAssigneeJoin}
                 WHERE ${accessCondition}
+                ${personalFilterClause}
                 AND t.CreatedAt >= @StartDate AND t.CreatedAt <= @EndDate
 
                 UNION ALL
@@ -566,6 +576,7 @@ exports.getTaskActivity = async (req, res) => {
                 LEFT JOIN ${identityTable} subCreator ON COALESCE(s.ActedBy, s.LastActedByVacancyID, s.${subCreatedCol}) = subCreator.${identityKey}
                 LEFT JOIN ${identityTable} subAssignee ON s.${subAssignedCol} = subAssignee.${identityKey}
                 WHERE ${accessCondition}
+                ${personalFilterClause}
                 AND s.CreatedAt >= @StartDate AND s.CreatedAt <= @EndDate
 
                 UNION ALL
@@ -588,6 +599,7 @@ exports.getTaskActivity = async (req, res) => {
                 INNER JOIN Tasks t ON c.TaskID = t.TaskID
                 LEFT JOIN ${identityTable} commenter ON COALESCE(c.ActedBy, c.LastActedByVacancyID, c.${commentActorCol}) = commenter.${identityKey}
                 WHERE ${accessCondition}
+                ${personalFilterClause}
                 AND c.CreatedAt >= @StartDate AND c.CreatedAt <= @EndDate
             )
             SELECT *
