@@ -106,20 +106,29 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   );
   // 3.1 إضافة فلتر الأشخاص (اختياري)
   const [assigneeFilterUserId, setAssigneeFilterUserId] = useState<string | null>(null);
-  const [scopeVacancyIds, setScopeVacancyIds] = useState<Set<string>>(new Set());
+  type ScopeMember = { vacancyId: string; userId: string | null; name: string };
+  const [scopeMembers, setScopeMembers] = useState<ScopeMember[]>([]);
   useEffect(() => {
     const deptId = (currentUser as any).DepartmentID;
     if (!deptId) return;
     fetch(`/api/vacancies/department/${deptId}/independent-scope`)
       .then(r => r.ok ? r.json() : [])
       .then((data: any[]) => {
-        if (Array.isArray(data) && data.length > 0) {
-          const ids = new Set<string>();
-          data.forEach(v => {
-            if (v.VacancyID != null) ids.add(String(v.VacancyID));
-            if (v.CurrentUserID != null) ids.add(String(v.CurrentUserID));
-          });
-          setScopeVacancyIds(ids);
+        if (Array.isArray(data)) {
+          const members: ScopeMember[] = data
+            .filter(v => v.VacancyID != null)
+            .map(v => {
+              const vacName = (v.Name as string | null) || String(v.VacancyID);
+              const personName = (v.CurrentUserFullName as string | null) || null;
+              const displayName = personName ? `${vacName} — ${personName}` : vacName;
+              return {
+                vacancyId: String(v.VacancyID),
+                userId: v.CurrentUserID != null ? String(v.CurrentUserID) : null,
+                name: displayName,
+              };
+            })
+            .sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+          setScopeMembers(members);
         }
       })
       .catch(() => {});
@@ -156,7 +165,6 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   const [auditHasMore, setAuditHasMore] = useState(true);
 
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
-  const subtaskAssigneeId = (subtask: Subtask) => String((subtask as any).AssignedToVacancyID ?? (subtask as any).AssignedTo ?? '');
 
   // في وضع التفويض: actorId = معرّف المفوِّض (User A)، currentUser = بيانات المفوَّض له (User B)
   const _activeAccount = getActiveAccount();
@@ -897,26 +905,10 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   };
 
   // 5. فلترة المهام حسب الوضع المحدد والبحث
-  // بناء قائمة الأشخاص المتاحين من المهام الفرعية الموجودة حالياً
+  // بناء قائمة المناصب من نطاق القسم المستقل مباشرة (لا من المهام الفرعية)
   const assigneeOptions = useMemo(() => {
-    const map = new Map<string, string | undefined>();
-    tasks.forEach(task => {
-      (task.subtasks || []).forEach(st => {
-        const stAssignedTo = subtaskAssigneeId(st as any);
-        if (stAssignedTo) {
-          map.set(stAssignedTo, (st as any).AssignedToName);
-        }
-      });
-    });
-    const all = Array.from(map.entries())
-      .map(([id, name]) => ({ id, name: name || id }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    // تصفية حسب نطاق القسم المستقل إذا كان متاحاً
-    if (scopeVacancyIds.size > 0) {
-      return all.filter(opt => scopeVacancyIds.has(opt.id));
-    }
-    return all;
-  }, [tasks, scopeVacancyIds]);
+    return scopeMembers.map(m => ({ id: m.vacancyId, name: m.name }));
+  }, [scopeMembers]);
 
   const filteredTasks = tasks.filter(task => {
     const isRelated = isTaskRelatedToActor(task);
@@ -942,12 +934,22 @@ const TaskList = ({ currentUser }: TaskListProps) => {
         comment.Content.toLowerCase().includes(searchTerm.toLowerCase())
       ));
 
-    // فلتر حسب الشخص المختار: عند اختيار شخص معيّن، نعرض فقط المهام التي تحتوي
-    // على مهام فرعية غير مكتملة مسندة له، ونستبعد المهام التي لا تحتوي على مهام فرعية إطلاقاً
+    // فلتر حسب المنصب المختار: يطابق VacancyID أو UserID للشخص في المنصب
     const matchesAssignee = !assigneeFilterUserId
       ? true
       : !!(task.subtasks && task.subtasks.length > 0 &&
-           task.subtasks.some(st => !st.IsCompleted && subtaskAssigneeId(st as any) === assigneeFilterUserId));
+           task.subtasks.some(st => {
+             if (st.IsCompleted) return false;
+             const stVacId = String((st as any).AssignedToVacancyID ?? '').trim();
+             const stUserId = String((st as any).AssignedTo ?? '').trim();
+             const sel = scopeMembers.find(m => m.vacancyId === assigneeFilterUserId);
+             if (sel) {
+               if (stVacId && stVacId === sel.vacancyId) return true;
+               if (sel.userId && stUserId && stUserId === sel.userId) return true;
+               return false;
+             }
+             return stVacId === assigneeFilterUserId || stUserId === assigneeFilterUserId;
+           }));
     
     return matchesFilter && matchesSearch && matchesAssignee;
   });

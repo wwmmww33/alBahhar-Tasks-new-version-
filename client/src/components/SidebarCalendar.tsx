@@ -205,10 +205,12 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     window.addEventListener('calendar:subtask:created', handler);
     window.addEventListener('calendar:refresh', handler);
     window.addEventListener('calendar:comment:updated', commentHandler as EventListener);
+    const hourlyTimer = setInterval(() => fetchCalendarRange(), 60 * 60 * 1000);
     return () => {
       window.removeEventListener('calendar:subtask:created', handler);
       window.removeEventListener('calendar:refresh', handler);
       window.removeEventListener('calendar:comment:updated', commentHandler as EventListener);
+      clearInterval(hourlyTimer);
     };
   }, [calendarUserId]);
 
@@ -577,16 +579,20 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
 
             if (filteredExtraWork.length === 0 && filteredExtraPersonal.length === 0 && filteredExtraComments.length === 0) return null;
 
-            const merged: ExtraEntry[] = [
-              ...filteredExtraWork.map(item => ({ kind: 'subtask' as const, date: item.DueDate, item })),
-              ...filteredExtraPersonal.map(item => ({ kind: 'personal' as const, date: item.DueDate, item })),
-              ...filteredExtraComments.map(comment => ({ kind: 'comment' as const, date: comment.CreatedAt, comment })),
-            ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-            // آخر يوم مرئي في النطاق (اليوم + 30)
+            // آخر يوم مرئي في النطاق (اليوم + 30) — يجب حسابه قبل بناء merged
             const gridEndDate = dateRange.length > 0
               ? new Date(dateRange[dateRange.length - 1].date.getTime() + 86400000)
               : null;
+
+            const merged: ExtraEntry[] = [
+              ...filteredExtraWork.map(item => {
+                // مهمة بدأت ضمن الـ30 يوم ونهايتها بعدها → نرتّبها ونعرضها بتاريخ النهاية
+                const isEnd = !!item.EndDate && !!gridEndDate && new Date(item.DueDate) < gridEndDate;
+                return { kind: 'subtask' as const, date: isEnd ? item.EndDate! : item.DueDate, item };
+              }),
+              ...filteredExtraPersonal.map(item => ({ kind: 'personal' as const, date: item.DueDate, item })),
+              ...filteredExtraComments.map(comment => ({ kind: 'comment' as const, date: comment.CreatedAt, comment })),
+            ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
             return (
               <div>
