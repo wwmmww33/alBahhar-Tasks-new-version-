@@ -90,28 +90,71 @@ const UnifiedTimeline = ({
 }: UnifiedTimelineProps) => {
   const { refreshTasks, refreshNotifications } = useNotification();
   const safeUsers = Array.isArray(users) ? users : [];
-  const renderWithLinks = (text: string) => {
-    const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/g;
-    const elements: (string | JSX.Element)[] = [];
-    let lastIndex = 0;
-    text.replace(urlRegex, (match, _p1, offset) => {
-      if (offset > lastIndex) {
-        elements.push(text.slice(lastIndex, offset));
-      }
-      const href = match.startsWith('http') ? match : `http://${match}`;
-      elements.push(
-        <a href={href} target="_blank" rel="noreferrer" className="text-primary hover:underline break-all">
-          {match}
-        </a>
-      );
-      lastIndex = offset + match.length;
-      return match;
-    });
-    if (lastIndex < text.length) {
-      elements.push(text.slice(lastIndex));
-    }
-    return elements;
+  const MD_COLORS: Record<string, string> = {
+    red:'#ef4444', green:'#16a34a', blue:'#2563eb', orange:'#ea580c',
+    purple:'#9333ea', pink:'#db2777', teal:'#0d9488', gray:'#6b7280', yellow:'#ca8a04'
   };
+
+  const renderMarkdown = (raw: string): string => {
+    const esc = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const inline = (s: string): string => {
+      const e = esc(s);
+      return e
+        .replace(/\[c=([a-z]+|#[0-9a-fA-F]{3,6})\](.+?)\[\/c\]/g, (_m, col, txt) => {
+          const hex = MD_COLORS[col] ?? (col.startsWith('#') ? col : null);
+          return hex ? `<span style="color:${hex}">${txt}</span>` : txt;
+        })
+        .replace(/(https?:\/\/[^\s<&]+)/g, '<a href="$1" target="_blank" rel="noreferrer" style="color:var(--color-primary,#0ea5e9);word-break:break-all">$1</a>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+?)\*/g, '<em>$1</em>');
+    };
+    const lines = raw.split('\n');
+    let html = '';
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.includes('|') && i + 1 < lines.length && /^\s*\|?[\s\-|:]+\|[\s\-|:]*$/.test(lines[i + 1])) {
+        const parseCells = (l: string) => l.split('|')
+          .filter((_, idx, arr) => !(idx === 0 && arr[0].trim() === '') && !(idx === arr.length - 1 && arr[arr.length - 1].trim() === ''))
+          .map(c => c.trim());
+        const headers = parseCells(line);
+        i += 2;
+        const rows: string[][] = [];
+        while (i < lines.length && lines[i].includes('|')) { rows.push(parseCells(lines[i])); i++; }
+        html += '<div style="overflow-x:auto;margin:6px 0"><table style="border-collapse:collapse;font-size:0.85em;min-width:100%">';
+        html += '<thead><tr>';
+        headers.forEach(h => { html += `<th style="border:1px solid #d1d5db;padding:4px 10px;text-align:right;background:rgba(0,0,0,0.05);font-weight:600">${inline(h)}</th>`; });
+        html += '</tr></thead><tbody>';
+        rows.forEach((row, ri) => {
+          html += `<tr style="background:${ri%2===0?'transparent':'rgba(0,0,0,0.03)'}">`;
+          row.forEach(cell => { html += `<td style="border:1px solid #d1d5db;padding:4px 10px;text-align:right">${inline(cell)}</td>`; });
+          html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+        continue;
+      }
+      if (/^[-*]\s+/.test(line)) {
+        html += '<ul style="margin:4px 0 4px 1.4em;padding:0;list-style:disc">';
+        while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+          html += `<li style="margin:1px 0">${inline(lines[i].replace(/^[-*]\s+/, ''))}</li>`;
+          i++;
+        }
+        html += '</ul>';
+        continue;
+      }
+      const hm = line.match(/^(#{1,3})\s+(.+)/);
+      if (hm) {
+        const sz = hm[1].length === 1 ? '1.1em' : hm[1].length === 2 ? '1em' : '0.95em';
+        html += `<p style="font-weight:700;font-size:${sz};margin:6px 0 2px">${inline(hm[2])}</p>`;
+        i++; continue;
+      }
+      if (!line.trim()) { html += '<div style="height:5px"></div>'; i++; continue; }
+      html += `<p style="margin:1px 0;line-height:1.55">${inline(line)}</p>`;
+      i++;
+    }
+    return html;
+  };
+
   const getUserNameById = (id?: string) => {
     if (!id) return '';
     return safeUsers.find(u => resolveUserActorId(u) === id || u.UserID === id)?.FullName || id;
@@ -159,6 +202,8 @@ const UnifiedTimeline = ({
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [reminderMinutes, setReminderMinutes] = useState(15);
   const [newComment, setNewComment] = useState('');
+  const [showCommentPreview, setShowCommentPreview] = useState(false);
+  const [showColorPicker, setShowColorPicker] = useState(false);
   const [useCustomDateTime, setUseCustomDateTime] = useState(false);
   const [customDateTime, setCustomDateTime] = useState(getCurrentDateTime());
   const [showCommentInCalendar, setShowCommentInCalendar] = useState(false);
@@ -195,6 +240,86 @@ const UnifiedTimeline = ({
 
   const newCommentRef = useRef<HTMLTextAreaElement>(null);
   const editingCommentRef = useRef<HTMLTextAreaElement>(null);
+
+  const insertMarkdownSyntax = (prefix: string, suffix: string, placeholder: string) => {
+    const el = newCommentRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    const selected = newComment.slice(start, end) || placeholder;
+    const before = newComment.slice(0, start);
+    const after = newComment.slice(end);
+    const inserted = prefix + selected + suffix;
+    const next = before + inserted + after;
+    setNewComment(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      const cursor = start + prefix.length + selected.length;
+      el.setSelectionRange(cursor, cursor);
+      autoResize(el);
+    });
+  };
+
+  const insertTableTemplate = () => {
+    const tpl = '\n| العمود 1 | العمود 2 | العمود 3 |\n| --- | --- | --- |\n| بيانات | بيانات | بيانات |\n';
+    const el = newCommentRef.current;
+    if (!el) return;
+    const pos = el.selectionStart ?? newComment.length;
+    const next = newComment.slice(0, pos) + tpl + newComment.slice(pos);
+    setNewComment(next);
+    requestAnimationFrame(() => { el.focus(); autoResize(el); });
+  };
+
+  const insertColor = (colorKey: string) => {
+    setShowColorPicker(false);
+    insertMarkdownSyntax(`[c=${colorKey}]`, '[/c]', 'نص ملوّن');
+  };
+
+  const htmlTableToMarkdown = (html: string): string | null => {
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      const table = doc.querySelector('table');
+      if (!table) return null;
+      const rows = Array.from(table.querySelectorAll('tr'));
+      if (!rows.length) return null;
+      const toText = (cell: Element) =>
+        (cell.textContent ?? '').replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|');
+      const grid = rows
+        .map(r => Array.from(r.querySelectorAll('td,th')).map(toText))
+        .filter(r => r.length > 0);
+      if (!grid.length) return null;
+      const cols = Math.max(...grid.map(r => r.length));
+      const pad = (r: string[]) => { while (r.length < cols) r.push(''); return r; };
+      const fmtRow = (r: string[]) => '| ' + r.join(' | ') + ' |';
+      const header = pad(grid[0]);
+      const sep = header.map(() => '---');
+      const body = grid.slice(1).map(r => fmtRow(pad(r)));
+      return '\n' + [fmtRow(header), fmtRow(sep), ...body].join('\n') + '\n';
+    } catch { return null; }
+  };
+
+  const handleCommentPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const html = e.clipboardData.getData('text/html');
+    if (html && html.toLowerCase().includes('<table')) {
+      const md = htmlTableToMarkdown(html);
+      if (md) {
+        e.preventDefault();
+        const el = e.currentTarget;
+        const s = el.selectionStart ?? 0;
+        const en = el.selectionEnd ?? 0;
+        const next = newComment.slice(0, s) + md + newComment.slice(en);
+        setNewComment(next);
+        requestAnimationFrame(() => {
+          el.focus();
+          el.setSelectionRange(s + md.length, s + md.length);
+          autoResize(el);
+        });
+        return;
+      }
+    }
+    setTimeout(() => autoResize(e.currentTarget), 0);
+  };
 
   const actingUserId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   const userActorId = (user: User) => String(resolveUserActorId(user) || user.UserID);
@@ -517,7 +642,7 @@ const UnifiedTimeline = ({
         body: JSON.stringify({ ShowInCalendar: nextShow, UserID: actingUserId, isAdmin: currentUser.IsAdmin })
       });
       if (resp.ok) {
-        window.dispatchEvent(new CustomEvent('calendar:subtask:created'));
+        window.dispatchEvent(new CustomEvent('calendar:subtask:updated', { detail: { SubtaskID: subtask.SubtaskID, ShowInCalendar: nextShow } }));
         onSubtaskUpdate();
         refreshTasks();
         refreshNotifications();
@@ -572,17 +697,20 @@ const UnifiedTimeline = ({
     }
     
     // تمرير التاريخ المخصص إذا تم تفعيله
+    const hadCalendar = showCommentInCalendar;
     const commentData = {
       content: newComment,
       customDateTime: useCustomDateTime ? customDateTime : null,
-      showInCalendar: showCommentInCalendar
+      showInCalendar: hadCalendar
     };
-    
+
     await onCommentSubmit(commentData);
     setNewComment('');
-    // إعادة تعيين التاريخ المخصص للوقت الحالي
     setCustomDateTime(getCurrentDateTime());
     setShowCommentInCalendar(false);
+    if (hadCalendar) {
+      window.dispatchEvent(new CustomEvent('calendar:comment:created', { detail: { ShowInCalendar: true } }));
+    }
   };
 
   const saveComment = async (commentId: number, content: string) => {
@@ -1052,8 +1180,8 @@ const UnifiedTimeline = ({
               />
             ) : (
               <>
-                <p
-                  className={`text-content mb-2 break-words whitespace-pre-wrap ${canManage ? 'cursor-text' : ''}`}
+                <div
+                  className={`text-content mb-2 text-sm ${canManage ? 'cursor-text' : ''}`}
                   onClick={() => {
                     if (!canManage) return;
                     setEditingCommentId(comment.CommentID);
@@ -1065,9 +1193,9 @@ const UnifiedTimeline = ({
                     setEditingCommentValue(comment.Content || '');
                   }}
                   title={canManage ? 'انقر لتعديل هذا التعليق' : undefined}
-                >
-                  {renderWithLinks(comment.Content)}
-                </p>
+                  dir="auto"
+                  dangerouslySetInnerHTML={{ __html: renderMarkdown(comment.Content || '') }}
+                />
                 {!!comment.ShowInCalendar && comment.CreatedAt && (() => {
                   const d = new Date(comment.CreatedAt);
                   const y = d.getFullYear();
@@ -1349,16 +1477,62 @@ const UnifiedTimeline = ({
         {showCommentForm && (
         <form onSubmit={handleCommentSubmit}>
           <div className="mb-3">
-            <textarea
-              ref={newCommentRef}
-              value={newComment}
-              onChange={(e) => { setNewComment(e.target.value); autoResize(e.target); }}
-              onPaste={(e) => { setTimeout(() => autoResize(e.target as HTMLTextAreaElement), 0); }}
-              placeholder="أضف تعليقاً..."
-              rows={3}
-              required
-              className="w-full p-2 border rounded-md bg-bkg border-content/20 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 resize-none overflow-hidden"
-            />
+            {/* شريط أدوات Markdown */}
+            <div className="flex items-center gap-1 mb-1 flex-wrap">
+              <button type="button" title="عريض (Bold)" onClick={() => insertMarkdownSyntax('**','**','نص عريض')}
+                className="px-2 py-0.5 text-sm font-bold border rounded hover:bg-gray-100 dark:hover:bg-gray-700 border-content/20">B</button>
+              <button type="button" title="مائل (Italic)" onClick={() => insertMarkdownSyntax('*','*','نص مائل')}
+                className="px-2 py-0.5 text-sm italic border rounded hover:bg-gray-100 dark:hover:bg-gray-700 border-content/20">I</button>
+              {/* زر تلوين النص */}
+              <div className="relative">
+                <button type="button" title="تلوين النص"
+                  onClick={() => setShowColorPicker(v => !v)}
+                  className="px-2 py-0.5 text-sm border rounded hover:bg-gray-100 dark:hover:bg-gray-700 border-content/20 flex items-center gap-1">
+                  <span style={{background:'linear-gradient(135deg,#ef4444,#2563eb,#16a34a)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',fontWeight:700}}>A</span>
+                  <span className="text-[9px] opacity-60">▼</span>
+                </button>
+                {showColorPicker && (
+                  <div className="absolute top-full right-0 mt-1 z-50 bg-white dark:bg-gray-800 border border-content/20 rounded-lg shadow-lg p-2 flex flex-wrap gap-1.5" style={{width:160}}>
+                    {Object.entries(MD_COLORS).map(([key, hex]) => (
+                      <button key={key} type="button" title={key}
+                        onMouseDown={(e) => { e.preventDefault(); insertColor(key); }}
+                        style={{background: hex, width:24, height:24, borderRadius:4, border:'2px solid transparent'}}
+                        className="hover:scale-110 transition-transform hover:border-white"
+                      />
+                    ))}
+                    <div className="w-full text-[10px] text-center text-content/50 mt-0.5">اختر لون النص</div>
+                  </div>
+                )}
+              </div>
+              <button type="button" title="قائمة نقطية" onClick={() => insertMarkdownSyntax('\n- ','','عنصر')}
+                className="px-2 py-0.5 text-sm border rounded hover:bg-gray-100 dark:hover:bg-gray-700 border-content/20">• قائمة</button>
+              <button type="button" title="إدراج جدول" onClick={insertTableTemplate}
+                className="px-2 py-0.5 text-sm border rounded hover:bg-gray-100 dark:hover:bg-gray-700 border-content/20">⊞ جدول</button>
+              <div className="flex-1" />
+              <button type="button" onClick={() => setShowCommentPreview(v => !v)}
+                className={`px-2 py-0.5 text-xs border rounded border-content/20 ${showCommentPreview ? 'bg-primary text-white' : 'hover:bg-gray-100 dark:hover:bg-gray-700'}`}>
+                {showCommentPreview ? 'تعديل' : 'معاينة'}
+              </button>
+            </div>
+            {showCommentPreview ? (
+              <div
+                className="w-full min-h-[80px] p-2 border rounded-md bg-white dark:bg-gray-900 border-content/20 text-content text-sm"
+                dir="auto"
+                dangerouslySetInnerHTML={{ __html: newComment.trim() ? renderMarkdown(newComment) : '<span style="opacity:0.4">لا يوجد محتوى للمعاينة</span>' }}
+              />
+            ) : (
+              <textarea
+                ref={newCommentRef}
+                value={newComment}
+                onChange={(e) => { setNewComment(e.target.value); autoResize(e.target); }}
+                onPaste={handleCommentPaste}
+                onFocus={() => setShowColorPicker(false)}
+                placeholder="أضف تعليقاً... (يدعم **عريض** *مائل* - قائمة | جدول | — الصق جدول Excel مباشرة)"
+                rows={3}
+                required
+                className="w-full p-2 border rounded-md bg-bkg border-content/20 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 resize-none overflow-hidden font-mono text-sm"
+              />
+            )}
           </div>
           
           {/* خيار تحديد التاريخ والوقت المخصص مع زر الإرسال */}

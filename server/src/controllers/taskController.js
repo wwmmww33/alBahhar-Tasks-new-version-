@@ -1551,12 +1551,18 @@ exports.deleteTask = async (req, res) => {
     await new sql.Request(transaction)
       .input('TaskID', sql.Int, taskIdInt)
       .query('DELETE FROM Comments WHERE TaskID = @TaskID');
-    
+
     // حذف المهام الفرعية
     await new sql.Request(transaction)
       .input('TaskID', sql.Int, taskIdInt)
       .query('DELETE FROM Subtasks WHERE TaskID = @TaskID');
-    
+
+    // حذف ارتباطات المهمة مع مهام أخرى
+    await new sql.Request(transaction)
+      .input('TaskID', sql.Int, taskIdInt)
+      .query(`IF OBJECT_ID('dbo.TaskRelations','U') IS NOT NULL
+                DELETE FROM dbo.TaskRelations WHERE TaskID1 = @TaskID OR TaskID2 = @TaskID`);
+
     // حذف المهمة الرئيسية
     await new sql.Request(transaction)
       .input('TaskID', sql.Int, taskIdInt)
@@ -2722,6 +2728,43 @@ exports.mergeTasks = async (req, res) => {
                 .input('Note', sql.NVarChar(sql.MAX), appendNote(c.Notes || '', mergeNote))
                 .query(`UPDATE dbo.Comments SET TaskID = @TgtID, Notes = @Note WHERE CommentID = @CmtID`);
         }
+
+        // --- 4.5 نقل ارتباطات المصدر إلى الهدف ---
+        await pool.request()
+            .input('SrcID', sql.Int, srcId)
+            .input('TgtID', sql.Int, targetTaskId)
+            .query(`
+                IF OBJECT_ID('dbo.TaskRelations','U') IS NOT NULL BEGIN
+                    -- ارتباطات يكون SrcID فيها هو TaskID1 (SrcID < الطرف الآخر)
+                    INSERT INTO dbo.TaskRelations (TaskID1, TaskID2, CreatedBy)
+                    SELECT
+                        IIF(r.TaskID2 < @TgtID, r.TaskID2, @TgtID),
+                        IIF(r.TaskID2 < @TgtID, @TgtID, r.TaskID2),
+                        r.CreatedBy
+                    FROM dbo.TaskRelations r
+                    WHERE r.TaskID1 = @SrcID AND r.TaskID2 <> @TgtID
+                      AND NOT EXISTS (
+                        SELECT 1 FROM dbo.TaskRelations x
+                        WHERE x.TaskID1 = IIF(r.TaskID2 < @TgtID, r.TaskID2, @TgtID)
+                          AND x.TaskID2 = IIF(r.TaskID2 < @TgtID, @TgtID, r.TaskID2)
+                      );
+                    -- ارتباطات يكون SrcID فيها هو TaskID2 (الطرف الآخر < SrcID)
+                    INSERT INTO dbo.TaskRelations (TaskID1, TaskID2, CreatedBy)
+                    SELECT
+                        IIF(r.TaskID1 < @TgtID, r.TaskID1, @TgtID),
+                        IIF(r.TaskID1 < @TgtID, @TgtID, r.TaskID1),
+                        r.CreatedBy
+                    FROM dbo.TaskRelations r
+                    WHERE r.TaskID2 = @SrcID AND r.TaskID1 <> @TgtID
+                      AND NOT EXISTS (
+                        SELECT 1 FROM dbo.TaskRelations x
+                        WHERE x.TaskID1 = IIF(r.TaskID1 < @TgtID, r.TaskID1, @TgtID)
+                          AND x.TaskID2 = IIF(r.TaskID1 < @TgtID, @TgtID, r.TaskID1)
+                      );
+                    -- حذف ارتباطات المصدر القديمة
+                    DELETE FROM dbo.TaskRelations WHERE TaskID1 = @SrcID OR TaskID2 = @SrcID;
+                END
+            `);
 
         // --- 5. إغلاق المهمة المصدر (ب) ---
         const srcNotesRes = await pool.request()

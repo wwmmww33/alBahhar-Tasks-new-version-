@@ -225,7 +225,7 @@ exports.createComment = async (req, res) => {
         const insertRequest = pool.request()
             .input('TaskID', sql.Int, TaskID)
             .input('ActorID', sql.NVarChar, actorIdForStorage)
-            .input('Content', sql.NVarChar, encryptionConfig.encrypt(Content))
+            .input('Content', sql.NVarChar(sql.MAX), encryptionConfig.encrypt(Content))
             .input('CreatedAt', sql.DateTime, commentCreatedAt);
 
         const insertColumns = ['TaskID', commentActorCol, 'Content', 'CreatedAt'];
@@ -406,7 +406,7 @@ exports.updateComment = async (req, res) => {
 
         if (typeof Content !== 'undefined') {
             const encryptedContent = encryptionConfig.encrypt(Content);
-            request.input('Content', sql.NVarChar, encryptedContent);
+            request.input('Content', sql.NVarChar(sql.MAX), encryptedContent);
             setClauses.push('Content = @Content');
         }
 

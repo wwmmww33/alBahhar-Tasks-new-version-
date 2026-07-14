@@ -1,5 +1,5 @@
 // src/components/SidebarCalendar.tsx
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Calendar as CalendarIcon } from 'lucide-react';
 import type { CurrentUser } from '../types';
@@ -176,43 +176,52 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     }
   };
 
+  // ref يضمن أن event handlers تستدعي دائماً أحدث نسخة من fetchCalendarRange
+  const fetchRef = useRef(fetchCalendarRange);
+  useEffect(() => { fetchRef.current = fetchCalendarRange; });
+
   useEffect(() => {
-    fetchCalendarRange();
+    fetchRef.current();
   }, [calendarUserId]);
 
-  // تحديث فوري عند إنشاء مهمة فرعية جديدة أو طلب تحديث يدوي
+  // تحديث فوري عند إنشاء/تحديث مهمة فرعية أو تعليق أو طلب تحديث يدوي
   useEffect(() => {
-    const handler = () => fetchCalendarRange();
-    const commentHandler = (event: Event) => {
+    // إنشاء جديد: نُحدِّث فقط إذا كان ShowInCalendar=true
+    const createdHandler = (event: Event) => {
+      const detail = (event as CustomEvent<{ ShowInCalendar?: boolean }>).detail;
+      if (detail?.ShowInCalendar === true) fetchRef.current();
+    };
+    // تبديل ShowInCalendar لمهمة فرعية: نُحدِّث دائماً (إظهار أو إخفاء)
+    const subtaskUpdatedHandler = () => fetchRef.current();
+    // تبديل ShowInCalendar لتعليق: نُحدِّث إذا أُضيف، أو نُزيل من الحالة إذا أُخفي
+    const commentToggleHandler = (event: Event) => {
       const detail = (event as CustomEvent<{ CommentID?: number | string; ShowInCalendar?: boolean }>).detail;
       const commentId = Number(detail?.CommentID);
-      const shouldShow = detail?.ShowInCalendar === true;
-
-      if (!Number.isFinite(commentId)) {
-        fetchCalendarRange();
-        return;
+      if (detail?.ShowInCalendar === true) {
+        fetchRef.current();
+      } else if (Number.isFinite(commentId)) {
+        setCommentEvents(prev => prev.filter(c => Number(c.CommentID) !== commentId));
+        setExtraCommentEvents(prev => prev.filter(c => Number(c.CommentID) !== commentId));
+      } else {
+        fetchRef.current();
       }
-
-      if (shouldShow) {
-        fetchCalendarRange();
-        return;
-      }
-
-      setCommentEvents((prev) => prev.filter((comment) => Number(comment.CommentID) !== commentId));
-      setExtraCommentEvents((prev) => prev.filter((comment) => Number(comment.CommentID) !== commentId));
     };
 
-    window.addEventListener('calendar:subtask:created', handler);
-    window.addEventListener('calendar:refresh', handler);
-    window.addEventListener('calendar:comment:updated', commentHandler as EventListener);
-    const hourlyTimer = setInterval(() => fetchCalendarRange(), 60 * 60 * 1000);
+    window.addEventListener('calendar:subtask:created', createdHandler as EventListener);
+    window.addEventListener('calendar:comment:created', createdHandler as EventListener);
+    window.addEventListener('calendar:subtask:updated', subtaskUpdatedHandler);
+    window.addEventListener('calendar:comment:updated', commentToggleHandler as EventListener);
+    window.addEventListener('calendar:refresh', subtaskUpdatedHandler);
+    const hourlyTimer = setInterval(() => fetchRef.current(), 60 * 60 * 1000);
     return () => {
-      window.removeEventListener('calendar:subtask:created', handler);
-      window.removeEventListener('calendar:refresh', handler);
-      window.removeEventListener('calendar:comment:updated', commentHandler as EventListener);
+      window.removeEventListener('calendar:subtask:created', createdHandler as EventListener);
+      window.removeEventListener('calendar:comment:created', createdHandler as EventListener);
+      window.removeEventListener('calendar:subtask:updated', subtaskUpdatedHandler);
+      window.removeEventListener('calendar:comment:updated', commentToggleHandler as EventListener);
+      window.removeEventListener('calendar:refresh', subtaskUpdatedHandler);
       clearInterval(hourlyTimer);
     };
-  }, [calendarUserId]);
+  }, []);
 
   const toLocalYMD = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
