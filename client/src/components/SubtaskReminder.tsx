@@ -105,6 +105,26 @@ const SubtaskReminder = ({ currentUser }: Props) => {
 
         if (newItems.length > 0 && !cancelled) {
           setQueue(prev => [...prev, ...newItems]);
+          // نغمة تنبيه: ثلاث نبضات تصاعدية بـ Web Audio API (بدون ملفات خارجية)
+          try {
+            const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+            const playNote = (freq: number, start: number, dur: number) => {
+              const osc = ctx.createOscillator();
+              const gain = ctx.createGain();
+              osc.type = 'sine';
+              osc.frequency.value = freq;
+              osc.connect(gain);
+              gain.connect(ctx.destination);
+              gain.gain.setValueAtTime(0.28, start);
+              gain.gain.exponentialRampToValueAtTime(0.001, start + dur);
+              osc.start(start);
+              osc.stop(start + dur);
+            };
+            const t = ctx.currentTime;
+            playNote(523, t,       0.22); // C5
+            playNote(659, t + 0.2, 0.22); // E5
+            playNote(784, t + 0.4, 0.45); // G5
+          } catch (_) {}
         }
       } catch {}
     };

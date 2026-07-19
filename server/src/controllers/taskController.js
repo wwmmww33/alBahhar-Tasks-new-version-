@@ -1,8 +1,26 @@
 // src/controllers/taskController.js
 const sql = require('mssql');
+const fs = require('fs');
+const path = require('path');
 const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission, hasActiveDelegation } = require('../utils/delegationUtils');
 const encryptionConfig = require('../config/encryption.config');
 const { detectSchema, resolveVacancyId, ensureVacancyId, resolveActorContext, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
+
+// مسار ملف debug مؤقت — يُحذف بعد تشخيص المشكلة
+const _ACTIVITY_DEBUG_LOG = (() => {
+    try {
+        const exe = process.execPath;
+        return path.join(path.dirname(exe), 'activity-debug.log');
+    } catch { return null; }
+})();
+function _activityLog(msg) {
+    try {
+        if (_ACTIVITY_DEBUG_LOG) {
+            fs.appendFileSync(_ACTIVITY_DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
+        }
+    } catch (_) {}
+    console.log('[ActivityDebug]', msg);
+}
 
 // ─── In-memory cache لتقليل استعلامات فحص المخطط المتكررة ──────────
 const SCHEMA_TTL = 5 * 60_000; // 5 دقائق — المخطط لا يتغير إلا عند migration
@@ -95,10 +113,20 @@ async function _resolveEffectiveActorIdCore(pool, loginId) {
     const usesVacancySchema = !!p.UsesVacancySchema;
     if (usesVacancySchema && p.HasJobVacancies && /^\d+$/.test(loginId)) {
         try {
-            const vacancyCheck = await pool.request()
-                .input('VacancyID', sql.Int, parseInt(loginId, 10))
-                .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
-            if (vacancyCheck.recordset.length > 0) return loginId;
+            // تحقق أولاً: هل هذا الرقم هو UserID في جدول Users؟
+            // إذا كان كذلك، لا نُرجعه مباشرةً كـ VacancyID — نسلك المسار الطبيعي (UserID → VacancyID).
+            // المشكلة: UserID='19' وVacancyID=19 قد يتصادمان إذا تحققنا من JobVacancies أولاً.
+            const userExistCheck = await pool.request()
+                .input('LoginIDStr', sql.NVarChar, loginId)
+                .query(`SELECT TOP 1 1 AS Found FROM dbo.Users WHERE LTRIM(RTRIM(UserID)) = @LoginIDStr`);
+            if (userExistCheck.recordset.length === 0) {
+                // ليس UserID → افحص إن كان VacancyID مباشراً
+                const vacancyCheck = await pool.request()
+                    .input('VacancyID', sql.Int, parseInt(loginId, 10))
+                    .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+                if (vacancyCheck.recordset.length > 0) return loginId;
+            }
+            // إذا كان UserID → اسقط للمسار الطبيعي أدناه
         } catch (_) {}
     }
     const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
@@ -418,6 +446,10 @@ exports.getTaskActivity = async (req, res) => {
     try {
         const effectiveActorId = await resolveEffectiveActorId(pool, userId);
 
+        if (isAdmin !== 'true') {
+            _activityLog(`getTaskActivity userId=${userId} effectiveActorId=${effectiveActorId} page=${pageIndex}`);
+        }
+
         let schemaProbeRow = _tcache.schema && (Date.now() - _tcache.schemaTs < SCHEMA_TTL) ? _tcache.schema : null;
         if (!schemaProbeRow) {
             const schemaProbe = await pool.request().query(`
@@ -430,7 +462,17 @@ exports.getTaskActivity = async (req, res) => {
                   CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
                   CASE WHEN COL_LENGTH('dbo.TaskDelegations', 'DelegatorVacancyID') IS NOT NULL
                          AND COL_LENGTH('dbo.TaskDelegations', 'DelegateVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDelegations,
-                  CASE WHEN COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'CreatedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskCreatedBy,
+                  CASE WHEN COL_LENGTH('dbo.Subtasks', 'AssignedTo') IS NOT NULL THEN 1 ELSE 0 END AS HasSubAssignedTo,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasActedBy,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Subtasks', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasSubActedBy,
+                  CASE WHEN COL_LENGTH('dbo.Subtasks', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasSubLastActedByVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Comments', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasCmtActedBy,
+                  CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCmtLastActedByVacancy,
+                  CASE WHEN COL_LENGTH('dbo.Tasks', 'UpdatedAt') IS NOT NULL THEN 1 ELSE 0 END AS HasTaskUpdatedAt,
+                  CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable
             `);
             schemaProbeRow = schemaProbe.recordset[0] || {};
             _tcache.schema = schemaProbeRow; _tcache.schemaTs = Date.now();
@@ -448,59 +490,100 @@ exports.getTaskActivity = async (req, res) => {
         const identityKey = s.HasTaskCreatedByVacancy ? 'VacancyID' : 'UserID';
         const identityName = s.HasTaskCreatedByVacancy ? 'Name' : 'FullName';
 
-        const accessClauses = [
-            `t.${taskCreatedCol} = @UserID`,
-            `EXISTS (
-                SELECT 1 FROM Subtasks s_access
-                WHERE s_access.TaskID = t.TaskID AND s_access.${subAssignedCol} = @UserID
-            )`,
-            `EXISTS (
-                SELECT 1 FROM TaskDelegations d
-                WHERE d.${delegatorCol} = t.${taskCreatedCol}
-                  AND d.${delegateCol} = @UserID
-                  AND d.IsActive = 1
-                  AND d.StartDate <= GETDATE()
-                  AND (d.EndDate IS NULL OR d.EndDate >= GETDATE())
-            )`
-        ];
-        if (taskAssignedCol) {
-            accessClauses.splice(1, 0, `t.${taskAssignedCol} = @UserID`);
-        }
+        // تعبيرات ActorID الآمنة من الناحية النوعية.
+        // COALESCE(NVARCHAR, INT, INT) يجبر SQL على تحويل NVARCHAR→INT → خطأ لقيم مثل 'd1-8013'.
+        // الحل: نستخدم COALESCE(INT, INT) أو COALESCE(NVARCHAR, NVARCHAR) دون خلط الأنواع.
+        const taskActorExpr = (s.HasLastActedByVacancy && s.HasTaskCreatedByVacancy)
+            ? `COALESCE(t.LastActedByVacancyID, t.${taskCreatedCol})`
+            : s.HasActedBy
+                ? `COALESCE(t.ActedBy, t.${taskCreatedCol})`
+                : `t.${taskCreatedCol}`;
+        const subActorExpr = (s.HasSubLastActedByVacancy && s.HasSubCreatedByVacancy)
+            ? `COALESCE(s.LastActedByVacancyID, s.${subCreatedCol})`
+            : s.HasSubActedBy
+                ? `COALESCE(s.ActedBy, s.${subCreatedCol})`
+                : `s.${subCreatedCol}`;
+        const cmtActorExpr = (s.HasCmtLastActedByVacancy && s.HasCommentedByVacancy)
+            ? `COALESCE(c.LastActedByVacancyID, c.${commentActorCol})`
+            : s.HasCmtActedBy
+                ? `COALESCE(c.ActedBy, c.${commentActorCol})`
+                : `c.${commentActorCol}`;
 
-        // فلتر القسم — يُطبَّق دائماً بما فيه حساب المدير العام
-        // (المدير العام يتبع قسماً محدداً فلا يجب أن يرى مهام المديريات الأخرى في تبويب التحديثات)
-        let scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, userId);
-        let fallbackDeptId = null;
-        if (scopeDepartmentIds.length === 0) {
-            try {
-                const actorCtx = await resolveActorContext(pool, userId);
-                if (actorCtx?.departmentId != null) {
-                    fallbackDeptId = actorCtx.departmentId;
-                }
-            } catch (_) {}
-        }
+        // تعبير التاريخ للمهام: UpdatedAt أولوية على CreatedAt لإظهار المهام المُعدَّلة مؤخراً
+        const taskDateExpr = s.HasTaskUpdatedAt
+            ? `COALESCE(t.UpdatedAt, t.CreatedAt)`
+            : `t.CreatedAt`;
 
-        const deptClauses = [];
-        if (scopeDepartmentIds.length > 0) {
-            const scopeParams = scopeDepartmentIds.map((_, i) => `@ActDeptID${i}`).join(', ');
-            deptClauses.push(`t.DepartmentID IN (${scopeParams})`);
-        } else if (fallbackDeptId != null) {
-            deptClauses.push(`t.DepartmentID = @ActFallbackDeptID`);
-        }
-
-        // المدير بلا قسم: لا يرى أي مهام (دوره إداري بحت لا تشغيلي)
-        if (deptClauses.length === 0 && isAdmin === 'true') {
-            return res.json([]);
-        }
-
-        // المدير: يرى مهام قسمه فقط. المستخدم العادي: مهام قسمه + مهامه الشخصية.
+        // المدير: يرى مهام قسمه كاملاً.
+        // الموظف: يرى فقط المهام التي أنشأها أو تحتوي على مهمة فرعية مسنَدة له.
         let accessCondition;
-        if (deptClauses.length === 0) {
-            accessCondition = `(${accessClauses.join(' OR ')})`;
-        } else if (isAdmin === 'true') {
-            accessCondition = `(${deptClauses.join(' OR ')})`;
+        let adminDeptParams = {}; // {paramName: intValue} — تُضاف للـ request بعد إنشائه
+
+        if (isAdmin === 'true') {
+            let scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, userId);
+            let fallbackDeptId = null;
+            if (scopeDepartmentIds.length === 0) {
+                try {
+                    const actorCtx = await resolveActorContext(pool, userId);
+                    if (actorCtx?.departmentId != null) fallbackDeptId = actorCtx.departmentId;
+                } catch (_) {}
+            }
+            if (scopeDepartmentIds.length === 0 && fallbackDeptId == null) {
+                return res.json([]);
+            }
+            scopeDepartmentIds.forEach((dId, i) => {
+                adminDeptParams[`ActDeptID${i}`] = parseInt(dId, 10);
+            });
+            if (fallbackDeptId != null) {
+                adminDeptParams['ActFallbackDeptID'] = fallbackDeptId;
+            }
+            const deptExpr = scopeDepartmentIds.length > 0
+                ? `t.DepartmentID IN (${scopeDepartmentIds.map((_, i) => `@ActDeptID${i}`).join(', ')})`
+                : `t.DepartmentID = @ActFallbackDeptID`;
+            accessCondition = `(${deptExpr})`;
         } else {
-            accessCondition = `(${[...accessClauses, ...deptClauses].join(' OR ')})`;
+            // المنطق: المهام التي أنشأها صاحب المنصب أو أُسنِدت له فيها مهمة فرعية.
+            // effectiveActorId = '91' (VacancyID رقمي) → نمرره كـ INT مباشرةً لضمان استخدام الـ index
+            // بدلاً من CAST(col AS NVARCHAR) الذي يمنع الـ index seek ويضطر DB لفحص كل الصفوف.
+
+            const actorVacancyId = s.HasTaskCreatedByVacancy && /^\d+$/.test(effectiveActorId)
+                ? parseInt(effectiveActorId, 10)
+                : null;
+
+            if (actorVacancyId !== null) {
+                // مقارنة INT = INT — سريعة وتستخدم الـ index
+                adminDeptParams['ActorVacancyID'] = actorVacancyId;
+                const creatorCheck = `t.CreatedByVacancyID = @ActorVacancyID${s.HasTaskCreatedBy ? ' OR t.CreatedBy = @RawUserID' : ''}`;
+                const subCheck = s.HasSubAssignedToVacancy
+                    ? `s_access.AssignedToVacancyID = @ActorVacancyID${s.HasSubAssignedTo ? ' OR s_access.AssignedTo = @RawUserID' : ''}`
+                    : `s_access.AssignedTo = @RawUserID`;
+                accessCondition = `(
+                    (${creatorCheck})
+                    OR EXISTS (
+                        SELECT 1 FROM Subtasks s_access
+                        WHERE s_access.TaskID = t.TaskID AND (${subCheck})
+                    )
+                )`;
+            } else {
+                // fallback: effectiveActorId نصي (نظام قديم بدون VacancyID)
+                const creatorCheck = s.HasTaskCreatedByVacancy
+                    ? `(CAST(t.CreatedByVacancyID AS NVARCHAR(50)) = @UserID${s.HasTaskCreatedBy ? ' OR t.CreatedBy = @RawUserID' : ''})`
+                    : `(t.CreatedBy = @RawUserID)`;
+                const subCheck = s.HasSubAssignedToVacancy
+                    ? `(CAST(s_access.AssignedToVacancyID AS NVARCHAR(50)) = @UserID${s.HasSubAssignedTo ? ' OR s_access.AssignedTo = @RawUserID' : ''})`
+                    : `(s_access.AssignedTo = @RawUserID)`;
+                accessCondition = `(
+                    ${creatorCheck}
+                    OR EXISTS (
+                        SELECT 1 FROM Subtasks s_access
+                        WHERE s_access.TaskID = t.TaskID AND ${subCheck}
+                    )
+                )`;
+            }
+        }
+
+        if (isAdmin !== 'true') {
+            _activityLog(`accessCondition=${accessCondition.replace(/\s+/g,' ')} hasAssignments=${s.HasAssignmentsTable} hasTaskCreatedByVacancy=${s.HasTaskCreatedByVacancy} hasSubAssignedToVacancy=${s.HasSubAssignedToVacancy}`);
         }
 
         // المهام الخاصة لا تظهر أبداً في آخر التحديثات — خاصة بصاحبها فقط
@@ -514,15 +597,14 @@ exports.getTaskActivity = async (req, res) => {
 
         const request = pool.request()
             .input('UserID', sql.NVarChar, effectiveActorId)
+            .input('RawUserID', sql.NVarChar, String(userId || '').trim())
             .input('PageIndex', sql.Int, pageIndex)
             .input('DaysCount', sql.Int, daysCount);
 
-        scopeDepartmentIds.forEach((dId, i) => {
-            request.input(`ActDeptID${i}`, sql.Int, parseInt(dId, 10));
+        // إضافة معاملات القسم للمدير (إن وجدت)
+        Object.entries(adminDeptParams).forEach(([name, val]) => {
+            request.input(name, sql.Int, val);
         });
-        if (fallbackDeptId != null) {
-            request.input('ActFallbackDeptID', sql.Int, fallbackDeptId);
-        }
 
         const query = `
             DECLARE @EndDate DateTime = DATEADD(day, -(@PageIndex * @DaysCount), GETDATE());
@@ -535,7 +617,7 @@ exports.getTaskActivity = async (req, res) => {
                     t.Title as TaskTitle,
                     t.Status as TaskStatus,
                     t.CreatedAt as CreatedAt,
-                    COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${taskCreatedCol}) as ActorID,
+                    ${taskActorExpr} as ActorID,
                     creator.${identityName} as ActorName,
                     ${taskAssignedIdExpr} as AssignedToID,
                     ${taskAssignedNameExpr} as AssignedToName,
@@ -544,11 +626,11 @@ exports.getTaskActivity = async (req, res) => {
                     CAST(NULL as int) as CommentID,
                     CAST(NULL as nvarchar(max)) as CommentContent
                 FROM Tasks t
-                LEFT JOIN ${identityTable} creator ON COALESCE(t.ActedBy, t.LastActedByVacancyID, t.${taskCreatedCol}) = creator.${identityKey}
+                LEFT JOIN ${identityTable} creator ON ${taskActorExpr} = creator.${identityKey}
                 ${taskAssigneeJoin}
                 WHERE ${accessCondition}
                 ${personalFilterClause}
-                AND t.CreatedAt >= @StartDate AND t.CreatedAt <= @EndDate
+                AND ${taskDateExpr} >= @StartDate AND ${taskDateExpr} <= @EndDate
 
                 UNION ALL
 
@@ -558,7 +640,7 @@ exports.getTaskActivity = async (req, res) => {
                     t.Title as TaskTitle,
                     t.Status as TaskStatus,
                     s.CreatedAt as CreatedAt,
-                    COALESCE(s.ActedBy, s.LastActedByVacancyID, s.${subCreatedCol}) as ActorID,
+                    ${subActorExpr} as ActorID,
                     subCreator.${identityName} as ActorName,
                     s.${subAssignedCol} as AssignedToID,
                     subAssignee.${identityName} as AssignedToName,
@@ -568,7 +650,7 @@ exports.getTaskActivity = async (req, res) => {
                     CAST(NULL as nvarchar(max)) as CommentContent
                 FROM Subtasks s
                 INNER JOIN Tasks t ON s.TaskID = t.TaskID
-                LEFT JOIN ${identityTable} subCreator ON COALESCE(s.ActedBy, s.LastActedByVacancyID, s.${subCreatedCol}) = subCreator.${identityKey}
+                LEFT JOIN ${identityTable} subCreator ON ${subActorExpr} = subCreator.${identityKey}
                 LEFT JOIN ${identityTable} subAssignee ON s.${subAssignedCol} = subAssignee.${identityKey}
                 WHERE ${accessCondition}
                 ${personalFilterClause}
@@ -582,7 +664,7 @@ exports.getTaskActivity = async (req, res) => {
                     t.Title as TaskTitle,
                     t.Status as TaskStatus,
                     c.CreatedAt as CreatedAt,
-                    COALESCE(c.ActedBy, c.LastActedByVacancyID, c.${commentActorCol}) as ActorID,
+                    ${cmtActorExpr} as ActorID,
                     commenter.${identityName} as ActorName,
                     CAST(NULL as nvarchar(50)) as AssignedToID,
                     CAST(NULL as nvarchar(100)) as AssignedToName,
@@ -592,7 +674,7 @@ exports.getTaskActivity = async (req, res) => {
                     c.Content as CommentContent
                 FROM Comments c
                 INNER JOIN Tasks t ON c.TaskID = t.TaskID
-                LEFT JOIN ${identityTable} commenter ON COALESCE(c.ActedBy, c.LastActedByVacancyID, c.${commentActorCol}) = commenter.${identityKey}
+                LEFT JOIN ${identityTable} commenter ON ${cmtActorExpr} = commenter.${identityKey}
                 WHERE ${accessCondition}
                 ${personalFilterClause}
                 AND c.CreatedAt >= @StartDate AND c.CreatedAt <= @EndDate
@@ -610,6 +692,9 @@ exports.getTaskActivity = async (req, res) => {
             return r;
         });
 
+        if (isAdmin !== 'true') {
+            _activityLog(`result=${items.length} rows for userId=${userId}`);
+        }
         return res.status(200).json(items);
     } catch (error) {
         console.error('DATABASE GET TASK ACTIVITY ERROR:', error);
