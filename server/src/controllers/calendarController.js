@@ -933,6 +933,110 @@ exports.getCalendarComments = async (req, res) => {
   }
 };
 
+// GET /api/calendar/assigned?userId=...
+// يُرجع المهام الفرعية المسندة للمستخدم (غير منجزة) للإضافة
+exports.getAssignedSubtasks = async (req, res) => {
+  const pool = req.app.locals.db;
+  const { userId } = req.query;
+  if (!userId) return res.status(400).json({ message: 'userId is required' });
+
+  try {
+    const probe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks','AssignedTo')          IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyAssigned,
+        CASE WHEN COL_LENGTH('dbo.Subtasks','IsCompleted')         IS NOT NULL THEN 1 ELSE 0 END AS HasIsCompleted,
+        CASE WHEN COL_LENGTH('dbo.Subtasks','CreatedAt')           IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedAt,
+        CASE WHEN COL_LENGTH('dbo.Tasks','PersonalOwnerUserID')    IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalCol,
+        CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile','V')       IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
+        CASE WHEN OBJECT_ID('dbo.Assignments','U')                 IS NOT NULL THEN 1 ELSE 0 END AS HasAssignments,
+        CASE WHEN COL_LENGTH('dbo.Users','LegacyUserID')           IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+        CASE WHEN COL_LENGTH('dbo.Users','ServiceID')              IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
+    `);
+    const p = probe.recordset[0] || {};
+    const usesVacancy = !!p.HasVacancy;
+    const assignedCol = usesVacancy ? 'AssignedToVacancyID' : 'AssignedTo';
+
+    const loginId = String(userId).trim();
+    let actorId = loginId;
+    let legacyUserId = loginId;
+
+    if (p.HasProfileView) {
+      const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+      if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+      if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+      const profileRes = await pool.request()
+        .input('LoginID', sql.NVarChar, loginId)
+        .query(`
+          SELECT TOP 1 p.VacancyID, u.UserID
+          FROM dbo.Users u
+          LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
+          WHERE (${whereParts.join(' OR ')})
+             OR (TRY_CAST(@LoginID AS INT) IS NOT NULL AND p.VacancyID = TRY_CAST(@LoginID AS INT))
+          ORDER BY
+            CASE WHEN LTRIM(RTRIM(u.UserID)) = @LoginID THEN 0 ELSE 1 END ASC,
+            CASE WHEN p.VacancyID IS NOT NULL THEN 0 ELSE 1 END ASC
+        `);
+      const row = profileRes.recordset[0];
+      if (row) {
+        if (row.UserID) legacyUserId = String(row.UserID).trim();
+        actorId = usesVacancy
+          ? (row.VacancyID != null ? String(row.VacancyID) : (row.UserID ? String(row.UserID) : loginId))
+          : (row.UserID ? String(row.UserID) : loginId);
+      }
+    } else if (usesVacancy && p.HasAssignments) {
+      const assignRes = await pool.request()
+        .input('UserID', sql.NVarChar, loginId)
+        .query(`
+          SELECT TOP 1 VacancyID FROM dbo.Assignments
+          WHERE UserID = @UserID AND VacancyID IS NOT NULL
+          ORDER BY CASE WHEN IsCurrent=1 THEN 0 ELSE 1 END,
+                   ISNULL(StartDate,'1900-01-01') DESC, AssignmentID DESC
+        `);
+      if (assignRes.recordset[0]?.VacancyID != null) {
+        actorId = String(assignRes.recordset[0].VacancyID);
+      }
+    }
+
+    const completedFilter = p.HasIsCompleted ? `AND (s.IsCompleted = 0 OR s.IsCompleted IS NULL)` : '';
+    const personalFilter  = p.HasPersonalCol  ? `AND t.PersonalOwnerUserID IS NULL` : '';
+    const assignMatch = (usesVacancy && p.HasLegacyAssigned)
+      ? `(s.${assignedCol} = @ActorID OR (s.${assignedCol} IS NULL AND LTRIM(RTRIM(CAST(s.AssignedTo AS NVARCHAR(255)))) = @LegacyUserID))`
+      : `s.${assignedCol} = @ActorID`;
+    const createdAtCol = p.HasCreatedAt ? `s.CreatedAt,` : `NULL AS CreatedAt,`;
+
+    const result = await pool.request()
+      .input('ActorID', sql.NVarChar, actorId)
+      .input('LegacyUserID', sql.NVarChar, legacyUserId)
+      .query(`
+        SELECT TOP 50
+          s.SubtaskID,
+          s.TaskID,
+          s.Title   AS SubtaskTitle,
+          s.DueDate,
+          ${createdAtCol}
+          t.Title   AS TaskTitle
+        FROM dbo.Subtasks s
+        INNER JOIN dbo.Tasks t ON s.TaskID = t.TaskID
+        WHERE ${assignMatch}
+          ${completedFilter}
+          ${personalFilter}
+        ORDER BY s.SubtaskID DESC
+      `);
+
+    const decrypted = result.recordset.map(r => {
+      try { if (r.SubtaskTitle) r.SubtaskTitle = encryptionConfig.decrypt(r.SubtaskTitle); } catch (_) {}
+      try { if (r.TaskTitle)    r.TaskTitle    = encryptionConfig.decrypt(r.TaskTitle);    } catch (_) {}
+      return r;
+    });
+
+    return res.status(200).json(decrypted);
+  } catch (err) {
+    console.error('Error fetching assigned subtasks:', err);
+    return res.status(500).json({ message: 'Error fetching assigned subtasks', detail: err.message });
+  }
+};
+
 // GET /api/calendar/reminders?userId=...
 // يُرجع المهام الفرعية غير المنجزة الخاصة بالمنصب والمستحقة اليوم (للتذكيرات)
 exports.getSubtaskReminders = async (req, res) => {
