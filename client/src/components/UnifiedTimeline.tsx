@@ -762,7 +762,7 @@ const UnifiedTimeline = ({
 
   const renderSubtaskItem = (subtask: Subtask) => {
     const canDelete = isSubtaskCreatorActor(subtask);
-    const canEditTitle = true;
+    const canEditTitle = isSubtaskCreatorActor(subtask) || !!currentUser.IsAdmin;
     const canEditDue = true;
     // في المهام الشخصية: صاحب المهمة يستطيع إكمال مهامه الفرعية حتى لو غيّر منصبه
     const isPersonalOwner = !!(task?.PersonalOwnerUserID) &&

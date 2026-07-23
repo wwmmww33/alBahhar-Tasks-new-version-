@@ -867,7 +867,8 @@ exports.updateSubtaskDetails = async (req, res) => {
 
     const actingUserId = resolveActingUserId(req);
     const existing = subtaskResult.recordset[0];
-    const accessCheck = await checkTaskAccess(pool, existing.TaskID, actingUserId, resolveIsAdmin(req), 'edit');
+    const isAdmin = resolveIsAdmin(req);
+    const accessCheck = await checkTaskAccess(pool, existing.TaskID, actingUserId, isAdmin, 'edit');
     if (!accessCheck.hasAccess) {
       const actorCandidates = await resolveActorCandidates(pool, actingUserId);
       if (!hasSubtaskOwnership(existing, actorCandidates)) {
@@ -877,6 +878,14 @@ exports.updateSubtaskDetails = async (req, res) => {
 
     // تجهيز القيم
     const hasTitle = typeof Title !== 'undefined';
+
+    // نص المهمة: فقط منشئها يملك صلاحية التعديل
+    if (hasTitle && !isAdmin) {
+      const isCreator = await isActorSubtaskCreator(pool, existing, actingUserId);
+      if (!isCreator) {
+        return res.status(403).json({ message: 'فقط منشئ المهمة الفرعية يمكنه تعديل نص المهمة.' });
+      }
+    }
     const hasDue = typeof DueDate !== 'undefined';
     const hasEnd = typeof EndDate !== 'undefined';
     const encryptedTitle = hasTitle ? encryptionConfig.encrypt(Title) : null;
