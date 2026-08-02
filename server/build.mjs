@@ -103,7 +103,10 @@ execSync('node --experimental-sea-config sea-config.json', { cwd: __dirname, std
 console.log('✅ SEA blob generated');
 
 // Copy node.exe then inject blob using postject CLI
-copyFileSync(process.execPath, exePath);
+// When SKIP_NODE_COPY=1, the caller already placed a fresh node.exe at exePath
+if (process.env.SKIP_NODE_COPY !== '1') {
+  copyFileSync(process.execPath, exePath);
+}
 const postjectBin = join(__dirname, 'node_modules', '.bin', 'postject.cmd');
 execSync(
   `"${postjectBin}" "${exePath}" NODE_SEA_BLOB "${seaBlobPath}" --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`,

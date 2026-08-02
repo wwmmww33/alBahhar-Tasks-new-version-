@@ -589,7 +589,8 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                               style={{ color: '#7c3aed' }}
                               className="hover:underline text-right w-full block break-words"
                               title={`${cm.Content} — ضمن: ${cm.TaskTitle}`}>
-                              {formatEventTime(cm.CreatedAt)}{cm.CommentID}💬 {cm.Content}
+                              {formatEventTime(cm.CreatedAt)}💬 {cm.Content}
+                              <span className="opacity-60 text-[9px] block">ضمن مهمة: {cm.TaskTitle}</span>
                             </button>
                           ))}
                         </div>
@@ -1041,7 +1042,8 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                           <button key={cm.CommentID} type="button" onClick={() => openTaskInNewTab(cm.TaskID)}
                             className="text-xs font-semibold hover:underline text-right w-full break-words"
                             style={{ color: '#7c3aed' }}>
-                            {formatEventTime(cm.CreatedAt)}{cm.CommentID}💬 {cm.Content}
+                            {formatEventTime(cm.CreatedAt)}💬 {cm.Content}
+                            <span className="opacity-60 text-[9px] block font-normal">ضمن مهمة: {cm.TaskTitle}</span>
                           </button>
                         ))}
                       </div>
