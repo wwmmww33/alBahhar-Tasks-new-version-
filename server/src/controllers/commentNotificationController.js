@@ -73,7 +73,8 @@ const getCommentNotifications = async (req, res) => {
         const schema = await pool.request().query(`
             SELECT
               CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy,
-              CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy
+              CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner
         `);
         const s = schema.recordset[0] || {};
         const notifyCol = s.HasNotifyVacancy ? 'NotifyVacancyID' : 'NotifyUserID';
@@ -106,15 +107,20 @@ const getCommentNotifications = async (req, res) => {
             LEFT JOIN ${identityTable} u ON cn.${commentedByCol} = u.${identityKey}
             WHERE cn.${notifyCol} = @userId
         `;
-        
+
+        const personalUID = String(req.user?.userId || '').trim();
+        if (s.HasPersonalOwner && personalUID) {
+            query += ` AND (t.PersonalOwnerUserID IS NULL OR t.PersonalOwnerUserID = @PersonalUID)`;
+        }
         if (unreadOnly === 'true') {
             query += ' AND cn.IsRead = 0';
         }
-        
+
         query += ' ORDER BY cn.CreatedAt DESC';
-        
+
         const request = pool.request();
         request.input('userId', sql.NVarChar, actorId);
+        if (s.HasPersonalOwner && personalUID) request.input('PersonalUID', sql.NVarChar, personalUID);
         
         const result = await request.query(query);
         const notifications = result.recordset.map(n => {

@@ -13,9 +13,7 @@ async function resolveUserIDFromActor(pool, rawActorId) {
         IF OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL
           SELECT TOP 1 LTRIM(RTRIM(UserID)) AS UserID
           FROM dbo.Assignments
-          WHERE VacancyID = @VacancyID
-          ORDER BY CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
-                   ISNULL(StartDate, '1900-01-01') DESC;
+          WHERE VacancyID = @VacancyID AND IsCurrent = 1;
       `);
     const uid = res.recordset[0]?.UserID;
     if (uid) return String(uid).trim();
@@ -300,6 +298,10 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
     const personalOrClause = hasPersonalCol
       ? `OR (t.PersonalOwnerUserID IS NOT NULL AND t.PersonalOwnerUserID = @PersonalUserID)`
       : '';
+    // يمنع مهام الآخرين الشخصية من الظهور لمستخدم آخر حتى لو كانا في نفس القسم
+    const personalScopeFilter = hasPersonalCol
+      ? `AND (t.PersonalOwnerUserID IS NULL OR t.PersonalOwnerUserID = @PersonalUserID)`
+      : '';
 
     // شرط النطاق: يشمل الأحداث الممتدة التي تتداخل مع الفترة المرئية
     const dateRangeWhere = hasEndDate
@@ -349,6 +351,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             AND s.DueDate IS NOT NULL
             AND ${dateRangeWhere}
             AND (${departmentScopeCondition} ${personalOrClause})
+            ${personalScopeFilter}
           ORDER BY s.DueDate ASC
         `;
       } else {
@@ -373,6 +376,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             AND s.DueDate IS NOT NULL
             AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
             AND (${departmentScopeCondition} ${personalOrClause})
+            ${personalScopeFilter}
           ORDER BY s.DueDate ASC
         `;
       }
@@ -419,6 +423,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             AND s.DueDate IS NOT NULL
             AND ${dateRangeWhere}
             AND (${actorMatchCondition} ${personalOrClause})
+            ${personalScopeFilter}
           ORDER BY s.DueDate ASC
         ` : `
           SELECT TOP(@Limit)
@@ -441,6 +446,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
             AND s.DueDate IS NOT NULL
             AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
             AND (${actorMatchCondition} ${personalOrClause})
+            ${personalScopeFilter}
           ORDER BY s.DueDate ASC
         `;
         const fbResult = await fallbackReq.query(fallbackQuery);
@@ -484,6 +490,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           AND s.DueDate IS NOT NULL
           AND ${dateRangeWhere}
           AND (${actorMatchCondition} ${personalOrClause})
+          ${personalScopeFilter}
         ORDER BY s.DueDate ASC
       ` : `
         SELECT TOP(@Limit)
@@ -505,6 +512,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           AND s.DueDate IS NOT NULL
           AND CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)
           AND (${actorMatchCondition} ${personalOrClause})
+          ${personalScopeFilter}
         ORDER BY s.DueDate ASC
       `;
       const result = await request.query(query);
@@ -839,6 +847,9 @@ exports.getCalendarComments = async (req, res) => {
     const commentPersonalOrClause = hasPersonalColCmt
       ? `OR (t.PersonalOwnerUserID IS NOT NULL AND t.PersonalOwnerUserID = @PersonalUserID)`
       : '';
+    const commentPersonalScopeFilter = hasPersonalColCmt
+      ? `AND (t.PersonalOwnerUserID IS NULL OR t.PersonalOwnerUserID = @PersonalUserID)`
+      : '';
 
     let items = [];
 
@@ -878,6 +889,7 @@ exports.getCalendarComments = async (req, res) => {
         WHERE (@IncludeAllComments = 1 OR c.ShowInCalendar = 1)
           ${dateFilter}
           AND (${departmentScopeCondition} ${commentPersonalOrClause})
+          ${commentPersonalScopeFilter}
         ORDER BY c.CreatedAt ASC, c.CommentID ASC
       `);
       items = result.recordset;
@@ -914,6 +926,7 @@ exports.getCalendarComments = async (req, res) => {
         INNER JOIN Tasks t ON c.TaskID = t.TaskID
         WHERE (@IncludeAllComments = 1 OR c.ShowInCalendar = 1)
           AND (${actorClause} ${commentPersonalOrClause})
+          ${commentPersonalScopeFilter}
           ${dateFilter}
         ORDER BY c.CreatedAt ASC, c.CommentID ASC
       `);

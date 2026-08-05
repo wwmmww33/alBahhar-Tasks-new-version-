@@ -89,9 +89,7 @@ async function resolveUserIDFromActor(pool, rawActorId) {
                 IF OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL
                     SELECT TOP 1 LTRIM(RTRIM(UserID)) AS UserID
                     FROM dbo.Assignments
-                    WHERE VacancyID = @VacancyID
-                    ORDER BY CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END,
-                             ISNULL(StartDate, '1900-01-01') DESC;
+                    WHERE VacancyID = @VacancyID AND IsCurrent = 1;
             `);
         const uid = res.recordset[0]?.UserID;
         if (uid) return String(uid).trim();
@@ -113,20 +111,15 @@ async function _resolveEffectiveActorIdCore(pool, loginId) {
     const usesVacancySchema = !!p.UsesVacancySchema;
     if (usesVacancySchema && p.HasJobVacancies && /^\d+$/.test(loginId)) {
         try {
-            // تحقق أولاً: هل هذا الرقم هو UserID في جدول Users؟
-            // إذا كان كذلك، لا نُرجعه مباشرةً كـ VacancyID — نسلك المسار الطبيعي (UserID → VacancyID).
-            // المشكلة: UserID='19' وVacancyID=19 قد يتصادمان إذا تحققنا من JobVacancies أولاً.
-            const userExistCheck = await pool.request()
-                .input('LoginIDStr', sql.NVarChar, loginId)
-                .query(`SELECT TOP 1 1 AS Found FROM dbo.Users WHERE LTRIM(RTRIM(UserID)) = @LoginIDStr`);
-            if (userExistCheck.recordset.length === 0) {
-                // ليس UserID → افحص إن كان VacancyID مباشراً
-                const vacancyCheck = await pool.request()
-                    .input('VacancyID', sql.Int, parseInt(loginId, 10))
-                    .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
-                if (vacancyCheck.recordset.length > 0) return loginId;
-            }
-            // إذا كان UserID → اسقط للمسار الطبيعي أدناه
+            // في المخطط الجديد (vacancy) نتحقق من JobVacancies أولاً:
+            // المعرفات الرقمية التي يرسلها الكلاينت هي دائماً VacancyID وليست UserID.
+            // التحقق من Users أولاً كان يسبب تصادماً عندما يوجد مستخدم UserID='N'
+            // ويوجد أيضاً VacancyID=N — فكان يُعيد VacancyID الخاطئ للمستخدم N.
+            const vacancyCheck = await pool.request()
+                .input('VacancyID', sql.Int, parseInt(loginId, 10))
+                .query(`SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+            if (vacancyCheck.recordset.length > 0) return loginId; // VacancyID صحيح → أعده مباشرةً
+            // ليس VacancyID موجوداً → قد يكون UserID رقمي → استمر للمسار الطبيعي
         } catch (_) {}
     }
     const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
@@ -195,6 +188,24 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
     if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
 
     let baseDepartmentId = null;
+
+    // في المخطط الجديد، المدخل الرقمي هو VacancyID — نجلب قسم المنصب مباشرةً دون المرور بـ Users
+    if (/^\d+$/.test(loginId) && p.HasVacancyDepartmentID) {
+        try {
+            const vCheck = await pool.request()
+                .input('VacancyID', sql.Int, parseInt(loginId, 10))
+                .query(`SELECT TOP 1 DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+            if (vCheck.recordset[0]?.DepartmentID != null) {
+                baseDepartmentId = vCheck.recordset[0].DepartmentID;
+            }
+        } catch (_) {}
+    }
+
+    // إذا وجدنا المنصب مباشرةً، لا حاجة للبحث في Users
+    if (baseDepartmentId != null) {
+        // القفز مباشرةً لتوسيع النطاق على مستوى المديرية
+    } else {
+
     const userIdentity = await pool.request()
         .input('LoginID', sql.NVarChar, loginId)
         .query(`
@@ -215,7 +226,7 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
             baseDepartmentId = identityRow.ProfileDepartmentID;
         }
 
-        // الأولوية 2: Assignments مع IsCurrent=1 — أوثق مصدر للمنصب الحالي بعد التنقل
+        // الأولوية 2: Assignments مع IsCurrent=1 فقط — نتجنب المنصب القديم بعد تغيير الوظيفة
         if (baseDepartmentId == null && p.HasAssignmentsTable && p.HasVacancyDepartmentID) {
             const assignmentDept = await pool.request()
                 .input('UserID', sql.NVarChar, String(identityRow.UserID || loginId).trim())
@@ -225,10 +236,7 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
                     INNER JOIN dbo.JobVacancies jv ON jv.VacancyID = a.VacancyID
                     WHERE a.UserID = @UserID
                       AND a.VacancyID IS NOT NULL
-                    ORDER BY
-                      CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,
-                      ISNULL(a.StartDate, '1900-01-01') DESC,
-                      a.AssignmentID DESC
+                      AND a.IsCurrent = 1
                 `);
             if (assignmentDept.recordset[0]?.DepartmentID != null) {
                 baseDepartmentId = assignmentDept.recordset[0].DepartmentID;
@@ -250,6 +258,8 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
             baseDepartmentId = identityRow.DepartmentID;
         }
     }
+
+    } // end else (VacancyID not found directly)
 
     if (baseDepartmentId == null && p.HasVacancyDepartmentID) {
         const actorId = await resolveEffectiveActorId(pool, loginId);
@@ -716,7 +726,8 @@ exports.getAssignmentNotifications = async (req, res) => {
         const schema = await pool.request().query(`
             SELECT
               CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedToVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedToVacancy,
-              CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedByVacancy
+              CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications', 'AssignedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignedByVacancy,
+              CASE WHEN COL_LENGTH('dbo.Tasks', 'PersonalOwnerUserID')                       IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner
         `);
 
         const s = schema.recordset[0] || {};
@@ -727,10 +738,17 @@ exports.getAssignmentNotifications = async (req, res) => {
         const identityKey = s.HasAssignedByVacancy ? 'VacancyID' : 'UserID';
         const identityName = s.HasAssignedByVacancy ? 'Name' : 'FullName';
 
-        const result = await pool.request()
-            .input('UserID', sql.NVarChar, effectiveActorId)
-            .query(`
-                SELECT 
+        // حلّ UserID الأصلي لمطابقة PersonalOwnerUserID (نصي دائماً)
+        const personalUID = s.HasPersonalOwner
+            ? await resolveUserIDFromActor(pool, userId)
+            : '';
+        const personalFilter = s.HasPersonalOwner && personalUID
+            ? `AND (t.PersonalOwnerUserID IS NULL OR t.PersonalOwnerUserID = @PersonalUID)`
+            : '';
+        const notifReq = pool.request().input('UserID', sql.NVarChar, effectiveActorId);
+        if (s.HasPersonalOwner && personalUID) notifReq.input('PersonalUID', sql.NVarChar, personalUID);
+        const result = await notifReq.query(`
+                SELECT
                     tan.*,
                     t.Title as TaskTitle,
                     assignedBy.${identityName} as AssignedByName
@@ -739,6 +757,7 @@ exports.getAssignmentNotifications = async (req, res) => {
                 LEFT JOIN ${identityTable} assignedBy ON tan.${assignedByCol} = assignedBy.${identityKey}
                 WHERE tan.${assignedToCol} = @UserID
                 AND tan.IsRead = 0
+                ${personalFilter}
                 ORDER BY tan.CreatedAt DESC
             `);
         const notifications = result.recordset.map(n => {

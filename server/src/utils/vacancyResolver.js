@@ -176,19 +176,19 @@ async function resolveActorContext(pool, rawUserId) {
     let effectiveUid = uid;
     if (isNumericInt(uid) && schema.hasAssignments && schema.hasJobVacancies) {
       try {
+        // نُعيد فقط المستخدم الحالي (IsCurrent=1) لتجنب إرجاع شاغل سابق للمنصب
         const r = await pool.request()
           .input('VacancyID', sql.Int, parseInt(uid, 10))
           .query(`
             SELECT TOP 1 a.UserID
             FROM dbo.Assignments a
-            WHERE a.VacancyID = @VacancyID
-            ORDER BY
-              CASE WHEN a.IsCurrent = 1 THEN 0 ELSE 1 END,
-              a.AssignmentID DESC
+            WHERE a.VacancyID = @VacancyID AND a.IsCurrent = 1
           `);
         if (r.recordset[0]?.UserID) {
           effectiveUid = String(r.recordset[0].UserID).trim();
         }
+        // إن لم يوجد IsCurrent=1 → يبقى effectiveUid كـ VacancyID رقمي
+        // وسيفشل الاستعلام عن المستخدم (لا يوجد UserID رقمي) → نُرجع null → 401
       } catch (_) {}
     }
 

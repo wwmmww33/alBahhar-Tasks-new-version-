@@ -53,12 +53,34 @@ exports.login = async (req, res) => {
 
         let userQuery;
         if (hasUsersDepartmentID) {
-            userQuery = `
-                SELECT u.*, d.Name as DepartmentName
-                FROM Users u
-                LEFT JOIN Departments d ON u.DepartmentID = d.DepartmentID
-                WHERE ${loginWhere}
-            `;
+            // أيضاً نجلب VacancyID الحالي لضمان صحة تحديد النطاق بعد تغيير المنصب
+            if (hasProfileView) {
+                userQuery = `
+                    SELECT u.*, d.Name as DepartmentName,
+                           p.VacancyID, p.VacancyName
+                    FROM Users u
+                    LEFT JOIN Departments d ON u.DepartmentID = d.DepartmentID
+                    LEFT JOIN dbo.vw_UserCurrentProfile p ON p.UserID = u.UserID
+                    WHERE ${loginWhere}
+                `;
+            } else if (hasAssignments && hasJobVacancies) {
+                userQuery = `
+                    SELECT u.*, d.Name as DepartmentName,
+                           v.VacancyID, v.Name AS VacancyName
+                    FROM Users u
+                    LEFT JOIN Departments d ON u.DepartmentID = d.DepartmentID
+                    LEFT JOIN dbo.Assignments a ON a.UserID = u.UserID AND a.IsCurrent = 1
+                    LEFT JOIN dbo.JobVacancies v ON v.VacancyID = a.VacancyID
+                    WHERE ${loginWhere}
+                `;
+            } else {
+                userQuery = `
+                    SELECT u.*, d.Name as DepartmentName
+                    FROM Users u
+                    LEFT JOIN Departments d ON u.DepartmentID = d.DepartmentID
+                    WHERE ${loginWhere}
+                `;
+            }
         } else if (hasProfileView) {
             userQuery = `
                 SELECT

@@ -24,7 +24,8 @@ async function probeSchema(pool) {
           CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','AssignedByUserID')       IS NOT NULL THEN 1 ELSE 0 END AS HasTAN_ByUser,
           CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','IsRead')                 IS NOT NULL THEN 1 ELSE 0 END AS HasTAN_IsRead,
           CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','CreatedAt')              IS NOT NULL THEN 1 ELSE 0 END AS HasTAN_CreatedAt,
-          CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','NotificationID')         IS NOT NULL THEN 1 ELSE 0 END AS HasTAN_NotifID
+          CASE WHEN COL_LENGTH('dbo.TaskAssignmentNotifications','NotificationID')         IS NOT NULL THEN 1 ELSE 0 END AS HasTAN_NotifID,
+          CASE WHEN COL_LENGTH('dbo.Tasks','PersonalOwnerUserID')                         IS NOT NULL THEN 1 ELSE 0 END AS HasPersonalOwner
     `);
     return res.recordset[0] || {};
 }
@@ -78,9 +79,14 @@ const getNotifications = async (req, res) => {
         const cnIdName      = s.HasCN_ByVacancy ? 'Name'               : 'FullName';
         const cnActor       = getActorId(req, !!s.HasCN_Vacancy);
 
-        const cnRows = await pool.request()
-            .input('a', sql.NVarChar, cnActor)
-            .query(`
+        const personalUID = String(req.user.userId || '').trim();
+        const personalCnFilter = s.HasPersonalOwner && personalUID
+            ? `AND (t.PersonalOwnerUserID IS NULL OR t.PersonalOwnerUserID = @PersonalUID)`
+            : '';
+        const cnReq = pool.request()
+            .input('a', sql.NVarChar, cnActor);
+        if (s.HasPersonalOwner && personalUID) cnReq.input('PersonalUID', sql.NVarChar, personalUID);
+        const cnRows = await cnReq.query(`
                 SELECT cn.NotificationID, cn.TaskID, cn.IsRead, cn.CreatedAt,
                        cn.${cnByCol} as ByID,
                        c.Content as CommentContent,
@@ -91,6 +97,7 @@ const getNotifications = async (req, res) => {
                 INNER JOIN Tasks    t ON cn.TaskID    = t.TaskID
                 LEFT  JOIN ${cnIdTable} u ON cn.${cnByCol} = u.${cnIdKey}
                 WHERE  cn.${cnNotifyCol} = @a
+                ${personalCnFilter}
                 ${onlyUnread ? 'AND cn.IsRead = 0' : ''}
                 ORDER BY cn.CreatedAt DESC
             `);
@@ -125,9 +132,12 @@ const getNotifications = async (req, res) => {
             if (tanToCol) {
                 const tanActor = getActorId(req, !!s.HasTAN_ToVacancy);
 
-                const tanRows = await pool.request()
-                    .input('a', sql.NVarChar, tanActor)
-                    .query(`
+                const personalTanFilter = s.HasPersonalOwner && personalUID
+                    ? `AND (t.PersonalOwnerUserID IS NULL OR t.PersonalOwnerUserID = @PersonalUID)`
+                    : '';
+                const tanReq = pool.request().input('a', sql.NVarChar, tanActor);
+                if (s.HasPersonalOwner && personalUID) tanReq.input('PersonalUID', sql.NVarChar, personalUID);
+                const tanRows = await tanReq.query(`
                         SELECT ${tanIdCol} as NotifID,
                                tan.TaskID,
                                tan.IsRead,
@@ -141,6 +151,7 @@ const getNotifications = async (req, res) => {
                         INNER JOIN Tasks t ON tan.TaskID = t.TaskID
                         ${tanByCol ? `LEFT JOIN ${tanByTbl} u ON tan.${tanByCol} = u.${tanByKey}` : ''}
                         WHERE  tan.${tanToCol} = @a
+                        ${personalTanFilter}
                         ${onlyUnread ? 'AND tan.IsRead = 0' : ''}
                         ORDER BY ${tanDateCol} DESC
                     `);
