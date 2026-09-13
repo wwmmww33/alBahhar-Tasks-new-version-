@@ -1,5 +1,5 @@
 // src/components/UnifiedTimeline.tsx
-import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell } from 'lucide-react';
+import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy } from 'lucide-react';
 import React, { useState, useMemo, useCallback, useRef } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
@@ -508,6 +508,19 @@ const UnifiedTimeline = ({
     refreshNotifications();
   };
 
+  // تعبئة نموذج "إضافة مهمة فرعية جديدة" ببيانات مهمة فرعية موجودة، لإنشاء نسخة معدَّلة منها
+  const handleDuplicateSubtask = (subtask: Subtask) => {
+    setNewSubtaskTitle(subtask.Title || '');
+    setNewSubtaskDueDate(subtask.DueDate ? formatToDateTimeLocal(new Date(subtask.DueDate)) : getTodayString());
+    setNewSubtaskEndDate(subtask.EndDate ? new Date(subtask.EndDate).toISOString().slice(0, 10) : '');
+    const assignedId = subtaskAssignedId(subtask);
+    setAssignTo(assignedId || '');
+    setShowInCalendar(!!(subtask as any).ShowInCalendar);
+    setReminderEnabled(!!subtask.ReminderEnabled);
+    setReminderMinutes(subtask.ReminderMinutes ?? 15);
+    setShowSubtaskForm(true);
+  };
+
   const handleToggleStatus = async (subtask: Subtask) => {
     const isPersonalOwner = !!(task?.PersonalOwnerUserID) &&
       String(task.PersonalOwnerUserID).trim() === String(currentUser.UserID).trim();
@@ -851,14 +864,25 @@ const UnifiedTimeline = ({
                   ))}
                 </div>
               )}
-              {canDelete && (
-                <button
-                  onClick={() => handleDeleteSubtask(subtask)}
-                  className="text-red-500 hover:text-red-700 ml-auto"
-                >
-                  <Trash2 size={16} />
-                </button>
-              )}
+              <div className="flex items-center gap-2 ml-auto">
+                {canAddSubtasks && (
+                  <button
+                    onClick={() => handleDuplicateSubtask(subtask)}
+                    className="text-content-secondary hover:text-primary"
+                    title="نسخ كمهمة فرعية جديدة"
+                  >
+                    <Copy size={16} />
+                  </button>
+                )}
+                {canDelete && (
+                  <button
+                    onClick={() => handleDeleteSubtask(subtask)}
+                    className="text-red-500 hover:text-red-700"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
             </div>
             
             <div className="flex flex-col gap-2 text-xs text-content-secondary">

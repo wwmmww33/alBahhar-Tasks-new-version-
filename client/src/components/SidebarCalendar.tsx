@@ -1,5 +1,6 @@
 // src/components/SidebarCalendar.tsx
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Calendar as CalendarIcon } from 'lucide-react';
 import type { CurrentUser } from '../types';
@@ -58,6 +59,16 @@ const formatEventTime = (dateStr: string): string => {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} `;
 };
 
+// نص "نهاية المهمة: الثلاثاء 4 أكتوبر 2026م" لمربع التلميح عند مرور الماوس
+const formatEndDateTooltip = (dateStr: string): string => {
+  const d = new Date(dateStr);
+  const weekday = d.toLocaleDateString('ar-EG-u-nu-latn', { weekday: 'long' });
+  const month = d.toLocaleDateString('ar-EG-u-nu-latn', { month: 'long' });
+  return `نهاية المهمة: ${weekday} ${d.getDate()} ${month} ${d.getFullYear()}م`;
+};
+
+type HoverInfo = { subtaskId: number; endDate: string; x: number; y: number };
+
 const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   // calendarUserId: always the user's own UserID for department-scope resolution (matches CalendarPage)
   // actorId: may be VacancyID (used only for client-side AssignedToID filtering)
@@ -69,6 +80,12 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   const [extraCommentEvents, setExtraCommentEvents] = useState<CalendarCommentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewFilter, setViewFilter] = useState<'both' | 'shared' | 'vacancy' | 'personal'>('both');
+  const [hoverInfo, setHoverInfo] = useState<HoverInfo | null>(null);
+  const handleSpanHover = (subtaskId: number, endDate: string | null | undefined) => (e: ReactMouseEvent) => {
+    if (!endDate) return;
+    setHoverInfo({ subtaskId, endDate, x: e.clientX, y: e.clientY });
+  };
+  const clearSpanHover = () => setHoverInfo(null);
   const navigate = useNavigate();
   const openTaskInNewTab = (taskId: number) => {
     window.open(`/task/${taskId}`, '_blank', 'noopener,noreferrer');
@@ -428,12 +445,17 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                     });
                     const pastDue = isPastDueToday(item.DueDate);
                     const completed = !!item.IsCompleted;
+                    const isHovered = hoverInfo?.subtaskId === item.SubtaskID;
+                    const isDimmed = !!hoverInfo && !isHovered;
                     return (
                       <div
                         key={item.SubtaskID}
                         dir="rtl"
-                        className={`py-0.5 mb-0.5 text-xs min-w-0 ${pastDue ? 'opacity-50' : ''}`}
-                        style={{ borderLeft: `3px solid ${color}`, paddingLeft: '6px' }}
+                        className={`py-0.5 mb-0.5 text-xs min-w-0 transition-opacity duration-150 ${pastDue ? 'opacity-50' : ''}`}
+                        style={{ borderLeft: `3px solid ${color}`, paddingLeft: '6px', opacity: isDimmed ? 0.25 : undefined }}
+                        onMouseEnter={handleSpanHover(item.SubtaskID, item.EndDate)}
+                        onMouseMove={handleSpanHover(item.SubtaskID, item.EndDate)}
+                        onMouseLeave={clearSpanHover}
                       >
                         <button
                           type="button"
@@ -467,14 +489,25 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                           // أحداث وسطى: الخط يمتد من أعلى (-4px) للتواصل مع اليوم السابق
                           const top = (isCarryOverItem || pos === 'start') ? '0' : '-4px';
                           const bottom = pos === 'end' ? '0' : '-4px';
+                          const isHovered = hoverInfo?.subtaskId === si.SubtaskID;
+                          const isDimmed = !!hoverInfo && !isHovered;
                           return (
-                            <div key={si.SubtaskID} className="absolute rounded-full" style={{
-                              left: `${siLane * 7 + 2}px`,
-                              width: '3px',
-                              top,
-                              bottom,
-                              backgroundColor: siColor,
-                            }} />
+                            <div
+                              key={si.SubtaskID}
+                              className="absolute rounded-full cursor-pointer transition-all duration-150"
+                              style={{
+                                left: `${siLane * 7 + (isHovered ? 1 : 2)}px`,
+                                width: isHovered ? '5px' : '3px',
+                                top,
+                                bottom,
+                                backgroundColor: siColor,
+                                opacity: isDimmed ? 0.12 : 1,
+                                filter: isDimmed ? 'blur(0.5px)' : undefined,
+                              }}
+                              onMouseEnter={handleSpanHover(si.SubtaskID, si.EndDate)}
+                              onMouseMove={handleSpanHover(si.SubtaskID, si.EndDate)}
+                              onMouseLeave={clearSpanHover}
+                            />
                           );
                         })}
                       </div>
@@ -507,8 +540,17 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                               const timePrefix = formatEventTime(item.DueDate);
                               const pastDue = isPastDueToday(item.DueDate);
                               const completed = !!item.IsCompleted;
+                              const isHovered = spanning && hoverInfo?.subtaskId === item.SubtaskID;
+                              const isDimmed = spanning && !!hoverInfo && !isHovered;
                               return (
-                                <div key={`${item.SubtaskID}-${pos}`} className={`text-xs ${pastDue ? 'opacity-50' : ''}`}>
+                                <div
+                                  key={`${item.SubtaskID}-${pos}`}
+                                  className={`text-xs transition-opacity duration-150 ${pastDue ? 'opacity-50' : ''}`}
+                                  style={isDimmed ? { opacity: 0.25 } : undefined}
+                                  onMouseEnter={spanning ? handleSpanHover(item.SubtaskID, item.EndDate) : undefined}
+                                  onMouseMove={spanning ? handleSpanHover(item.SubtaskID, item.EndDate) : undefined}
+                                  onMouseLeave={spanning ? clearSpanHover : undefined}
+                                >
                                   <button
                                     type="button"
                                     style={{ color }}
@@ -675,6 +717,15 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
             );
           })()}
 
+        </div>
+      )}
+      {hoverInfo && (
+        <div
+          dir="rtl"
+          className="fixed z-50 pointer-events-none px-2 py-1 rounded bg-gray-900 text-white text-xs shadow-lg whitespace-nowrap"
+          style={{ left: hoverInfo.x + 14, top: hoverInfo.y + 14 }}
+        >
+          {formatEndDateTooltip(hoverInfo.endDate)}
         </div>
       )}
     </aside>

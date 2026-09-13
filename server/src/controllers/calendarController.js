@@ -2,25 +2,6 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 
-// يحوّل VacancyID رقمي → UserID حقيقي لمقارنة PersonalOwnerUserID
-async function resolveUserIDFromActor(pool, rawActorId) {
-  const text = String(rawActorId || '').trim();
-  if (!text || !/^\d+$/.test(text)) return text;
-  try {
-    const res = await pool.request()
-      .input('VacancyID', sql.Int, parseInt(text, 10))
-      .query(`
-        IF OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL
-          SELECT TOP 1 LTRIM(RTRIM(UserID)) AS UserID
-          FROM dbo.Assignments
-          WHERE VacancyID = @VacancyID AND IsCurrent = 1;
-      `);
-    const uid = res.recordset[0]?.UserID;
-    if (uid) return String(uid).trim();
-  } catch (_) {}
-  return text;
-}
-
 async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
   const normalizedBaseDepartmentId = String(baseDepartmentId || '').trim();
   if (!normalizedBaseDepartmentId || !/^\d+$/.test(normalizedBaseDepartmentId)) return [];
@@ -293,8 +274,9 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
       `SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`
     );
     const hasPersonalCol = !!(personalTaskColCheck.recordset[0]?.Len);
-    // حلّ UserID الأصلي (userId قد يكون VacancyID رقمياً)
-    const personalUserId = await resolveUserIDFromActor(pool, userId);
+    // حلّ UserID الأصلي لمقارنة PersonalOwnerUserID — نعتمد currentLegacyUserId المحلول أعلاه
+    // عبر vw_UserCurrentProfile/LegacyUserID/ServiceID (أدق من مطابقة IsCurrent=1 وحدها في Assignments)
+    const personalUserId = currentLegacyUserId;
     const personalOrClause = hasPersonalCol
       ? `OR (t.PersonalOwnerUserID IS NOT NULL AND t.PersonalOwnerUserID = @PersonalUserID)`
       : '';
@@ -480,6 +462,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           ${endDateSelect}
           t.Title as TaskTitle,
           t.DepartmentID,
+          t.PersonalOwnerUserID,
           s.${assignedCol} as AssignedToID,
           ${assignedNameSelect}
         FROM Subtasks s
@@ -502,6 +485,7 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
           ${endDateSelect}
           t.Title as TaskTitle,
           t.DepartmentID,
+          t.PersonalOwnerUserID,
           s.${assignedCol} as AssignedToID,
           ${assignedNameSelect}
         FROM Subtasks s
@@ -843,7 +827,8 @@ exports.getCalendarComments = async (req, res) => {
     // دعم التعليقات على المهام الشخصية
     const commentPersonalProbe = await pool.request().query(`SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`);
     const hasPersonalColCmt = !!(commentPersonalProbe.recordset[0]?.Len);
-    const personalUserIdCmt = await resolveUserIDFromActor(pool, userId);
+    // نعتمد UserID المُحلَّل عبر vw_UserCurrentProfile أعلاه (أدق من مطابقة IsCurrent=1 وحدها في Assignments)
+    const personalUserIdCmt = currentProfile?.UserID ? String(currentProfile.UserID).trim() : loginId;
     const commentPersonalOrClause = hasPersonalColCmt
       ? `OR (t.PersonalOwnerUserID IS NOT NULL AND t.PersonalOwnerUserID = @PersonalUserID)`
       : '';
