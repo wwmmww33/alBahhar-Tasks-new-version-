@@ -511,7 +511,10 @@ const UnifiedTimeline = ({
   // تعبئة نموذج "إضافة مهمة فرعية جديدة" ببيانات مهمة فرعية موجودة، لإنشاء نسخة معدَّلة منها
   const handleDuplicateSubtask = (subtask: Subtask) => {
     setNewSubtaskTitle(subtask.Title || '');
-    setNewSubtaskDueDate(subtask.DueDate ? formatToDateTimeLocal(new Date(subtask.DueDate)) : getTodayString());
+    // التاريخ = اليوم الحالي، والوقت = وقت المهمة المنسوخة
+    const todayDate = getTodayString().split('T')[0];
+    const originalTime = subtask.DueDate ? formatToDateTimeLocal(new Date(subtask.DueDate)).split('T')[1] : getTodayString().split('T')[1];
+    setNewSubtaskDueDate(`${todayDate}T${originalTime}`);
     setNewSubtaskEndDate(subtask.EndDate ? new Date(subtask.EndDate).toISOString().slice(0, 10) : '');
     const assignedId = subtaskAssignedId(subtask);
     setAssignTo(assignedId || '');

@@ -4,6 +4,8 @@ import { User, Calendar, Flag, AlertTriangle, CheckSquare, ExternalLink, FileDow
 // import { useNotification } from '../contexts/NotificationContext';
 import type { Subtask } from '../types';
 import { exportTaskToPdf } from '../utils/taskPdfExport';
+import { URGENCY_META } from '../utils/taskUrgency';
+import type { UrgencyInfo } from '../utils/taskUrgency';
 
 // تعريف Task محلي مع Status إضافي
 type TaskCardTask = {
@@ -49,6 +51,7 @@ interface TaskCardProps {
   onPriorityChange?: (taskId: number, newPriority: 'normal' | 'urgent' | 'starred') => Promise<void>;
   onStatusChange?: (taskId: number, newStatus: string) => Promise<void>;
   isMySubtask?: (subtask: Subtask) => boolean;
+  urgency?: UrgencyInfo | null;
 }
 
 const TaskCard: React.FC<TaskCardProps> = ({
@@ -58,9 +61,37 @@ const TaskCard: React.FC<TaskCardProps> = ({
   onToggleSelection,
   onPriorityChange,
   onStatusChange,
-  isMySubtask
+  isMySubtask,
+  urgency
 }) => {
   const style = statusStyles[task.Status] || statusStyles.open;
+
+  const urgencyMeta = urgency && urgency.level !== 'none' ? URGENCY_META[urgency.level] : null;
+  const urgencyBar = urgencyMeta ? (
+    <div
+      className="absolute top-0 inset-x-0 h-1.5 rounded-t-lg pointer-events-none"
+      style={{ backgroundColor: urgencyMeta.color }}
+    />
+  ) : null;
+  const urgencyBadge = urgency && urgencyMeta ? (
+    <div
+      className={`inline-flex items-center gap-1.5 self-start px-2.5 py-1 rounded-full text-xs font-semibold ${urgencyMeta.softBg} ${urgencyMeta.softText}`}
+      title={
+        (urgency.source === 'subtask'
+          ? `الموعد محسوب من المهمة الفرعية: ${urgency.sourceTitle || ''}`
+          : 'الموعد محسوب من تاريخ استحقاق المهمة') +
+        (urgency.deadline ? ` — ${urgency.deadline.toLocaleString('ar-EG-u-nu-latn', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}` : '')
+      }
+    >
+      <span
+        className={`w-2 h-2 rounded-full ${urgency.level === 'overdue' ? 'animate-pulse' : ''}`}
+        style={{ backgroundColor: urgencyMeta.color }}
+      />
+      <span>{urgencyMeta.label}</span>
+      <span className="opacity-60">•</span>
+      <span>{urgency.remainingLabel}</span>
+    </div>
+  ) : null;
   
   const isPersonalTask = !!(task.IsPersonalTask) || !!(task.PersonalOwnerUserID) || !task.DepartmentID;
 
@@ -152,6 +183,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
         baseClasses += ' ' + priorityStyles;
       }
       baseClasses += ' hover:shadow-lg dark:hover:shadow-xl';
+      if (urgencyMeta) baseClasses += ' ' + urgencyMeta.ring;
     }
 
     return baseClasses;
@@ -160,6 +192,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
   if (isSelectionMode) {
     return (
       <div onClick={() => onToggleSelection && onToggleSelection(task.TaskID)} className={getCardClassName()}>
+        {urgencyBar}
         {/* خانة الاختيار في وضع الاختيار */}
         <div className="absolute top-2 left-2 z-10">
           <input
@@ -227,8 +260,9 @@ const TaskCard: React.FC<TaskCardProps> = ({
               <div className="flex items-center gap-2"><User size={14} /><span>المنشيء: {(task.CreatedByName || task.CreatedBy || 'غير محدد')}{task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}</span></div>
             )}
             <div className="flex items-center gap-2"><Calendar size={14} /><span>تاريخ الاستحقاق: {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG-u-nu-latn') : 'غير محدد'}</span></div>
+            {urgencyBadge}
             {task.Priority === 'urgent' && (<div className="flex items-center gap-2 text-red-600 font-semibold"><AlertTriangle size={14} /><span>أولوية عاجلة</span></div>)}
-            
+
             {/* عرض المهام الفرعية غير المكتملة */}
             {incompleteSubtasks.length > 0 && (
               <div className="mt-3 pt-3 border-t border-gray-200">
@@ -264,6 +298,7 @@ const TaskCard: React.FC<TaskCardProps> = ({
 
   return (
     <div onClick={() => navigate(`/task/${task.TaskID}`)} className={getCardClassName()}>
+      {urgencyBar}
       <div className="p-4">
         {/* العنوان وأزرار الأولوية */}
         <div className="flex justify-between items-start mb-3">
@@ -353,8 +388,9 @@ const TaskCard: React.FC<TaskCardProps> = ({
         <div className="mt-4 space-y-3 text-sm text-gray-600 dark:text-gray-100">
           <div className="flex items-center gap-2"><User size={14} /><span>المنشيء: {(task.CreatedByName || task.CreatedBy || 'غير محدد')}{task.ActedBy ? ` بواسطة (${task.ActedByName || task.ActedBy})` : ''}</span></div>
           <div className="flex items-center gap-2"><Calendar size={14} /><span>تاريخ الاستحقاق: {task.DueDate ? new Date(task.DueDate).toLocaleDateString('ar-EG-u-nu-latn') : 'غير محدد'}</span></div>
+          {urgencyBadge}
           {task.Priority === 'urgent' && (<div className="flex items-center gap-2 text-red-600 font-semibold"><AlertTriangle size={14} /><span>أولوية عاجلة</span></div>)}
-          
+
           {/* عرض المهام الفرعية غير المكتملة */}
           {incompleteSubtasks.length > 0 && (
             <div className="mt-3 pt-3 border-t border-gray-200">

@@ -8,7 +8,9 @@ import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, Comment } from '../types';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
-import { Loader2, ClipboardCopy, Filter, User, Users, ChevronDown, MessageCircle, CheckSquare, ClipboardList, CheckCircle, Clock } from 'lucide-react';
+import { Loader2, ClipboardCopy, Filter, User, Users, ChevronDown, MessageCircle, CheckSquare, ClipboardList, CheckCircle, Clock, ArrowUpDown } from 'lucide-react';
+import { URGENCY_META, URGENCY_ORDER, computeTaskUrgency } from '../utils/taskUrgency';
+import type { UrgencyInfo, UrgencyLevel } from '../utils/taskUrgency';
 
 type Task = {
   TaskID: number;
@@ -156,6 +158,23 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
   // التبويب الفرعي داخل "المهام النشطة"
   const [activeTaskSubTab, setActiveTaskSubTab] = useState<'work' | 'personal'>('work');
+
+  // فلترة/ترتيب المهام النشطة حسب الإلحاح (الوقت المتبقي)
+  const [urgencyFilter, setUrgencyFilter] = useState<'all' | UrgencyLevel>(() => {
+    const saved = sessionStorage.getItem('taskList.urgency');
+    return saved && (URGENCY_ORDER as string[]).includes(saved) ? (saved as UrgencyLevel) : 'all';
+  });
+  const [activeSortMode, setActiveSortMode] = useState<'deadline' | 'default'>(
+    () => (localStorage.getItem('taskList.activeSort') === 'default' ? 'default' : 'deadline')
+  );
+  useEffect(() => { sessionStorage.setItem('taskList.urgency', urgencyFilter); }, [urgencyFilter]);
+  useEffect(() => { localStorage.setItem('taskList.activeSort', activeSortMode); }, [activeSortMode]);
+  // تحديث كل دقيقة ليتغير لون المهمة تلقائياً مع مرور الوقت
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // سجل إجراءات المهام
   type AuditLogEntry = { LogID: number; TaskID: number | null; TaskTitle: string | null; Action: string; ActorName: string | null; ActorPosition: string | null; CreatedAt: string; };
@@ -885,7 +904,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   // دالة للحصول على مهام التبويب الحالي
   const getCurrentTabTasks = () => {
     switch (activeTab) {
-      case 'active': return activeTasks;
+      case 'active': return visibleActiveTasks;
       case 'completed': return completedTasks;
       case 'actioned': return actionedTasks;
       case 'updates': return [];
@@ -1058,11 +1077,39 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     });
   };
   
-  sortTasks(activeTasks);
-  sortTasks(workActiveTasks);
-  sortTasks(personalActiveTasks);
+  // إلحاح كل مهمة نشطة: الموعد = أقرب مهمة فرعية غير مكتملة لي (أو كل فرعيات المهمة الشخصية)، وإلا تاريخ المهمة
+  const urgencyById = new Map<number, UrgencyInfo>();
+  activeTasks.forEach(task => {
+    const subs = task.subtasks || [];
+    const relevant = isPersonalTaskOfActor(task) ? subs : subs.filter(st => isSubtaskAssignedToActor(st));
+    urgencyById.set(task.TaskID, computeTaskUrgency(task.DueDate, relevant, nowTick));
+  });
+
+  // ترتيب من الأقرب تنفيذاً إلى الأبعد (المتأخرة أولاً، وبلا موعد آخراً)
+  const sortByDeadline = (list: Task[]) => list.sort((a, b) => {
+    const da = urgencyById.get(a.TaskID)?.deadline?.getTime() ?? Infinity;
+    const db = urgencyById.get(b.TaskID)?.deadline?.getTime() ?? Infinity;
+    if (da !== db) return da < db ? -1 : 1;
+    if (a.Priority === 'urgent' && b.Priority !== 'urgent') return -1;
+    if (b.Priority === 'urgent' && a.Priority !== 'urgent') return 1;
+    return getMaxIncompleteSubtaskId(b) - getMaxIncompleteSubtaskId(a);
+  });
+
+  const sortActive = activeSortMode === 'deadline' ? sortByDeadline : sortTasks;
+  sortActive(activeTasks);
+  sortActive(workActiveTasks);
+  sortActive(personalActiveTasks);
   sortTasks(actionedTasks);
   sortTasks(completedTasks);
+
+  const currentSubTabActiveTasks = activeTaskSubTab === 'work' ? workActiveTasks : personalActiveTasks;
+  const urgencyCounts = URGENCY_ORDER.reduce((acc, level) => {
+    acc[level] = currentSubTabActiveTasks.filter(t => urgencyById.get(t.TaskID)?.level === level).length;
+    return acc;
+  }, {} as Record<UrgencyLevel, number>);
+  const visibleActiveTasks = urgencyFilter === 'all'
+    ? currentSubTabActiveTasks
+    : currentSubTabActiveTasks.filter(t => urgencyById.get(t.TaskID)?.level === urgencyFilter);
 
   if (isLoading) return <div className="flex justify-center items-center p-8"><Loader2 className="animate-spin text-primary" size={48} /></div>;
   if (error) return <p className="text-center p-8 text-red-500">حدث خطأ: {error}</p>;
@@ -1688,43 +1735,133 @@ const TaskList = ({ currentUser }: TaskListProps) => {
             </button>
           </div>
 
+          {/* رادار الإلحاح: شريط توزيع + فلاتر + ترتيب */}
+          {currentSubTabActiveTasks.length > 0 && (() => {
+            const total = currentSubTabActiveTasks.length;
+            const attention: string[] = [];
+            if (urgencyCounts.overdue > 0) attention.push(`${urgencyCounts.overdue} متأخرة`);
+            if (urgencyCounts.critical > 0) attention.push(`${urgencyCounts.critical} عاجلة جداً`);
+            const summary = attention.length > 0
+              ? `تحتاج انتباهك الآن: ${attention.join(' • ')}`
+              : 'لا توجد مهام متأخرة أو عاجلة جداً حالياً';
+            return (
+              <div className="mb-5 rounded-lg border border-content/10 bg-white dark:bg-gray-800 p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className={`text-sm font-medium ${attention.length > 0 ? 'text-red-600 dark:text-red-400' : 'text-content-secondary'}`}>
+                    {summary}
+                  </p>
+                  <button
+                    onClick={() => setActiveSortMode(m => (m === 'deadline' ? 'default' : 'deadline'))}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-gray-100 dark:bg-gray-700 text-content hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                    title="تبديل طريقة ترتيب المهام النشطة"
+                  >
+                    <ArrowUpDown size={14} />
+                    {activeSortMode === 'deadline' ? 'الترتيب: الأقرب موعداً' : 'الترتيب: الافتراضي'}
+                  </button>
+                </div>
+
+                <div className="flex h-2.5 w-full gap-0.5 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-700">
+                  {URGENCY_ORDER.filter(level => urgencyCounts[level] > 0).map(level => (
+                    <button
+                      key={level}
+                      onClick={() => setUrgencyFilter(urgencyFilter === level ? 'all' : level)}
+                      className="h-full min-w-[6px] transition-opacity hover:opacity-80"
+                      style={{
+                        flexGrow: urgencyCounts[level],
+                        flexBasis: 0,
+                        backgroundColor: URGENCY_META[level].color,
+                        opacity: urgencyFilter === 'all' || urgencyFilter === level ? 1 : 0.25,
+                      }}
+                      title={`${URGENCY_META[level].label}: ${urgencyCounts[level]}`}
+                    />
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => setUrgencyFilter('all')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+                      urgencyFilter === 'all'
+                        ? 'bg-primary text-white border-primary'
+                        : 'bg-gray-100 dark:bg-gray-700 text-content border-transparent hover:bg-gray-200 dark:hover:bg-gray-600'
+                    }`}
+                  >
+                    الكل ({total})
+                  </button>
+                  {URGENCY_ORDER.map(level => {
+                    const meta = URGENCY_META[level];
+                    const count = urgencyCounts[level];
+                    const isActive = urgencyFilter === level;
+                    return (
+                      <button
+                        key={level}
+                        onClick={() => setUrgencyFilter(isActive ? 'all' : level)}
+                        disabled={count === 0 && !isActive}
+                        title={meta.hint}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+                          isActive ? meta.chipActive : meta.chipIdle
+                        } ${count === 0 && !isActive ? 'opacity-40 cursor-not-allowed' : ''}`}
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full"
+                          style={{ backgroundColor: isActive ? '#ffffff' : meta.color }}
+                        />
+                        {meta.label} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* محتوى التبويب الفرعي */}
           {(() => {
-            const displayTasks = activeTaskSubTab === 'work' ? workActiveTasks : personalActiveTasks;
-            const emptyMsg = activeTaskSubTab === 'work'
-              ? (searchTerm.trim() ? `لم يتم العثور على مهام وظيفية تطابق البحث "${searchTerm}"` : 'لا توجد مهام وظيفية نشطة حالياً.')
-              : (searchTerm.trim() ? `لم يتم العثور على مهام خاصة تطابق البحث "${searchTerm}"` : 'لا توجد مهام خاصة نشطة حالياً.');
+            const displayTasks = visibleActiveTasks;
+            const emptyMsg = currentSubTabActiveTasks.length > 0
+              ? 'لا توجد مهام في هذا المستوى من الإلحاح.'
+              : activeTaskSubTab === 'work'
+                ? (searchTerm.trim() ? `لم يتم العثور على مهام وظيفية تطابق البحث "${searchTerm}"` : 'لا توجد مهام وظيفية نشطة حالياً.')
+                : (searchTerm.trim() ? `لم يتم العثور على مهام خاصة تطابق البحث "${searchTerm}"` : 'لا توجد مهام خاصة نشطة حالياً.');
+
+            // عند الترتيب بالموعد نضيف عنواناً فاصلاً عند تغيّر مستوى الإلحاح
+            const cards: React.ReactNode[] = [];
+            let prevLevel: UrgencyLevel | null = null;
+            displayTasks.forEach(task => {
+              const urgency = urgencyById.get(task.TaskID);
+              if (activeSortMode === 'deadline' && urgency && urgency.level !== prevLevel) {
+                const meta = URGENCY_META[urgency.level];
+                cards.push(
+                  <div key={`hdr-${urgency.level}`} className="col-span-full flex items-center gap-3 pt-2">
+                    <span className="w-3 h-3 rounded-full" style={{ backgroundColor: meta.color }} />
+                    <span className="font-bold text-content">{meta.label}</span>
+                    <span className="text-xs text-content-secondary">{meta.hint}</span>
+                    <span className="flex-1 h-px bg-content/10" />
+                    <span className="text-xs text-content-secondary">{urgencyCounts[urgency.level]}</span>
+                  </div>
+                );
+                prevLevel = urgency.level;
+              }
+              cards.push(
+                <TaskCard
+                  key={task.TaskID}
+                  task={task}
+                  urgency={urgency}
+                  onPriorityChange={updateTaskPriority}
+                  onStatusChange={updateTaskStatus}
+                  isSelectionMode={isSelectionMode}
+                  isSelected={selectedTasks.has(task.TaskID)}
+                  onToggleSelection={toggleTaskSelection}
+                  isMySubtask={isMySubtaskByVacancyId}
+                />
+              );
+            });
+
             return displayTasks.length > 0 ? (
               layoutMode === 'grid' ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {displayTasks.map(task => (
-                    <TaskCard
-                      key={task.TaskID}
-                      task={task}
-                      onPriorityChange={updateTaskPriority}
-                      onStatusChange={updateTaskStatus}
-                      isSelectionMode={isSelectionMode}
-                      isSelected={selectedTasks.has(task.TaskID)}
-                      onToggleSelection={toggleTaskSelection}
-                      isMySubtask={isMySubtaskByVacancyId}
-                    />
-                  ))}
-                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">{cards}</div>
               ) : (
-                <div className="flex flex-col gap-4">
-                  {displayTasks.map(task => (
-                    <TaskCard
-                      key={task.TaskID}
-                      task={task}
-                      onPriorityChange={updateTaskPriority}
-                      onStatusChange={updateTaskStatus}
-                      isSelectionMode={isSelectionMode}
-                      isSelected={selectedTasks.has(task.TaskID)}
-                      onToggleSelection={toggleTaskSelection}
-                      isMySubtask={isMySubtaskByVacancyId}
-                    />
-                  ))}
-                </div>
+                <div className="flex flex-col gap-4">{cards}</div>
               )
             ) : (
               <p className="text-content-secondary text-center py-8">{emptyMsg}</p>
