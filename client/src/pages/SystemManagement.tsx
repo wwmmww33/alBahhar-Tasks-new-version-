@@ -1,13 +1,14 @@
 // src/pages/SystemManagement.tsx
 import { useState } from 'react';
-import { Building, Users, UserPlus, UserCheck } from 'lucide-react';
+import { Building, Users, UserPlus, UserCheck, Megaphone } from 'lucide-react';
 import DepartmentManagement from '../components/DepartmentManagement';
 import UserManagement from '../components/UserManagement';
 import RegistrationRequests from '../components/RegistrationRequests';
 import DelegationManagement from '../components/DelegationManagement';
+import AnnouncementsManagement from '../components/AnnouncementsManagement';
 import type { CurrentUser } from '../types';
 
-type AdminTab = 'departments' | 'users' | 'requests' | 'delegations';
+type AdminTab = 'departments' | 'users' | 'requests' | 'delegations' | 'announcements';
 
 const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
@@ -110,6 +111,12 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
             <span>إدارة التفويضات</span>
           </button>
         )}
+        {isSystemAdmin && (
+          <button onClick={() => setActiveTab('announcements')} className={getTabClassName('announcements')}>
+            <Megaphone size={20} />
+            <span>تحديثات النظام</span>
+          </button>
+        )}
       </div>
 
       {/* محتوى التبويب النشط */}
@@ -118,6 +125,7 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
         {activeTab === 'users'       && isSystemAdmin && <UserManagement currentUser={currentUser} />}
         {activeTab === 'requests'    && (isSystemAdmin || isDeptManager) && <RegistrationRequests currentUser={currentUser} />}
         {activeTab === 'delegations' && (isSystemAdmin || isDeptManager) && <DelegationManagement currentUser={currentUser} />}
+        {activeTab === 'announcements' && isSystemAdmin && <AnnouncementsManagement currentUser={currentUser} />}
       </div>
     </div>
   );

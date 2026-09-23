@@ -84,6 +84,21 @@ if (existsSync(envSrc)) {
   console.log('✅ .env copied to release/.env');
 }
 
+// نسخ مجلد دليل الهاتف (ملفات PDF) بجانب الـ EXE عند أول بناء فقط — لا يُضمَّن داخل الحزمة
+// حتى يستطيع المدير استبدال الملف مباشرة في release/directory/. لا نلمس المجلد إن كان
+// موجوداً بالفعل حتى لا نطمس تحديثاً وضعه المدير في نسخة الإنتاج عند إعادة البناء لاحقاً.
+const directorySrc = join(__dirname, 'directory');
+const directoryDest = join(releaseDir, 'directory');
+if (existsSync(directorySrc) && !existsSync(directoryDest)) {
+  mkdirSync(directoryDest, { recursive: true });
+  for (const entry of readdirSync(directorySrc, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.toLowerCase().endsWith('.pdf')) {
+      copyFileSync(join(directorySrc, entry.name), join(directoryDest, entry.name));
+    }
+  }
+  console.log('✅ ملفات دليل الهاتف نُسخت إلى release/directory/ (أول بناء)');
+}
+
 console.log('\n📦 Bundle ready — starting SEA packaging...\n');
 
 // ── 5. Create EXE via Node.js SEA ────────────────────────────────────────────

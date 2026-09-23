@@ -5,8 +5,9 @@ const fs = require('fs');
 const sql = require('mssql');
 const cors = require('cors');
 
-// تحميل .env من مجلد الـ EXE (عند التشغيل كملف pkg) أو من جذر المشروع
-const exeDir = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '../..');
+// تحميل .env من مجلد الـ EXE (عند التشغيل كملف مُجمَّع) أو من جذر المشروع
+const { exeDir: getExeDir } = require('./utils/runtimeEnv');
+const exeDir = getExeDir() || path.resolve(__dirname, '../..');
 const envPath = path.join(exeDir, '.env');
 if (fs.existsSync(envPath)) {
   require('dotenv').config({ path: envPath });
@@ -52,10 +53,9 @@ try {
 
 if (!inlinedDist) {
   // وضع التطوير بدون ملفات مضمّنة — ابحث على الملفات
-  const exeDir = (!!process.pkg || (typeof process.isSea === 'function' && process.isSea())) ? path.dirname(process.execPath) : null;
   const candidates = [
     process.env.STATIC_DIR && path.resolve(process.env.STATIC_DIR),
-    exeDir && path.join(exeDir, 'dist'),
+    getExeDir() && path.join(getExeDir(), 'dist'),
     path.join(__dirname, '..', 'dist'),
     path.join(__dirname, '..', 'client', 'dist'),
     path.resolve(process.cwd(), 'dist'),
@@ -97,6 +97,8 @@ const delegationRoutes = require('./routes/delegationRoutes');
 const vacancyRoutes = require('./routes/vacancyRoutes');
 const ranksRoutes = require('./routes/ranksRoutes');
 const myNotificationsRoutes = require('./routes/myNotificationsRoutes');
+const directoryRoutes = require('./routes/directoryRoutes');
+const announcementsRoutes = require('./routes/announcementsRoutes');
 const {
   ensureSubtasksCalendarFlag,
   ensureCommentsCalendarFlag,
@@ -119,6 +121,7 @@ const {
   ensurePersonalTasksSupport,
   ensureSubtaskDueDateTimeType,
   ensureSubtaskReminderColumns,
+  ensureAnnouncementsTables,
 } = require('./utils/dbMigrations');
 
 
@@ -139,6 +142,8 @@ app.use('/api/delegations', delegationRoutes);
 app.use('/api/vacancies', vacancyRoutes);
 app.use('/api/ranks', ranksRoutes);
 app.use('/api/my-notifications', myNotificationsRoutes);
+app.use('/api/directory', directoryRoutes);
+app.use('/api/announcements', announcementsRoutes);
 
 
 // --- 3. 404 لمسارات الـ API غير الموجودة ---
@@ -284,6 +289,13 @@ const startServer = async () => {
       await ensureSubtaskReminderColumns(pool);
     } catch (reminderErr) {
       console.error('⚠️ Database migration (Subtasks ReminderEnabled/ReminderMinutes) failed. Server continues running.', reminderErr);
+    }
+
+    // --- جدولا تحديثات النظام (الإعلانات) ---
+    try {
+      await ensureAnnouncementsTables(pool);
+    } catch (announcementsErr) {
+      console.error('⚠️ Database migration (Announcements) failed. Server continues running.', announcementsErr);
     }
 
     app.listen(port, '0.0.0.0', () => {

@@ -5,6 +5,8 @@ import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId, resolveUserActorId } from '../utils/actorIdentity';
+import { useDirectoryMention } from '../hooks/useDirectoryMention';
+import DirectoryMentionDropdown from './DirectoryMentionDropdown';
 
 // قائمتا اختيار الساعة (00-23) والدقيقة (00-59) بنظام 24 ساعة مستقل عن الـ locale
 const renderTimeSelects = (
@@ -240,6 +242,11 @@ const UnifiedTimeline = ({
 
   const newCommentRef = useRef<HTMLTextAreaElement>(null);
   const editingCommentRef = useRef<HTMLTextAreaElement>(null);
+  const newSubtaskTitleRef = useRef<HTMLInputElement>(null);
+
+  // اقتراحات دليل الهاتف عند كتابة "@" في التعليق الجديد أو عنوان المهمة الفرعية الجديدة
+  const commentMention = useDirectoryMention(newComment, setNewComment, newCommentRef);
+  const subtaskTitleMention = useDirectoryMention(newSubtaskTitle, setNewSubtaskTitle, newSubtaskTitleRef);
 
   const insertMarkdownSyntax = (prefix: string, suffix: string, placeholder: string) => {
     const el = newCommentRef.current;
@@ -1384,14 +1391,27 @@ const UnifiedTimeline = ({
           <form onSubmit={handleAddSubtask} className="mt-3 space-y-2">
             {/* السطر الأول: العنوان + الإسناد */}
             <div className="flex flex-wrap gap-2">
-              <input
-                type="text"
-                value={newSubtaskTitle}
-                onChange={(e) => setNewSubtaskTitle(e.target.value)}
-                placeholder="عنوان المهمة الفرعية..."
-                required
-                className="flex-1 min-w-[180px] p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
-              />
+              <div className="relative flex-1 min-w-[180px]">
+                <input
+                  ref={newSubtaskTitleRef}
+                  type="text"
+                  value={newSubtaskTitle}
+                  onChange={subtaskTitleMention.handleChange}
+                  onKeyDown={subtaskTitleMention.handleKeyDown}
+                  onBlur={subtaskTitleMention.close}
+                  placeholder="عنوان المهمة الفرعية... (اكتب @ للبحث في دليل الهاتف)"
+                  required
+                  className="w-full p-2 border rounded-md bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                />
+                <DirectoryMentionDropdown
+                  isOpen={subtaskTitleMention.isOpen}
+                  loading={subtaskTitleMention.loading}
+                  suggestions={subtaskTitleMention.suggestions}
+                  activeIndex={subtaskTitleMention.activeIndex}
+                  onSelect={subtaskTitleMention.selectSuggestion}
+                  onHover={subtaskTitleMention.setActiveIndex}
+                />
+              </div>
               <div className="flex gap-1 items-center">
                 <select
                   value={assignTo}
@@ -1548,17 +1568,29 @@ const UnifiedTimeline = ({
                 dangerouslySetInnerHTML={{ __html: newComment.trim() ? renderMarkdown(newComment) : '<span style="opacity:0.4">لا يوجد محتوى للمعاينة</span>' }}
               />
             ) : (
-              <textarea
-                ref={newCommentRef}
-                value={newComment}
-                onChange={(e) => { setNewComment(e.target.value); autoResize(e.target); }}
-                onPaste={handleCommentPaste}
-                onFocus={() => setShowColorPicker(false)}
-                placeholder="أضف تعليقاً... (يدعم **عريض** *مائل* - قائمة | جدول | — الصق جدول Excel مباشرة)"
-                rows={3}
-                required
-                className="w-full p-2 border rounded-md bg-bkg border-content/20 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 resize-none overflow-hidden font-mono text-sm"
-              />
+              <div className="relative">
+                <textarea
+                  ref={newCommentRef}
+                  value={newComment}
+                  onChange={(e) => { commentMention.handleChange(e); autoResize(e.target); }}
+                  onKeyDown={commentMention.handleKeyDown}
+                  onPaste={handleCommentPaste}
+                  onFocus={() => setShowColorPicker(false)}
+                  onBlur={commentMention.close}
+                  placeholder="أضف تعليقاً... (يدعم **عريض** *مائل* - قائمة | جدول | — الصق جدول Excel مباشرة — اكتب @ للبحث في دليل الهاتف)"
+                  rows={3}
+                  required
+                  className="w-full p-2 border rounded-md bg-bkg border-content/20 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 resize-none overflow-hidden font-mono text-sm"
+                />
+                <DirectoryMentionDropdown
+                  isOpen={commentMention.isOpen}
+                  loading={commentMention.loading}
+                  suggestions={commentMention.suggestions}
+                  activeIndex={commentMention.activeIndex}
+                  onSelect={commentMention.selectSuggestion}
+                  onHover={commentMention.setActiveIndex}
+                />
+              </div>
             )}
           </div>
           

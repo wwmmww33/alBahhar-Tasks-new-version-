@@ -12,6 +12,8 @@ import { getApiUrl } from '../config/api';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
 import { exportTaskToPdf } from '../utils/taskPdfExport';
+import { useDirectoryMention } from '../hooks/useDirectoryMention';
+import DirectoryMentionDropdown from '../components/DirectoryMentionDropdown';
 
 type TaskDetailProps = { currentUser: CurrentUser; };
 
@@ -37,6 +39,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   const [isUpdatingURL, setIsUpdatingURL] = useState(false);
   const [isEditingDescription, setIsEditingDescription] = useState(false);
   const [descriptionInput, setDescriptionInput] = useState<string>('');
+  const descriptionMention = useDirectoryMention(descriptionInput, setDescriptionInput);
   const [isUpdatingDescription, setIsUpdatingDescription] = useState(false);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState<string>('');
@@ -698,22 +701,39 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             <span className="text-sm font-semibold text-content-secondary">الوصف</span>
             {isEditingDescription ? (
               <div className="mt-2 space-y-2">
-                <textarea
-                  autoFocus
-                  value={descriptionInput}
-                  onChange={(e) => setDescriptionInput(e.target.value)}
-                  onKeyDown={async (e) => {
-                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                      e.preventDefault();
-                      await handleUpdateTaskDescription(descriptionInput);
-                    } else if (e.key === 'Escape') {
-                      e.preventDefault();
-                      setIsEditingDescription(false);
-                      setDescriptionInput(task.Description || '');
-                    }
-                  }}
-                  className="w-full min-h-[100px] p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-content text-sm"
-                />
+                <div className="relative">
+                  <textarea
+                    autoFocus
+                    ref={descriptionMention.ref}
+                    value={descriptionInput}
+                    onChange={descriptionMention.handleChange}
+                    onBlur={descriptionMention.close}
+                    onKeyDown={async (e) => {
+                      if (descriptionMention.isOpen && descriptionMention.suggestions.length > 0) {
+                        descriptionMention.handleKeyDown(e);
+                        return;
+                      }
+                      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                        e.preventDefault();
+                        await handleUpdateTaskDescription(descriptionInput);
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        setIsEditingDescription(false);
+                        setDescriptionInput(task.Description || '');
+                      }
+                    }}
+                    placeholder="اكتب @ للبحث في دليل الهاتف"
+                    className="w-full min-h-[100px] p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-content text-sm"
+                  />
+                  <DirectoryMentionDropdown
+                    isOpen={descriptionMention.isOpen}
+                    loading={descriptionMention.loading}
+                    suggestions={descriptionMention.suggestions}
+                    activeIndex={descriptionMention.activeIndex}
+                    onSelect={descriptionMention.selectSuggestion}
+                    onHover={descriptionMention.setActiveIndex}
+                  />
+                </div>
                 <div className="flex flex-wrap gap-2 justify-end">
                   <button
                     type="button"

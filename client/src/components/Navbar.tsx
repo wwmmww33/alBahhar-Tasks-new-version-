@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { useTheme } from '../contexts/ThemeProvider';
 import UnifiedNotifications from './UnifiedNotifications';
+import AnnouncementsBell from './AnnouncementsBell';
 import type { CurrentUser } from '../types';
 import { getActiveAccount, getActiveUserId, clearActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
@@ -105,11 +106,13 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
           <option value="theme-orange">برتقالي</option>
         </select>
         
-        <UnifiedNotifications 
-          userId={getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID)} 
+        <UnifiedNotifications
+          userId={getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID)}
           onNotificationClick={handleNotificationClick}
         />
-        
+
+        <AnnouncementsBell userId={String(currentUser.UserID)} />
+
         <button onClick={handleToggleMode} title="Toggle Dark/Light Mode" className="p-2 rounded-full text-content-secondary hover:bg-content/10 hover:text-content transition-colors">
           {mode === 'light' ? <Moon size={20} /> : <Sun size={20} />}
         </button>

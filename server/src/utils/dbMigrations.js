@@ -692,4 +692,45 @@ module.exports = {
       throw err;
     }
   },
+
+  // إنشاء جدولَي Announcements و AnnouncementReads لتحديثات النظام التي ينشرها المدير لجميع المستخدمين
+  ensureAnnouncementsTables: async function ensureAnnouncementsTables(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT COUNT(*) as tableExists FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'Announcements'
+      `);
+      if (check.recordset[0].tableExists > 0) {
+        console.log('ℹ️ Announcements table already exists.');
+        return { changed: false };
+      }
+
+      await pool.request().query(`
+        CREATE TABLE dbo.Announcements (
+          AnnouncementID   INT IDENTITY(1,1) PRIMARY KEY,
+          Title            NVARCHAR(400) NOT NULL,
+          Body             NVARCHAR(MAX) NOT NULL,
+          CreatedByUserID  NVARCHAR(50) NOT NULL,
+          CreatedByName    NVARCHAR(200) NULL,
+          IsActive         BIT NOT NULL CONSTRAINT DF_Announcements_IsActive DEFAULT(1),
+          CreatedAt        DATETIME NOT NULL CONSTRAINT DF_Announcements_CreatedAt DEFAULT(GETDATE()),
+          UpdatedAt        DATETIME NULL
+        );
+        CREATE INDEX IX_Announcements_Active ON dbo.Announcements(IsActive, CreatedAt DESC);
+
+        CREATE TABLE dbo.AnnouncementReads (
+          ReadID           INT IDENTITY(1,1) PRIMARY KEY,
+          AnnouncementID   INT NOT NULL CONSTRAINT FK_AnnouncementReads_Announcement REFERENCES dbo.Announcements(AnnouncementID) ON DELETE CASCADE,
+          UserID           NVARCHAR(50) NOT NULL,
+          ReadAt           DATETIME NOT NULL CONSTRAINT DF_AnnouncementReads_ReadAt DEFAULT(GETDATE()),
+          CONSTRAINT UQ_AnnouncementReads_Announcement_User UNIQUE (AnnouncementID, UserID)
+        );
+      `);
+      console.log('✅ Created Announcements and AnnouncementReads tables.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring Announcements tables:', err);
+      throw err;
+    }
+  },
 };

@@ -6,6 +6,8 @@ import type { CurrentUser } from '../types';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
 import { getApiUrl } from '../config/api';
+import { useDirectoryMention } from '../hooks/useDirectoryMention';
+import DirectoryMentionDropdown from '../components/DirectoryMentionDropdown';
 
 const AUTO_DETECT_KEY = 'autoDetectRelatedTasks';
 
@@ -50,6 +52,7 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
     : null;
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const descriptionMention = useDirectoryMention(description, setDescription);
   const [taskUrl, setTaskUrl] = useState('');
   
   const [subtasks, setSubtasks] = useState<string[]>([]);
@@ -252,9 +255,27 @@ const handleSubmit = async (e: React.FormEvent) => {
           <input type="text" id="title" value={title} onChange={(e) => setTitle(e.target.value)} required className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"/>
         </div>
 
-        <div>
+        <div className="relative">
           <label htmlFor="description" className="block text-sm font-medium text-content-secondary">الوصف</label>
-          <textarea id="description" rows={4} value={description} onChange={(e) => setDescription(e.target.value)} className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"/>
+          <textarea
+            id="description"
+            ref={descriptionMention.ref}
+            rows={4}
+            value={description}
+            onChange={descriptionMention.handleChange}
+            onKeyDown={descriptionMention.handleKeyDown}
+            onBlur={descriptionMention.close}
+            placeholder="اكتب @ للبحث في دليل الهاتف"
+            className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+          <DirectoryMentionDropdown
+            isOpen={descriptionMention.isOpen}
+            loading={descriptionMention.loading}
+            suggestions={descriptionMention.suggestions}
+            activeIndex={descriptionMention.activeIndex}
+            onSelect={descriptionMention.selectSuggestion}
+            onHover={descriptionMention.setActiveIndex}
+          />
         </div>
 
         {!isPersonal && (

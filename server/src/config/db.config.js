@@ -1,7 +1,8 @@
 // src/config/db.config.js
 const path = require('path');
 const fs = require('fs');
-const exeDir = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '../../..');
+const { isPackagedExe, exeDir: getExeDir } = require('../utils/runtimeEnv');
+const exeDir = getExeDir() || path.resolve(__dirname, '../../..');
 const envPath = path.join(exeDir, '.env');
 if (fs.existsSync(envPath)) {
   require('dotenv').config({ path: envPath });
@@ -68,8 +69,8 @@ const config = {
 let env;
 if (process.env.NODE_ENV) {
   env = process.env.NODE_ENV;
-} else if (process.pkg) {
-  // عند تشغيل الملف الناتج عن pkg (bahar.exe) نستخدم إعدادات الإنتاج افتراضياً
+} else if (isPackagedExe()) {
+  // عند تشغيل الملف التنفيذي المُجمَّع (bahar.exe) نستخدم إعدادات الإنتاج افتراضياً
   env = 'production';
 } else {
   // في تشغيل node العادي بدون تحديد NODE_ENV نستخدم إعدادات التطوير
