@@ -12,3 +12,4 @@ Release/
 server/release/
 Production-Release/
 *.exe
+server/directory/

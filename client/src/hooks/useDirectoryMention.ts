@@ -4,11 +4,11 @@ import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent, RefObject } from 'react';
 
 export type DirectoryEntry = {
-  id: number;
+  id: string;
+  source: 'phone' | 'employee';
   label: string;
-  labelEn?: string;
   section?: string;
-  phones: string[];
+  details: string[];
 };
 
 type MentionElement = HTMLInputElement | HTMLTextAreaElement;
@@ -87,7 +87,7 @@ export function useDirectoryMention<T extends MentionElement = HTMLTextAreaEleme
     const cursor = el.selectionStart ?? value.length;
     const before = value.slice(0, triggerStartRef.current);
     const after = value.slice(cursor);
-    const insertText = `${entry.label} (${entry.phones.join('/')})`;
+    const insertText = entry.details.length > 0 ? `${entry.label} (${entry.details.join('/')})` : entry.label;
     const next = `${before}${insertText}${after}`;
     onChange(next);
     close();

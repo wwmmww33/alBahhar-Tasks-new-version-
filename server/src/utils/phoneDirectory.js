@@ -121,11 +121,11 @@ function toDisplayEntry(raw, id) {
   const label = raw.label || raw.labelEn || raw.section || 'بدون اسم';
   const searchText = [raw.label, raw.labelEn, raw.section, ...raw.phones].filter(Boolean).join(' ').toLowerCase();
   return {
-    id,
+    id: `pdf-${id}`,
+    source: 'phone',
     label,
-    labelEn: raw.labelEn,
+    details: raw.phones,
     section: raw.section,
-    phones: raw.phones,
     searchText,
   };
 }
@@ -190,7 +190,7 @@ async function loadDirectoryEntriesAsync() {
   return entries;
 }
 
-async function searchDirectory(query, limit = 20) {
+async function searchPhoneDirectory(query, limit = 20) {
   const entries = await loadDirectoryEntriesAsync();
   const q = String(query || '').trim().toLowerCase();
   if (!q) return entries.slice(0, limit);
@@ -199,9 +199,28 @@ async function searchDirectory(query, limit = 20) {
   return matched.slice(0, limit);
 }
 
+// عدد الإدخالات وأسماء ملفات PDF الحالية — لعرض حالة الدليل لمدير النظام
+async function getPhoneDirectoryStatus() {
+  const dir = resolveDirectoryDir();
+  let files = [];
+  try {
+    files = fs.readdirSync(dir)
+      .filter(f => f.toLowerCase().endsWith('.pdf'))
+      .map(f => {
+        const st = fs.statSync(path.join(dir, f));
+        return { name: f, size: st.size, mtime: st.mtime };
+      });
+  } catch (_) {
+    files = [];
+  }
+  const entries = await loadDirectoryEntriesAsync();
+  return { files, entryCount: entries.length };
+}
+
 module.exports = {
   resolveDirectoryDir,
   parseDirectoryText,
   loadDirectoryEntriesAsync,
-  searchDirectory,
+  searchPhoneDirectory,
+  getPhoneDirectoryStatus,
 };

@@ -247,6 +247,8 @@ const UnifiedTimeline = ({
   // اقتراحات دليل الهاتف عند كتابة "@" في التعليق الجديد أو عنوان المهمة الفرعية الجديدة
   const commentMention = useDirectoryMention(newComment, setNewComment, newCommentRef);
   const subtaskTitleMention = useDirectoryMention(newSubtaskTitle, setNewSubtaskTitle, newSubtaskTitleRef);
+  // مثيل واحد على مستوى المكوّن يكفي لأن تعليقاً واحداً فقط يمكن تحريره في كل مرة (editingCommentId)
+  const editCommentMention = useDirectoryMention(editingCommentValue, setEditingCommentValue, editingCommentRef);
 
   const insertMarkdownSyntax = (prefix: string, suffix: string, placeholder: string) => {
     const el = newCommentRef.current;
@@ -1183,35 +1185,50 @@ const UnifiedTimeline = ({
         <div className="flex-grow">
           <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-lg border border-green-200 dark:border-green-800">
             {isEditing ? (
-              <textarea
-                autoFocus
-                ref={(el) => { (editingCommentRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = el; autoResize(el); }}
-                value={editingCommentValue}
-                onChange={(e) => { setEditingCommentValue(e.target.value); autoResize(e.target); }}
-                onPaste={(e) => { setTimeout(() => autoResize(e.target as HTMLTextAreaElement), 0); }}
-                onBlur={async () => {
-                  const trimmed = editingCommentValue.trim();
-                  if (trimmed && trimmed !== comment.Content) {
-                    await saveComment(comment.CommentID, trimmed);
-                  }
-                  setEditingCommentId(null);
-                }}
-                onKeyDown={async (e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
+              <div className="relative">
+                <textarea
+                  autoFocus
+                  ref={(el) => { (editingCommentRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = el; autoResize(el); }}
+                  value={editingCommentValue}
+                  onChange={(e) => { editCommentMention.handleChange(e); autoResize(e.target); }}
+                  onPaste={(e) => { setTimeout(() => autoResize(e.target as HTMLTextAreaElement), 0); }}
+                  onBlur={async () => {
+                    editCommentMention.close();
                     const trimmed = editingCommentValue.trim();
                     if (trimmed && trimmed !== comment.Content) {
                       await saveComment(comment.CommentID, trimmed);
                     }
                     setEditingCommentId(null);
-                  } else if (e.key === 'Escape') {
-                    e.preventDefault();
-                    setEditingCommentId(null);
-                  }
-                }}
-                className="w-full p-2 border border-content/20 rounded bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm mb-2 resize-none overflow-hidden"
-                rows={3}
-              />
+                  }}
+                  onKeyDown={async (e) => {
+                    if (editCommentMention.isOpen && editCommentMention.suggestions.length > 0) {
+                      editCommentMention.handleKeyDown(e);
+                      return;
+                    }
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      const trimmed = editingCommentValue.trim();
+                      if (trimmed && trimmed !== comment.Content) {
+                        await saveComment(comment.CommentID, trimmed);
+                      }
+                      setEditingCommentId(null);
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setEditingCommentId(null);
+                    }
+                  }}
+                  className="w-full p-2 border border-content/20 rounded bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm mb-2 resize-none overflow-hidden"
+                  rows={3}
+                />
+                <DirectoryMentionDropdown
+                  isOpen={editCommentMention.isOpen}
+                  loading={editCommentMention.loading}
+                  suggestions={editCommentMention.suggestions}
+                  activeIndex={editCommentMention.activeIndex}
+                  onSelect={editCommentMention.selectSuggestion}
+                  onHover={editCommentMention.setActiveIndex}
+                />
+              </div>
             ) : (
               <>
                 <div

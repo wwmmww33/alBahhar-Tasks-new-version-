@@ -1,5 +1,5 @@
 // src/components/DirectoryMentionDropdown.tsx
-import { Phone, Loader2 } from 'lucide-react';
+import { Phone, User, Loader2 } from 'lucide-react';
 import type { DirectoryEntry } from '../hooks/useDirectoryMention';
 
 type Props = {
@@ -38,13 +38,21 @@ const DirectoryMentionDropdown = ({ isOpen, loading, suggestions, activeIndex, o
               i === activeIndex ? 'bg-primary/10' : 'hover:bg-content/5'
             }`}
           >
-            <Phone size={13} className="text-primary shrink-0 mt-0.5" />
+            {entry.source === 'employee' ? (
+              <User size={13} className="text-emerald-600 shrink-0 mt-0.5" />
+            ) : (
+              <Phone size={13} className="text-primary shrink-0 mt-0.5" />
+            )}
             <span className="flex-1 min-w-0">
               <span className="font-semibold text-content block truncate">{entry.label}</span>
               {entry.section && (
                 <span className="text-content-secondary block truncate text-[11px]">{entry.section}</span>
               )}
-              <span className="text-primary block" dir="ltr">{entry.phones.join(' / ')}</span>
+              {entry.details.length > 0 && (
+                <span className={entry.source === 'employee' ? 'text-emerald-600 block truncate' : 'text-primary block'} dir={entry.source === 'phone' ? 'ltr' : undefined}>
+                  {entry.details.join(' / ')}
+                </span>
+              )}
             </span>
           </button>
         ))

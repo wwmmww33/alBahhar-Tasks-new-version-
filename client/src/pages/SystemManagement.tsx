@@ -1,14 +1,15 @@
 // src/pages/SystemManagement.tsx
 import { useState } from 'react';
-import { Building, Users, UserPlus, UserCheck, Megaphone } from 'lucide-react';
+import { Building, Users, UserPlus, UserCheck, Megaphone, BookUser } from 'lucide-react';
 import DepartmentManagement from '../components/DepartmentManagement';
 import UserManagement from '../components/UserManagement';
 import RegistrationRequests from '../components/RegistrationRequests';
 import DelegationManagement from '../components/DelegationManagement';
 import AnnouncementsManagement from '../components/AnnouncementsManagement';
+import DirectoryManagement from '../components/DirectoryManagement';
 import type { CurrentUser } from '../types';
 
-type AdminTab = 'departments' | 'users' | 'requests' | 'delegations' | 'announcements';
+type AdminTab = 'departments' | 'users' | 'requests' | 'delegations' | 'announcements' | 'directory';
 
 const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
@@ -117,6 +118,12 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
             <span>تحديثات النظام</span>
           </button>
         )}
+        {isSystemAdmin && (
+          <button onClick={() => setActiveTab('directory')} className={getTabClassName('directory')}>
+            <BookUser size={20} />
+            <span>دليل الهاتف والموظفين</span>
+          </button>
+        )}
       </div>
 
       {/* محتوى التبويب النشط */}
@@ -126,6 +133,7 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
         {activeTab === 'requests'    && (isSystemAdmin || isDeptManager) && <RegistrationRequests currentUser={currentUser} />}
         {activeTab === 'delegations' && (isSystemAdmin || isDeptManager) && <DelegationManagement currentUser={currentUser} />}
         {activeTab === 'announcements' && isSystemAdmin && <AnnouncementsManagement currentUser={currentUser} />}
+        {activeTab === 'directory' && isSystemAdmin && <DirectoryManagement currentUser={currentUser} />}
       </div>
     </div>
   );
