@@ -242,29 +242,11 @@ const TaskList = ({ currentUser }: TaskListProps) => {
     return !!subtaskVacancyId && subtaskVacancyId === effectiveVacancyId;
   };
 
-  const isCommentByActor = (task: Task) => {
-    return (task.comments || []).some(comment => {
-      const commentVacancyId = String((comment as any).CommentedByVacancyID ?? '').trim();
-      const commentUserId = String((comment as any).UserID ?? '').trim();
-      if (commentVacancyId && effectiveVacancyId && commentVacancyId === effectiveVacancyId) return true;
-      if (commentUserId && actorUserIdStrict && commentUserId === actorUserIdStrict) return true;
-      return false;
-    });
-  };
-
   // المهمة شخصية: IsPersonalTask من الخادم (المصدر الأوثق) أو فحوصات بديلة
   const isPersonalTaskOfActor = (task: Task) => {
     if (task.IsPersonalTask) return true;
     if (task.PersonalOwnerUserID && actorUserIdStrict && task.PersonalOwnerUserID === actorUserIdStrict) return true;
     if (!task.DepartmentID) return true;
-    return false;
-  };
-
-  const isTaskRelatedToActor = (task: Task) => {
-    if (isPersonalTaskOfActor(task)) return true;
-    if (isTaskCreatedByActor(task)) return true;
-    if ((task.subtasks || []).some(st => isSubtaskAssignedToActor(st))) return true;
-    if (isCommentByActor(task)) return true;
     return false;
   };
 
@@ -931,10 +913,11 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   }, [scopeMembers]);
 
   const filteredTasks = tasks.filter(task => {
-    const isRelated = isTaskRelatedToActor(task);
-    if (!isRelated) {
-      return false;
-    }
+    // ملاحظة: لا نُعيد فلترة الصلاحية هنا (isTaskRelatedToActor) — الخادم يُطبّق نطاق الوصول
+    // الكامل والصحيح (منشئ/مُسند له مهمة فرعية/معلّق/نطاق القسم) على كل مصادر tasks الثلاثة
+    // (الجلب الأساسي، تحميل المزيد من المكتملة، والبحث في المكتملة). إعادة فحصها هنا كانت
+    // تُسقط مهاماً صالحة وصل إليها المستخدم عبر نطاق القسم فقط دون مهمة فرعية/تعليق مباشر —
+    // خصوصاً نتائج البحث المطابقة بعنوان المهمة، التي لا تحمل subtasks/comments من الخادم أصلاً.
 
     // فلتر حسب المنشئ
     const matchesFilter = filterMode === 'all' || isTaskCreatedByActor(task);
