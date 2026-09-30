@@ -99867,10 +99867,10 @@ var require_taskController = __commonJS({
         return res.status(400).json({ message: "Search query (q) is required." });
       }
       const searchTerm = q.toLowerCase();
-      const maxTasksToScan = Math.min(Math.max(parseInt(maxScan, 10) || 600, 50), 3e3);
+      const isAdminFlag = isAdmin === "true" || isAdmin === true;
+      const maxTasksToScan = isAdminFlag ? Math.min(Math.max(parseInt(maxScan, 10) || 5e3, 50), 2e4) : null;
       try {
         const ctx = await buildCompletedTasksContext(pool);
-        const isAdminFlag = isAdmin === "true" || isAdmin === true;
         const scopeDepartmentIds = isAdminFlag ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
         const principal = isAdminFlag ? null : await resolvePrincipalForCompletedSearch(pool, userId, ctx);
         if (!isAdminFlag && principal == null && scopeDepartmentIds.length === 0) {
@@ -99902,7 +99902,7 @@ var require_taskController = __commonJS({
           }
           const accessWhere = principalClauses.length > 0 ? `(${principalClauses.join(" OR ")})` : "1 = 0";
           tasksQuery = `
-                SELECT DISTINCT TOP (@MaxScan) t.*,
+                SELECT DISTINCT t.*,
                        creator.${ctx.idName} AS CreatedByName,
                        acted.${ctx.idName}   AS ActedByName,
                        cat.Name              AS CategoryName
@@ -99915,7 +99915,10 @@ var require_taskController = __commonJS({
                 ORDER BY t.CreatedAt DESC
             `;
         }
-        const request = pool.request().input("MaxScan", sql2.Int, maxTasksToScan);
+        const request = pool.request();
+        if (isAdminFlag) {
+          request.input("MaxScan", sql2.Int, maxTasksToScan);
+        }
         if (!isAdminFlag && principal != null) {
           request.input("UserID", ctx.sqlIdType, principal);
         }
@@ -100084,18 +100087,18 @@ var require_taskController = __commonJS({
             request.input(`GrpDept${i}`, sql2.Int, parseInt(dId, 10));
           });
           const inClause = resolvedIds.map((_, i) => `@GrpDept${i}`).join(",");
-          allTasksQuery = isNumericQuery ? `SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+          allTasksQuery = isNumericQuery ? `SELECT DISTINCT t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                    FROM dbo.Tasks t
                    WHERE (t.TaskID = @SearchTaskID OR t.DepartmentID IN (${inClause}))
-                   ORDER BY t.CreatedAt DESC` : `SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                   ORDER BY t.CreatedAt DESC` : `SELECT DISTINCT t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                    FROM dbo.Tasks t
                    WHERE t.DepartmentID IN (${inClause})
                    ORDER BY t.CreatedAt DESC`;
         } else if (isAdminBool) {
-          allTasksQuery = isNumericQuery ? `SELECT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+          allTasksQuery = isNumericQuery ? `SELECT TOP (5000) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                    FROM dbo.Tasks t
                    WHERE t.TaskID = @SearchTaskID
-                   ORDER BY t.CreatedAt DESC` : `SELECT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                   ORDER BY t.CreatedAt DESC` : `SELECT TOP (5000) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                    FROM dbo.Tasks t
                    ORDER BY t.CreatedAt DESC`;
         } else {
@@ -100134,7 +100137,7 @@ var require_taskController = __commonJS({
           }
           const whereClause = isNumericQuery ? `(t.TaskID = @SearchTaskID OR (${accessClauses.join(" OR ")}))` : `(${accessClauses.join(" OR ")})`;
           allTasksQuery = `
-                SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                SELECT DISTINCT t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                 FROM dbo.Tasks t
                 WHERE ${whereClause}
                 ORDER BY t.CreatedAt DESC

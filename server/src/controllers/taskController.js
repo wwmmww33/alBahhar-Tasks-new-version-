@@ -2262,11 +2262,18 @@ exports.searchCompletedTasks = async (req, res) => {
     }
 
     const searchTerm = q.toLowerCase();
-    const maxTasksToScan = Math.min(Math.max(parseInt(maxScan, 10) || 600, 50), 3000);
+    // العناوين والأوصاف مُعمّاة (encrypted) في قاعدة البيانات، فلا يمكن فلترتها بـ SQL LIKE مباشرة —
+    // لذا نجلب المهام المرشّحة ضمن نطاق وصول المستخدم أولاً ثم نفلترها بالنص بعد فك التعمية في الكود.
+    // لغير المدير، نطاق الوصول (منشئ/مُسند له/معلّق + أقسام مديريته) محدود بطبيعته فلا نحدّه بسقف صغير
+    // مرتّب بالأحدث — كان هذا يُسقط بصمت أي مهمة مطابقة أقدم من سقف المسح (600 افتراضياً)، فتظهر المهمة
+    // عبر الرابط المباشر لكنها لا تظهر أبداً بالبحث. سقف المدير فقط يبقى (نطاقه فعلياً كل قاعدة البيانات).
+    const isAdminFlag = isAdmin === 'true' || isAdmin === true;
+    const maxTasksToScan = isAdminFlag
+        ? Math.min(Math.max(parseInt(maxScan, 10) || 5000, 50), 20000)
+        : null;
 
     try {
         const ctx = await buildCompletedTasksContext(pool);
-        const isAdminFlag = isAdmin === 'true' || isAdmin === true;
 
         const scopeDepartmentIds = isAdminFlag ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
         const principal = isAdminFlag ? null : await resolvePrincipalForCompletedSearch(pool, userId, ctx);
@@ -2308,7 +2315,7 @@ exports.searchCompletedTasks = async (req, res) => {
                 : '1 = 0';
 
             tasksQuery = `
-                SELECT DISTINCT TOP (@MaxScan) t.*,
+                SELECT DISTINCT t.*,
                        creator.${ctx.idName} AS CreatedByName,
                        acted.${ctx.idName}   AS ActedByName,
                        cat.Name              AS CategoryName
@@ -2322,7 +2329,10 @@ exports.searchCompletedTasks = async (req, res) => {
             `;
         }
 
-        const request = pool.request().input('MaxScan', sql.Int, maxTasksToScan);
+        const request = pool.request();
+        if (isAdminFlag) {
+            request.input('MaxScan', sql.Int, maxTasksToScan);
+        }
         if (!isAdminFlag && principal != null) {
             request.input('UserID', ctx.sqlIdType, principal);
         }
@@ -2528,23 +2538,26 @@ exports.searchActiveTasks = async (req, res) => {
             resolvedIds.forEach((dId, i) => {
                 request.input(`GrpDept${i}`, sql.Int, parseInt(dId, 10));
             });
+            // نطاق قسم واحد محدود بطبيعته (لا سقف مصطنع يُسقط مهاماً أقدم بصمت — هذا ما كان يمنع
+            // ظهور مهام قديمة مطابقة في البحث رغم إمكانية الوصول إليها مباشرة عبر الرابط)
             const inClause = resolvedIds.map((_, i) => `@GrpDept${i}`).join(',');
             allTasksQuery = isNumericQuery
-                ? `SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                ? `SELECT DISTINCT t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                    FROM dbo.Tasks t
                    WHERE (t.TaskID = @SearchTaskID OR t.DepartmentID IN (${inClause}))
                    ORDER BY t.CreatedAt DESC`
-                : `SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                : `SELECT DISTINCT t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                    FROM dbo.Tasks t
                    WHERE t.DepartmentID IN (${inClause})
                    ORDER BY t.CreatedAt DESC`;
         } else if (isAdminBool) {
+            // نطاق المدير غير محدود فعلياً (كل قاعدة البيانات) — سقف أعلى بكثير كصمام أمان فقط
             allTasksQuery = isNumericQuery
-                ? `SELECT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                ? `SELECT TOP (5000) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                    FROM dbo.Tasks t
                    WHERE t.TaskID = @SearchTaskID
                    ORDER BY t.CreatedAt DESC`
-                : `SELECT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                : `SELECT TOP (5000) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                    FROM dbo.Tasks t
                    ORDER BY t.CreatedAt DESC`;
         } else {
@@ -2594,8 +2607,9 @@ exports.searchActiveTasks = async (req, res) => {
                 ? `(t.TaskID = @SearchTaskID OR (${accessClauses.join(' OR ')}))`
                 : `(${accessClauses.join(' OR ')})`;
 
+            // نطاق مديرية/منشئ واحد محدود بطبيعته — بلا سقف مصطنع (انظر التعليق أعلاه)
             allTasksQuery = `
-                SELECT DISTINCT TOP (800) t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
+                SELECT DISTINCT t.TaskID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt
                 FROM dbo.Tasks t
                 WHERE ${whereClause}
                 ORDER BY t.CreatedAt DESC
