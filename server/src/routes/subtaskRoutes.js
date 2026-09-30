@@ -12,5 +12,7 @@ router.post('/:subtaskId/bulk-assign', subtaskController.bulkAssignSubtask);
 router.patch('/:subtaskId/details', subtaskController.updateSubtaskDetails);
 // تبديل إظهار المهمة الفرعية في التقويم
 router.patch('/:subtaskId/calendar', subtaskController.updateSubtaskCalendarFlag);
+// نقل المهمة الفرعية إلى مهمة أخرى
+router.patch('/:subtaskId/move', subtaskController.moveSubtask);
 router.delete('/:subtaskId', subtaskController.deleteSubtask);
 module.exports = router;

@@ -1,7 +1,10 @@
 // src/components/AnnouncementsBell.tsx
 // جرس تحديثات النظام: يعرض تحديثات ينشرها مدير النظام لجميع المستخدمين، ويمكن العودة إليها في أي وقت
 import { useEffect, useState, useCallback } from 'react';
-import { Megaphone, CheckCheck } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Megaphone, CheckCheck, ListChecks } from 'lucide-react';
+
+const DROPDOWN_LIMIT = 4;
 
 type Announcement = {
   AnnouncementID: number;
@@ -21,6 +24,7 @@ const formatDate = (dateStr: string) =>
   new Date(dateStr).toLocaleDateString('ar-EG-u-nu-latn', { day: 'numeric', month: 'long', year: 'numeric' });
 
 const AnnouncementsBell = ({ userId }: Props) => {
+  const navigate = useNavigate();
   const [items, setItems] = useState<Announcement[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -114,7 +118,7 @@ const AnnouncementsBell = ({ userId }: Props) => {
                 <p className="text-sm">لا توجد تحديثات بعد</p>
               </div>
             ) : (
-              items.map(a => (
+              items.slice(0, DROPDOWN_LIMIT).map(a => (
                 <button
                   key={a.AnnouncementID}
                   onClick={() => toggleExpand(a)}
@@ -138,6 +142,14 @@ const AnnouncementsBell = ({ userId }: Props) => {
               ))
             )}
           </div>
+          {items.length > 0 && (
+            <button
+              onClick={() => { setIsOpen(false); navigate('/announcements'); }}
+              className="p-2.5 text-sm text-primary hover:bg-primary/5 border-t border-content/10 flex items-center justify-center gap-1.5 shrink-0"
+            >
+              <ListChecks size={15} /> عرض كل التحديثات
+            </button>
+          )}
         </div>
       )}
 

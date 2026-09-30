@@ -515,3 +515,93 @@ exports.deleteComment = async (req, res) => {
         res.status(500).send({ message: 'Error deleting comment' });
     }
 };
+
+// نقل تعليق إلى مهمة أخرى — يقتصر على صاحب التعليق (يعالج حالة التسجيل بالخطأ في مهمة غير صحيحة)
+exports.moveComment = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { commentId } = req.params;
+    const { TaskID: newTaskId, UserID, isAdmin } = req.body || {};
+
+    if (!commentId || !UserID) {
+        return res.status(400).json({ message: 'commentId and UserID are required.' });
+    }
+    if (!newTaskId) {
+        return res.status(400).json({ message: 'المهمة الوجهة (TaskID) مطلوبة.' });
+    }
+
+    try {
+        const schemaProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Comments', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasUserID,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'TaskID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifTaskID
+        `);
+        const schema = schemaProbe.recordset[0] || {};
+
+        const existingResult = await pool.request()
+            .input('CommentID', sql.Int, commentId)
+            .query(`
+                SELECT TOP 1
+                    CommentID,
+                    TaskID,
+                    ${schema.HasUserID ? 'UserID' : 'CAST(NULL AS NVARCHAR(255)) AS UserID'},
+                    ActedBy,
+                    ${schema.HasCommentedByVacancy ? 'CommentedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS CommentedByVacancyID'},
+                    ${schema.HasCommentedByUser ? 'CommentedByUserID' : 'CAST(NULL AS NVARCHAR(255)) AS CommentedByUserID'},
+                    ${schema.HasLastActedByVacancy ? 'LastActedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS LastActedByVacancyID'}
+                FROM Comments
+                WHERE CommentID = @CommentID
+            `);
+
+        if (!existingResult.recordset.length) {
+            return res.status(404).json({ message: 'Comment not found.' });
+        }
+
+        const existing = existingResult.recordset[0];
+        const actingUserId = UserID.toString();
+        const actorCandidates = await resolveActorCandidates(pool, actingUserId);
+        const ownsComment = hasCommentOwnership(existing, actorCandidates);
+        const isAdminFlag = isAdmin === true || isAdmin === 'true';
+
+        if (!ownsComment && !isAdminFlag) {
+            return res.status(403).json({ message: 'فقط صاحب التعليق يمكنه نقله إلى مهمة أخرى.' });
+        }
+
+        if (Number(newTaskId) === Number(existing.TaskID)) {
+            return res.status(400).json({ message: 'التعليق موجود بالفعل ضمن هذه المهمة.' });
+        }
+
+        const accessCheck = await checkTaskAccess(pool, newTaskId, actingUserId, isAdminFlag, 'view');
+        if (!accessCheck.hasAccess) {
+            return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية الوصول إلى المهمة الوجهة.' });
+        }
+
+        await pool.request()
+            .input('CommentID', sql.Int, commentId)
+            .input('NewTaskID', sql.Int, newTaskId)
+            .query('UPDATE Comments SET TaskID = @NewTaskID WHERE CommentID = @CommentID');
+
+        if (schema.HasNotifTaskID) {
+            await pool.request()
+                .input('CommentID', sql.Int, commentId)
+                .input('NewTaskID', sql.Int, newTaskId)
+                .query('UPDATE CommentNotifications SET TaskID = @NewTaskID WHERE CommentID = @CommentID');
+        }
+
+        const updatedResult = await pool.request()
+            .input('CommentID', sql.Int, commentId)
+            .query('SELECT * FROM Comments WHERE CommentID = @CommentID');
+
+        const updatedComment = updatedResult.recordset[0];
+        if (updatedComment && updatedComment.Content) {
+            try { updatedComment.Content = encryptionConfig.decrypt(updatedComment.Content); } catch (_) {}
+        }
+
+        res.status(200).json(updatedComment);
+    } catch (error) {
+        console.error('MOVE COMMENT ERROR:', error);
+        res.status(500).json({ message: 'Error moving comment', detail: error.message });
+    }
+};

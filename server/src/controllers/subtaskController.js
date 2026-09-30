@@ -827,6 +827,76 @@ exports.deleteSubtask = async (req, res) => {
     }
 };
 
+// نقل مهمة فرعية إلى مهمة أخرى — يقتصر على منشئ المهمة الفرعية (يعالج حالة التسجيل بالخطأ في مهمة غير صحيحة)
+exports.moveSubtask = async (req, res) => {
+  const pool = req.app.locals.db;
+  const { subtaskId } = req.params;
+  const { TaskID: newTaskId } = req.body;
+
+  if (!newTaskId) {
+    return res.status(400).json({ message: 'المهمة الوجهة (TaskID) مطلوبة.' });
+  }
+
+  try {
+    const schemaProbe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedByVacancy,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedByUser
+    `);
+    const schema = schemaProbe.recordset[0] || {};
+
+    const subtaskResult = await pool.request()
+      .input('SubtaskID', sql.Int, subtaskId)
+      .query(`
+        SELECT TOP 1
+          TaskID,
+          ${schema.HasCreatedByUser ? 'CreatedBy' : 'CAST(NULL AS NVARCHAR(255)) AS CreatedBy'},
+          ${schema.HasCreatedByVacancy ? 'CreatedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS CreatedByVacancyID'}
+        FROM Subtasks
+        WHERE SubtaskID = @SubtaskID
+      `);
+
+    if (!subtaskResult.recordset.length) {
+      return res.status(404).json({ message: 'Subtask not found' });
+    }
+
+    const existing = subtaskResult.recordset[0];
+    const actingUserId = resolveActingUserId(req);
+    const isAdmin = resolveIsAdmin(req);
+    const isCreator = await isActorSubtaskCreator(pool, existing, actingUserId);
+    if (!isCreator && !isAdmin) {
+      return res.status(403).json({ message: 'فقط منشئ المهمة الفرعية يمكنه نقلها إلى مهمة أخرى.' });
+    }
+
+    if (Number(newTaskId) === Number(existing.TaskID)) {
+      return res.status(400).json({ message: 'المهمة الفرعية موجودة بالفعل ضمن هذه المهمة.' });
+    }
+
+    const accessCheck = await checkTaskAccess(pool, newTaskId, actingUserId, isAdmin, 'view');
+    if (!accessCheck.hasAccess) {
+      return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية الوصول إلى المهمة الوجهة.' });
+    }
+
+    await pool.request()
+      .input('SubtaskID', sql.Int, subtaskId)
+      .input('NewTaskID', sql.Int, newTaskId)
+      .query('UPDATE Subtasks SET TaskID = @NewTaskID WHERE SubtaskID = @SubtaskID');
+
+    const updatedResult = await pool.request()
+      .input('SubtaskID', sql.Int, subtaskId)
+      .query('SELECT * FROM Subtasks WHERE SubtaskID = @SubtaskID');
+
+    const updated = updatedResult.recordset[0];
+    if (updated && updated.Title) {
+      try { updated.Title = encryptionConfig.decrypt(updated.Title); } catch (_) {}
+    }
+    res.status(200).json(updated);
+  } catch (error) {
+    console.error('MOVE SUBTASK ERROR:', error);
+    res.status(500).json({ message: 'Error moving subtask', detail: error.message });
+  }
+};
+
 // تحديث نص المهمة الفرعية وتاريخ الاستحقاق
 exports.updateSubtaskDetails = async (req, res) => {
   const pool = req.app.locals.db;

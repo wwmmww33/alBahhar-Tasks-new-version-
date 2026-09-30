@@ -1,5 +1,5 @@
 // src/components/UnifiedTimeline.tsx
-import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy } from 'lucide-react';
+import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy, ArrowRightLeft } from 'lucide-react';
 import React, { useState, useMemo, useCallback, useRef } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
@@ -7,6 +7,7 @@ import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId, resolveUserActorId } from '../utils/actorIdentity';
 import { useDirectoryMention } from '../hooks/useDirectoryMention';
 import DirectoryMentionDropdown from './DirectoryMentionDropdown';
+import MoveToTaskModal from './MoveToTaskModal';
 
 // قائمتا اختيار الساعة (00-23) والدقيقة (00-59) بنظام 24 ساعة مستقل عن الـ locale
 const renderTimeSelects = (
@@ -224,6 +225,10 @@ const UnifiedTimeline = ({
   const [editingReminderMinutes, setEditingReminderMinutes] = useState(15);
   const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
   const [editingCommentValue, setEditingCommentValue] = useState('');
+
+  // نافذة نقل مهمة فرعية/تعليق إلى مهمة أخرى
+  const [movingSubtask, setMovingSubtask] = useState<Subtask | null>(null);
+  const [movingComment, setMovingComment] = useState<Comment | null>(null);
 
   // Bulk Assign State
   const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
@@ -709,6 +714,22 @@ const UnifiedTimeline = ({
     }
   };
 
+  const handleMoveSubtaskConfirm = async (targetTaskId: number) => {
+    if (!movingSubtask) return;
+    const resp = await fetch(`/api/subtasks/${movingSubtask.SubtaskID}/move`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ TaskID: targetTaskId, UserID: actingUserId, isAdmin: currentUser.IsAdmin }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.message || `فشل نقل المهمة الفرعية (${resp.status})`);
+    }
+    onSubtaskUpdate();
+    refreshTasks();
+    refreshNotifications();
+  };
+
   const handleCommentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newComment.trim() || isSubmittingComment) return;
@@ -783,6 +804,21 @@ const UnifiedTimeline = ({
       console.error('Network error while deleting comment:', err);
       alert('تعذر الاتصال بالخادم أثناء حذف التعليق. تأكد من تشغيل الخادم.');
     }
+  };
+
+  const handleMoveCommentConfirm = async (targetTaskId: number) => {
+    if (!movingComment) return;
+    const resp = await fetch(`/api/comments/${movingComment.CommentID}/move`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ TaskID: targetTaskId, UserID: actingUserId, isAdmin: currentUser.IsAdmin }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.message || `فشل نقل التعليق (${resp.status})`);
+    }
+    onCommentsUpdate();
+    refreshNotifications();
   };
 
   const renderSubtaskItem = (subtask: Subtask) => {
@@ -888,6 +924,15 @@ const UnifiedTimeline = ({
                 )}
                 {canDelete && (
                   <button
+                    onClick={() => setMovingSubtask(subtask)}
+                    className="text-content-secondary hover:text-primary"
+                    title="نقل إلى مهمة أخرى"
+                  >
+                    <ArrowRightLeft size={16} />
+                  </button>
+                )}
+                {canDelete && (
+                  <button
                     onClick={() => handleDeleteSubtask(subtask)}
                     className="text-red-500 hover:text-red-700"
                   >
@@ -896,7 +941,7 @@ const UnifiedTimeline = ({
                 )}
               </div>
             </div>
-            
+
             <div className="flex flex-col gap-2 text-xs text-content-secondary">
               <div className="flex flex-wrap gap-4 items-center">
               <div className="flex items-center gap-2">
@@ -1280,6 +1325,15 @@ const UnifiedTimeline = ({
                 )}
               </div>
               <div className="flex items-center gap-2">
+                {canManage && (
+                  <button
+                    onClick={() => setMovingComment(comment)}
+                    className="text-content-secondary hover:text-primary"
+                    title="نقل إلى مهمة أخرى"
+                  >
+                    <ArrowRightLeft size={14} />
+                  </button>
+                )}
                 {canManage && (
                   <button
                     onClick={() => handleDeleteComment(comment)}
@@ -1686,6 +1740,31 @@ const UnifiedTimeline = ({
           </p>
         )}
       </div>
+
+      {movingSubtask && (
+        <MoveToTaskModal
+          itemLabel="المهمة الفرعية"
+          currentTaskId={Number(taskId)}
+          currentTaskTitle={task?.Title || ''}
+          userId={actingUserId}
+          isAdmin={!!currentUser.IsAdmin}
+          deptId={task?.DepartmentID ?? null}
+          onClose={() => setMovingSubtask(null)}
+          onMove={handleMoveSubtaskConfirm}
+        />
+      )}
+      {movingComment && (
+        <MoveToTaskModal
+          itemLabel="التعليق"
+          currentTaskId={Number(taskId)}
+          currentTaskTitle={task?.Title || ''}
+          userId={actingUserId}
+          isAdmin={!!currentUser.IsAdmin}
+          deptId={task?.DepartmentID ?? null}
+          onClose={() => setMovingComment(null)}
+          onMove={handleMoveCommentConfirm}
+        />
+      )}
     </div>
   );
 };

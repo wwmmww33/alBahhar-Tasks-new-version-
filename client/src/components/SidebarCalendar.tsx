@@ -409,11 +409,12 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                 : viewFilter === 'vacancy' ? dayItems.filter(it => String(it.AssignedToID) === String(actorId))
                 : dayItems;
               const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? (personalByDay[d.key] || []) : [];
+              // التعليقات تظهر فقط في فلتر "الكل" أو "الخاص" — لا تُكرَّر في فلترَي "القسم"/"المنصب"
               const visibleComments = viewFilter === 'personal'
                 ? dayComments.filter(c => c.PersonalOwnerUserID)
                 : viewFilter === 'both'
                   ? dayComments
-                  : dayComments.filter(c => !c.PersonalOwnerUserID);
+                  : [];
               // hasEvents = true فقط عندما يوجد محتوى حقيقي يُعرض في المربع
               // (أيام الامتداد الوسطى والنهائية لا تُلوَّن — يكفيها الخط الجانبي)
               const hasEvents =
@@ -527,81 +528,106 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                         }
                       >
                         <div className={`text-xs font-semibold mb-1 ${hasEvents ? 'text-black dark:text-white' : 'text-content'} text-right`}>{d.label}</div>
-                        {visibleShared.length > 0 && (
-                          <div className="space-y-0.5 text-right">
-                            {[...visibleShared]
-                              .sort((a, b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime())
-                              .map((item) => {
-                              const pos = item._spanPos;
-                              const isFirstVisible = firstVisibleDayMap.get(item.SubtaskID) === d.key;
-                              if (pos !== 'single' && !(isFirstVisible && pos === 'start')) return null;
-                              const spanning = pos === 'start';
-                              const color = spanning ? getSpanColor(item.SubtaskID) : undefined;
-                              const timePrefix = formatEventTime(item.DueDate);
-                              const pastDue = isPastDueToday(item.DueDate);
-                              const completed = !!item.IsCompleted;
-                              const isHovered = spanning && hoverInfo?.subtaskId === item.SubtaskID;
-                              const isDimmed = spanning && !!hoverInfo && !isHovered;
-                              return (
-                                <div
-                                  key={`${item.SubtaskID}-${pos}`}
-                                  className={`text-xs transition-opacity duration-150 ${pastDue ? 'opacity-50' : ''}`}
-                                  style={isDimmed ? { opacity: 0.25 } : undefined}
-                                  onMouseEnter={spanning ? handleSpanHover(item.SubtaskID, item.EndDate) : undefined}
-                                  onMouseMove={spanning ? handleSpanHover(item.SubtaskID, item.EndDate) : undefined}
-                                  onMouseLeave={spanning ? clearSpanHover : undefined}
-                                >
-                                  <button
-                                    type="button"
-                                    style={{ color }}
-                                    className={`font-semibold hover:underline cursor-pointer text-right w-full break-words block ${completed ? 'line-through' : ''}`}
-                                    onClick={() => openTaskInNewTab(item.TaskID)}
-                                  >
-                                    {timePrefix}{item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
-                                  </button>
-                                  <div style={{ color }} className="opacity-70">ضمن: {item.TaskTitle}</div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                        {visiblePersonal.length > 0 && (
-                          <div className="space-y-1 text-right mt-1">
-                            {[...visiblePersonal]
-                              .sort((a, b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime())
-                              .map((it) => {
-                                const pastDue = isPastDueToday(it.DueDate);
-                                const completed = !!it.IsCompleted;
+                        {(() => {
+                          // نُدمج المهام الفرعية والمهام الشخصية والتعليقات في قائمة واحدة مرتبة زمنياً بالساعة
+                          type DayEntry =
+                            | { kind: 'shared'; time: number; item: CalendarItemWithSpan; spanning: boolean }
+                            | { kind: 'personal'; time: number; item: CalendarItemWithSpan }
+                            | { kind: 'comment'; time: number; comment: CalendarCommentItem };
+
+                          const sharedRenderable = visibleShared.filter(item => {
+                            const pos = item._spanPos;
+                            const isFirstVisible = firstVisibleDayMap.get(item.SubtaskID) === d.key;
+                            return pos === 'single' || (isFirstVisible && pos === 'start');
+                          });
+
+                          const dayEntries: DayEntry[] = [
+                            ...sharedRenderable.map(item => ({
+                              kind: 'shared' as const,
+                              time: new Date(item.DueDate).getTime(),
+                              item,
+                              spanning: item._spanPos === 'start',
+                            })),
+                            ...visiblePersonal.map(item => ({
+                              kind: 'personal' as const,
+                              time: new Date(item.DueDate).getTime(),
+                              item,
+                            })),
+                            ...visibleComments.map(comment => ({
+                              kind: 'comment' as const,
+                              time: new Date(comment.CreatedAt).getTime(),
+                              comment,
+                            })),
+                          ].sort((a, b) => a.time - b.time);
+
+                          if (dayEntries.length === 0) return null;
+
+                          return (
+                            <div className="space-y-1 text-right">
+                              {dayEntries.map((entry) => {
+                                if (entry.kind === 'shared') {
+                                  const item = entry.item;
+                                  const spanning = entry.spanning;
+                                  const color = spanning ? getSpanColor(item.SubtaskID) : undefined;
+                                  const timePrefix = formatEventTime(item.DueDate);
+                                  const pastDue = isPastDueToday(item.DueDate);
+                                  const completed = !!item.IsCompleted;
+                                  const isHovered = spanning && hoverInfo?.subtaskId === item.SubtaskID;
+                                  const isDimmed = spanning && !!hoverInfo && !isHovered;
+                                  return (
+                                    <div
+                                      key={`s-${item.SubtaskID}-${item._spanPos}`}
+                                      className={`text-xs transition-opacity duration-150 ${pastDue ? 'opacity-50' : ''}`}
+                                      style={isDimmed ? { opacity: 0.25 } : undefined}
+                                      onMouseEnter={spanning ? handleSpanHover(item.SubtaskID, item.EndDate) : undefined}
+                                      onMouseMove={spanning ? handleSpanHover(item.SubtaskID, item.EndDate) : undefined}
+                                      onMouseLeave={spanning ? clearSpanHover : undefined}
+                                    >
+                                      <button
+                                        type="button"
+                                        style={{ color }}
+                                        className={`font-semibold hover:underline cursor-pointer text-right w-full break-words block ${completed ? 'line-through' : ''}`}
+                                        onClick={() => openTaskInNewTab(item.TaskID)}
+                                      >
+                                        {timePrefix}{item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                                      </button>
+                                      <div style={{ color }} className="opacity-70">ضمن: {item.TaskTitle}</div>
+                                    </div>
+                                  );
+                                }
+                                if (entry.kind === 'personal') {
+                                  const it = entry.item;
+                                  const pastDue = isPastDueToday(it.DueDate);
+                                  const completed = !!it.IsCompleted;
+                                  return (
+                                    <div key={`p-${it.SubtaskID}`} className={`text-xs ${pastDue ? 'opacity-50' : ''}`}>
+                                      <button
+                                        type="button"
+                                        onClick={() => openTaskInNewTab(it.TaskID)}
+                                        className={`font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block ${completed ? 'line-through' : ''}`}
+                                      >
+                                        {formatEventTime(it.DueDate)}{it.SubtaskTitle}
+                                      </button>
+                                      <div className="text-[10px] text-emerald-600 dark:text-emerald-400">ضمن: {it.TaskTitle}</div>
+                                    </div>
+                                  );
+                                }
+                                const comment = entry.comment;
                                 return (
-                              <div key={it.SubtaskID} className={`text-xs ${pastDue ? 'opacity-50' : ''}`}>
-                                <button
-                                  type="button"
-                                  onClick={() => openTaskInNewTab(it.TaskID)}
-                                  className={`font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block ${completed ? 'line-through' : ''}`}
-                                >
-                                  {formatEventTime(it.DueDate)}{it.SubtaskTitle}
-                                </button>
-                                <div className="text-[10px] text-emerald-600 dark:text-emerald-400">ضمن: {it.TaskTitle}</div>
-                              </div>
+                                  <button
+                                    key={`c-${comment.CommentID}`}
+                                    type="button"
+                                    onClick={() => openTaskInNewTab(comment.TaskID)}
+                                    className="text-xs font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full block"
+                                  >
+                                    {formatEventTime(comment.CreatedAt)}{comment.Content}
+                                    <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
+                                  </button>
                                 );
                               })}
-                          </div>
-                        )}
-                        {visibleComments.length > 0 && (
-                          <div className="space-y-1 text-right mt-1">
-                            {visibleComments.map((comment) => (
-                              <button
-                                key={comment.CommentID}
-                                type="button"
-                                onClick={() => openTaskInNewTab(comment.TaskID)}
-                                className="text-xs font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
-                              >
-                                {formatEventTime(comment.CreatedAt)}{comment.Content}
-                                <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
-                              </button>
-                            ))}
-                          </div>
-                        )}
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -626,7 +652,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
               ? extraCommentEvents.filter(c => c.PersonalOwnerUserID)
               : viewFilter === 'both'
                 ? extraCommentEvents
-                : extraCommentEvents.filter(c => !c.PersonalOwnerUserID);
+                : [];
 
             if (filteredExtraWork.length === 0 && filteredExtraPersonal.length === 0 && filteredExtraComments.length === 0) return null;
 
