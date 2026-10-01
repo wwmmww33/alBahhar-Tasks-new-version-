@@ -1,6 +1,7 @@
 // src/controllers/calendarController.js
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
+const { isUserManagerOrAdmin } = require('../utils/delegationUtils');
 
 async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
   const normalizedBaseDepartmentId = String(baseDepartmentId || '').trim();
@@ -228,7 +229,10 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
       }
     }
 
-    const userHasDept = !!(resolvedDepartmentId != null || fallbackDepartmentId != null);
+    // رؤية "نفس المديرية" في التقويم محصورة بالمدير العام ومدير القسم — الموظف العادي يرى فقط
+    // مهامه الفرعية وتعليقاته هو (عبر المسار الاحتياطي أدناه)، وليس كل تقويم قسمه.
+    const userHasDept = !!(resolvedDepartmentId != null || fallbackDepartmentId != null)
+      && (await isUserManagerOrAdmin(pool, userId, false));
     const departmentId = resolvedDepartmentId != null
       ? resolvedDepartmentId
       : fallbackDepartmentId;
@@ -838,7 +842,10 @@ exports.getCalendarComments = async (req, res) => {
 
     let items = [];
 
-    if (resolvedDepartmentId != null) {
+    // رؤية "نفس المديرية" محصورة بالمدير العام ومدير القسم — راجع التعليق في getDepartmentCalendarSubtasks
+    const commentsUserHasDeptScope = resolvedDepartmentId != null && (await isUserManagerOrAdmin(pool, userId, false));
+
+    if (commentsUserHasDeptScope) {
       const scopeDepartmentIds = await resolveDirectorateScopeByDepartment(pool, resolvedDepartmentId);
       const scopeParams = scopeDepartmentIds.map((_, i) => `@ScopeDepartmentID${i}`).join(', ');
       const departmentScopeCondition = scopeDepartmentIds.length > 0

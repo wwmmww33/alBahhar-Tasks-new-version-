@@ -26,6 +26,8 @@ router.get('/completed/search', taskController.searchCompletedTasks);
 
 // GET /api/tasks/search (بحث في المهام النشطة — لاستخدامه في ربط المهام)
 router.get('/search', taskController.searchActiveTasks);
+// GET /api/tasks/similar — بحث عن مهام مشابهة العنوان عبر كل قاعدة البيانات (لمنع ازدواجية العمل)
+router.get('/similar', taskController.findSimilarTasks);
 
 // GET /api/tasks/assignment-notifications (للحصول على إشعارات الإسناد)
 router.get('/assignment-notifications', taskController.getAssignmentNotifications);

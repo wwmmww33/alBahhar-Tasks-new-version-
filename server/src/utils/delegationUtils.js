@@ -27,6 +27,47 @@ async function resolveUserIDFromActor(pool, rawActorId) {
   return text;
 }
 
+// يتحقق هل المستخدم مدير عام (Role=1) أو مدير قسم (Role=2) عبر جدول UserRoles — يُستخدم لتحديد
+// من يحتفظ برؤية كاملة لمهام مديريته. الموظف العادي يرى فقط ما أنشأه أو أُسند إليه مباشرة (مهمة
+// فرعية/تعليق)، وليس كل مهام قسمه — بخلاف المدير العام ومدير القسم اللذين يحتفظان بهذه الرؤية.
+async function isUserManagerOrAdmin(pool, rawUserId, isAdminFlag) {
+  if (isAdminFlag === true || isAdminFlag === 'true') return true;
+  const loginId = String(rawUserId || '').trim();
+  if (!loginId) return false;
+  try {
+    const hasTable = await pool.request().query(
+      `SELECT CASE WHEN OBJECT_ID('dbo.UserRoles','U') IS NOT NULL THEN 1 ELSE 0 END AS HasTable`
+    );
+    if (!hasTable.recordset[0]?.HasTable) return false;
+
+    // قد يكون المعرّف VacancyID رقمياً — نحلّه إلى UserID الحقيقي أولاً (UserRoles مفتاحه UserID)
+    const resolvedUserId = await resolveUserIDFromActor(pool, loginId);
+
+    const probe = await pool.request().query(`
+      SELECT
+        CASE WHEN COL_LENGTH('dbo.Users','LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+        CASE WHEN COL_LENGTH('dbo.Users','ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
+    `);
+    const p = probe.recordset[0] || {};
+    const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+    if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+    if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+
+    const result = await pool.request()
+      .input('LoginID', sql.NVarChar, resolvedUserId)
+      .query(`
+        SELECT TOP 1 r.Role
+        FROM dbo.Users u
+        INNER JOIN dbo.UserRoles r ON r.UserID = u.UserID
+        WHERE ${whereParts.join(' OR ')}
+      `);
+    const role = result.recordset[0]?.Role;
+    return role === 1 || role === 2;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function detectIdentitySchema(pool) {
   if (_identitySchemaCache && (Date.now() - _identitySchemaCacheTs < _IDENTITY_SCHEMA_TTL)) {
     return _identitySchemaCache;
@@ -518,7 +559,7 @@ async function hasDirectorateAccessByTaskDepartment(pool, effectiveActorId, task
         SELECT u.DepartmentID, u.Depth
         FROM UpTree u
         INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
-        WHERE ${p.HasDepartmentType ? 'd.[Type] = 1' : '1=0'}
+        WHERE ${p.HasDepartmentType ? `(TRY_CAST(d.[Type] AS INT) = 1 OR LTRIM(RTRIM(CAST(d.[Type] AS NVARCHAR(50)))) = N'1')` : '1=0'}
       ) x
       ORDER BY x.Depth ASC
       OPTION (MAXRECURSION 10)
@@ -605,12 +646,17 @@ async function checkTaskAccess(pool, taskId, userId, isAdmin, requiredPermission
       return { hasAccess: false, reason: 'صلاحية محدودة - عرض وتعديل فقط' };
     }
 
-    const hasDirectorateAccess = await hasDirectorateAccessByTaskDepartment(pool, effectiveActorId, task.DepartmentID, schema);
-    if (hasDirectorateAccess) {
-      if (requiredPermission === 'view' || requiredPermission === 'edit') {
-        return { hasAccess: true, accessType: 'department', task };
+    // رؤية "نفس المديرية" محصورة بالمدير العام ومدير القسم فقط — الموظف العادي يرى فقط
+    // ما أنشأه أو أُسند إليه مباشرة (مهمة فرعية/تعليق)، وليس كل مهام قسمه بحكم عضويته فيه.
+    const isManager = await isUserManagerOrAdmin(pool, userId, isAdmin);
+    if (isManager) {
+      const hasDirectorateAccess = await hasDirectorateAccessByTaskDepartment(pool, effectiveActorId, task.DepartmentID, schema);
+      if (hasDirectorateAccess) {
+        if (requiredPermission === 'view' || requiredPermission === 'edit') {
+          return { hasAccess: true, accessType: 'department', task };
+        }
+        return { hasAccess: false, reason: 'صلاحية محدودة - عرض وتعديل فقط' };
       }
-      return { hasAccess: false, reason: 'صلاحية محدودة - عرض وتعديل فقط' };
     }
 
     const assignmentNotifSchema = await pool.request().query(`
@@ -694,5 +740,6 @@ module.exports = {
   getDelegatorsForUser,
   getDelegatesForUser,
   getTasksQueryWithDelegation,
-  checkTaskAccess
+  checkTaskAccess,
+  isUserManagerOrAdmin
 };

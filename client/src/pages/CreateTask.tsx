@@ -15,7 +15,10 @@ type SuggestedTask = {
   TaskID: number;
   Title: string;
   Description?: string;
-  Status: string;
+  Status?: string;
+  DueDate?: string;
+  hasAccess: boolean;
+  CreatedByName?: string | null;
 };
 
 // تعريف أنواع البيانات التي سنستخدمها
@@ -68,8 +71,7 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
   });
   const [suggestions, setSuggestions] = useState<SuggestedTask[]>([]);
   const [selectedSuggestions, setSelectedSuggestions] = useState<Set<number>>(new Set());
-  const [pendingTaskId, setPendingTaskId] = useState<number | null>(null);
-  const [isLinking, setIsLinking] = useState(false);
+  const [isSearchingSuggestions, setIsSearchingSuggestions] = useState(false);
 
   // جلب قائمة المهام الافتراضية والتصنيفات عند تحميل الصفحة
   useEffect(() => {
@@ -97,6 +99,52 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
     };
     fetchData();
   }, [actorId, currentUser, currentUser.DepartmentID]);
+
+  // البحث عن مهام مشابهة للعنوان عند مغادرة الحقل (blur) — وليس أثناء الكتابة — لتفادي إغراق
+  // السيرفر بطلبات متكررة. يُفعَّل فقط إن كان العنوان طويلاً بما يكفي (3 كلمات فأكثر أو 8 أحرف فأكثر).
+  const handleTitleBlur = async () => {
+    const trimmed = title.trim();
+    const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+    if (!autoDetect || (wordCount < 3 && trimmed.length < 8)) {
+      setSuggestions([]);
+      setSelectedSuggestions(new Set());
+      return;
+    }
+
+    setIsSearchingSuggestions(true);
+    try {
+      let found: SuggestedTask[] = [];
+      if (isPersonal) {
+        // المهام الشخصية: ابحث في المهام الشخصية الخاصة بالمستخدم فقط (دائماً لديه صلاحية وصول إليها)
+        const keyword = trimmed.split(/\s+/).filter(w => w.length > 2)[0] || trimmed;
+        const searchUrl = getApiUrl(`tasks/search?q=${encodeURIComponent(keyword)}&userId=${actorId}&personalOnly=true&originalUserId=${encodeURIComponent(String(currentUser.UserID))}`);
+        const searchRes = await fetch(searchUrl);
+        if (searchRes.ok) {
+          const rows: SuggestedTask[] = await searchRes.json();
+          found = rows.map(r => ({ ...r, hasAccess: true }));
+        }
+      } else {
+        // المهام العادية: ابحث في كل قاعدة البيانات (ليس فقط ضمن نطاق وصولي) لمنع ازدواجية العمل —
+        // المهام التي لا أملك صلاحية الوصول إليها تظهر باسم منشئها فقط لأتواصل معه بدل كشف محتواها.
+        const similarUrl = getApiUrl(`tasks/similar?title=${encodeURIComponent(trimmed)}&userId=${actorId}&isAdmin=${currentUser.IsAdmin}`);
+        const searchRes = await fetch(similarUrl);
+        if (searchRes.ok) {
+          found = await searchRes.json();
+        }
+      }
+      setSuggestions(found.slice(0, 10));
+    } catch (_) {
+      setSuggestions([]);
+    } finally {
+      setIsSearchingSuggestions(false);
+    }
+  };
+
+  // إن غيّر المستخدم العنوان بعد ظهور الاقتراحات، أخفِها حتى يُعيد مغادرة الحقل (منعاً لعرض اقتراحات قديمة لا تطابق العنوان الحالي)
+  useEffect(() => {
+    setSuggestions([]);
+    setSelectedSuggestions(new Set());
+  }, [title]);
 
   // دالة يتم استدعاؤها عند تغيير المهمة الافتراضية المختارة
   const handleProcedureChange = async (procedureId: string) => {
@@ -159,23 +207,18 @@ const handleSubmit = async (e: React.FormEvent) => {
     }
     const newId: number = result.newTaskId;
 
-    if (autoDetect && title.trim().length >= 3) {
+    // ربط أي مهام مشابهة اخترتها قبل الإنشاء (دون حجب الانتقال للمهمة الجديدة بنافذة وسيطة)
+    if (selectedSuggestions.size > 0) {
       try {
-        const keyword = title.trim().split(/\s+/).filter(w => w.length > 2)[0] || title.trim();
-        // المهام الشخصية: ابحث في المهام الشخصية الخاصة بالمستخدم فقط
-        const deptParam = (!isPersonal && currentUser.DepartmentID != null) ? `&deptId=${currentUser.DepartmentID}` : '';
-        const searchUrl = isPersonal
-          ? getApiUrl(`tasks/search?q=${encodeURIComponent(keyword)}&userId=${actingUserId}&excludeTaskId=${newId}&personalOnly=true&originalUserId=${encodeURIComponent(String(currentUser.UserID))}`)
-          : getApiUrl(`tasks/search?q=${encodeURIComponent(keyword)}&userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}&excludeTaskId=${newId}${deptParam}`);
-        const searchRes = await fetch(searchUrl);
-        if (searchRes.ok) {
-          const found: SuggestedTask[] = await searchRes.json();
-          if (found.length > 0) {
-            setSuggestions(found.slice(0, 10));
-            setPendingTaskId(newId);
-            return;
-          }
-        }
+        await Promise.allSettled(
+          Array.from(selectedSuggestions).map(relId =>
+            fetch(getApiUrl(`tasks/${newId}/related`), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ relatedTaskId: relId, userId: actingUserId }),
+            })
+          )
+        );
       } catch (_) {}
     }
     navigate(`/task/${newId}`);
@@ -189,25 +232,6 @@ const handleSubmit = async (e: React.FormEvent) => {
   const handleAutoDetectToggle = (val: boolean) => {
     setAutoDetect(val);
     try { localStorage.setItem(AUTO_DETECT_KEY, String(val)); } catch (_) {}
-  };
-
-  const handleConfirmLinks = async () => {
-    if (!pendingTaskId) return;
-    if (selectedSuggestions.size > 0) {
-      setIsLinking(true);
-      const actingUserId = actorId;
-      await Promise.allSettled(
-        Array.from(selectedSuggestions).map(relId =>
-          fetch(getApiUrl(`tasks/${pendingTaskId}/related`), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ relatedTaskId: relId, userId: actingUserId }),
-          })
-        )
-      );
-      setIsLinking(false);
-    }
-    navigate(`/task/${pendingTaskId}`);
   };
 
   const toggleSuggestion = (id: number) => {
@@ -252,7 +276,56 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         <div>
           <label htmlFor="title" className="block text-sm font-medium text-content-secondary">عنوان المهمة</label>
-          <input type="text" id="title" value={title} onChange={(e) => setTitle(e.target.value)} required className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"/>
+          <input type="text" id="title" value={title} onChange={(e) => setTitle(e.target.value)} onBlur={handleTitleBlur} required className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"/>
+
+          {/* مهام مشابهة تُكتشف عند مغادرة الحقل — قبل إنشاء المهمة، لتجنب تكرار مهام موجودة بالفعل */}
+          {isSearchingSuggestions && (
+            <p className="mt-2 text-xs text-content-secondary">جاري البحث عن مهام مشابهة...</p>
+          )}
+          {!isSearchingSuggestions && suggestions.length > 0 && (
+            <div className="mt-2 border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/10 rounded-md p-3 space-y-2">
+              <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
+                وجد النظام مهاماً قد تكون مشابهة — إن كانت إحداها نفس المهمة، افتحها بدل تكرارها:
+              </p>
+              <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                {suggestions.map(t => t.hasAccess ? (
+                  <div
+                    key={t.TaskID}
+                    className={`flex items-center gap-2 p-1.5 rounded border text-xs transition-colors ${
+                      selectedSuggestions.has(t.TaskID) ? 'border-primary bg-primary/5' : 'border-content/10 bg-white dark:bg-gray-800'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedSuggestions.has(t.TaskID)}
+                      onChange={() => toggleSuggestion(t.TaskID)}
+                      title="ربط هذه المهمة بالمهمة الجديدة بعد إنشائها"
+                      className="w-3.5 h-3.5 accent-primary flex-shrink-0 cursor-pointer"
+                    />
+                    <span className="flex-1 min-w-0 truncate text-content">{t.Title}</span>
+                    {t.Status && <span className="text-content-secondary flex-shrink-0">{STATUS_LABELS[t.Status] || t.Status}</span>}
+                    <a
+                      href={`/task/${t.TaskID}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary hover:underline flex-shrink-0 font-semibold"
+                      title="فتح المهمة في تبويب جديد"
+                    >
+                      فتح ↗
+                    </a>
+                  </div>
+                ) : (
+                  <div key={t.TaskID} className="p-1.5 rounded border border-amber-300 dark:border-amber-700 bg-white dark:bg-gray-800 text-xs">
+                    <span className="block text-content truncate">{t.Title}</span>
+                    <span className="block text-amber-700 dark:text-amber-400 mt-0.5">
+                      لا تملك صلاحية الوصول إليها
+                      {t.CreatedByName ? ` — تواصل مع (${t.CreatedByName}) إن كانت نفس المهمة` : '.'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="relative">
@@ -354,8 +427,8 @@ const handleSubmit = async (e: React.FormEvent) => {
             className="w-4 h-4 accent-primary cursor-pointer"
           />
           <label htmlFor="autoDetect" className="text-sm text-content cursor-pointer select-none">
-            اقتراح مهام مرتبطة تلقائياً عند الإنشاء
-            <span className="text-xs text-content-secondary mr-2">(يبحث في المهام الموجودة بناءً على عنوان المهمة)</span>
+            اقتراح مهام مشابهة بعد كتابة العنوان
+            <span className="text-xs text-content-secondary mr-2">(يبحث عند مغادرة حقل العنوان لتجنب تكرار مهام موجودة بالفعل)</span>
           </label>
         </div>
 
@@ -364,82 +437,6 @@ const handleSubmit = async (e: React.FormEvent) => {
         </button>
       </form>
       {message && <div className={`mt-4 p-4 rounded-md text-sm ${message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>{message.text}</div>}
-
-      {/* نافذة اقتراح المهام المرتبطة */}
-      {pendingTaskId && suggestions.length > 0 && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" dir="rtl">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-2xl">
-            <h2 className="text-lg font-bold text-content mb-1">مهام مرتبطة مقترحة</h2>
-            <p className="text-sm text-content-secondary mb-4">
-              وجد النظام مهاماً قد تكون مرتبطة بـ "<span className="font-medium text-content">{title}</span>".<br />
-              اختر المهام التي تريد ربطها ثم اضغط إنشاء، أو اضغط إلغاء للعودة إلى نموذج الإنشاء.
-            </p>
-            <div className="space-y-2 max-h-64 overflow-y-auto mb-5">
-              {suggestions.map(t => (
-                <div
-                  key={t.TaskID}
-                  className={`flex items-center gap-3 p-2 rounded-md border transition-colors ${
-                    selectedSuggestions.has(t.TaskID)
-                      ? 'border-primary bg-primary/5'
-                      : 'border-content/10 bg-content/5'
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedSuggestions.has(t.TaskID)}
-                    onChange={() => toggleSuggestion(t.TaskID)}
-                    className="w-4 h-4 accent-primary flex-shrink-0 cursor-pointer"
-                  />
-                  <span
-                    className="flex-1 min-w-0 cursor-pointer select-none"
-                    onClick={() => toggleSuggestion(t.TaskID)}
-                  >
-                    <span className="block text-sm text-content truncate">{t.Title}</span>
-                    {t.Description?.trim() && (
-                      <span className="block text-xs text-content-secondary truncate">
-                        {t.Description.trim().slice(0, 80)}{t.Description.trim().length > 80 ? '...' : ''}
-                      </span>
-                    )}
-                  </span>
-                  <span className="text-xs text-content-secondary flex-shrink-0">
-                    {STATUS_LABELS[t.Status] || t.Status}
-                  </span>
-                  <a
-                    href={`/task/${t.TaskID}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-primary hover:underline flex-shrink-0"
-                    title="فتح المهمة في تبويب جديد"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    عرض ↗
-                  </a>
-                </div>
-              ))}
-            </div>
-            <div className="flex gap-3 justify-end">
-              <button
-                onClick={() => {
-                  setPendingTaskId(null);
-                  setSuggestions([]);
-                  setSelectedSuggestions(new Set());
-                }}
-                disabled={isLinking}
-                className="px-4 py-2 text-sm text-content bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50 transition-colors"
-              >
-                إلغاء
-              </button>
-              <button
-                onClick={handleConfirmLinks}
-                disabled={isLinking}
-                className="px-4 py-2 text-sm bg-primary text-white rounded hover:bg-primary/90 disabled:bg-gray-400 transition-colors"
-              >
-                {isLinking ? 'جاري الإنشاء...' : 'إنشاء'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

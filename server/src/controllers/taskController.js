@@ -2,7 +2,7 @@
 const sql = require('mssql');
 const fs = require('fs');
 const path = require('path');
-const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission, hasActiveDelegation } = require('../utils/delegationUtils');
+const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission, hasActiveDelegation, isUserManagerOrAdmin } = require('../utils/delegationUtils');
 const encryptionConfig = require('../config/encryption.config');
 const { detectSchema, resolveVacancyId, ensureVacancyId, resolveActorContext, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
 
@@ -380,7 +380,9 @@ async function canUserViewTaskByListRules(pool, rawUserId, isAdmin, taskId) {
         accessParts.splice(1, 0, `t.${taskAssignedCol} = @UserID`);
     }
 
-    const scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, rawUserId);
+    // رؤية "نفس المديرية" محصورة بالمدير العام ومدير القسم — راجع نفس القيد في checkTaskAccess
+    const isManager = await isUserManagerOrAdmin(pool, rawUserId, isAdmin);
+    const scopeDepartmentIds = isManager ? await resolveUserDirectorateDepartmentIds(pool, rawUserId) : [];
     if (scopeDepartmentIds.length > 0) {
         const scopeParams = scopeDepartmentIds.map((_, index) => `@ScopeDepartmentID${index}`).join(', ');
         accessParts.push(`t.DepartmentID IN (${scopeParams})`);
@@ -524,12 +526,13 @@ exports.getTaskActivity = async (req, res) => {
             ? `COALESCE(t.UpdatedAt, t.CreatedAt)`
             : `t.CreatedAt`;
 
-        // المدير: يرى مهام قسمه كاملاً.
-        // الموظف: يرى فقط المهام التي أنشأها أو تحتوي على مهمة فرعية مسنَدة له.
+        // المدير العام ومدير القسم: يريان مهام القسم/المديرية كاملة.
+        // الموظف العادي: يرى فقط المهام التي أنشأها أو تحتوي على مهمة فرعية مسنَدة له.
         let accessCondition;
         let adminDeptParams = {}; // {paramName: intValue} — تُضاف للـ request بعد إنشائه
 
-        if (isAdmin === 'true') {
+        const activityIsManager = isAdmin === 'true' || await isUserManagerOrAdmin(pool, userId, false);
+        if (activityIsManager) {
             let scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, userId);
             let fallbackDeptId = null;
             if (scopeDepartmentIds.length === 0) {
@@ -1931,7 +1934,13 @@ exports.getTasksWithNotifications = async (req, res) => {
             }
         })();
 
-        const scopeDepartmentIds = isAdmin === 'true' ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
+        // رؤية "نفس المديرية" محصورة بالمدير العام ومدير القسم — الموظف العادي يرى فقط ما أنشأه
+        // أو أُسند إليه مباشرة (مهمة فرعية/تعليق)، وليس كل مهام قسمه بحكم عضويته فيه فقط.
+        const scopeDepartmentIds = isAdmin === 'true'
+            ? []
+            : (await isUserManagerOrAdmin(pool, userId, false))
+                ? await resolveUserDirectorateDepartmentIds(pool, userId)
+                : [];
 
         // دعم المهام الشخصية — القيمة متوفرة من الـ probe المُخزَّن
         const hasPersonalColN = !!s.HasPersonalOwner;
@@ -2147,7 +2156,12 @@ exports.getCompletedTasks = async (req, res) => {
         const hasPersonalColC = !!(personalColProbeC.recordset[0]?.Len);
         const personalUserIdC = await resolveUserIDFromActor(pool, userId);
 
-        const scopeDepartmentIds = isAdminFlag ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
+        // رؤية "نفس المديرية" محصورة بالمدير العام ومدير القسم (راجع التعليق في getTasksWithNotifications)
+        const scopeDepartmentIds = isAdminFlag
+            ? []
+            : (await isUserManagerOrAdmin(pool, userId, false))
+                ? await resolveUserDirectorateDepartmentIds(pool, userId)
+                : [];
         const deptScopeClause = scopeDepartmentIds.length > 0
             ? ` OR t.DepartmentID IN (${scopeDepartmentIds.map((_, i) => `@ScopeDepartmentID${i}`).join(', ')})`
             : '';
@@ -2275,7 +2289,12 @@ exports.searchCompletedTasks = async (req, res) => {
     try {
         const ctx = await buildCompletedTasksContext(pool);
 
-        const scopeDepartmentIds = isAdminFlag ? [] : await resolveUserDirectorateDepartmentIds(pool, userId);
+        // رؤية "نفس المديرية" محصورة بالمدير العام ومدير القسم (راجع التعليق في getTasksWithNotifications)
+        const scopeDepartmentIds = isAdminFlag
+            ? []
+            : (await isUserManagerOrAdmin(pool, userId, false))
+                ? await resolveUserDirectorateDepartmentIds(pool, userId)
+                : [];
         const principal = isAdminFlag ? null : await resolvePrincipalForCompletedSearch(pool, userId, ctx);
 
         // لو كان الموظف عادياً ولم نتمكن من تحديد هويته في المخطط الحالي
@@ -2530,9 +2549,13 @@ exports.searchActiveTasks = async (req, res) => {
             request.input('SearchTaskID', sql.Int, parseInt(term, 10));
         }
 
-        // إذا أرسل العميل deptId — وسّعه لكل أقسام المجموعة المستقلة
+        // إذا أرسل العميل deptId — وسّعه لكل أقسام المجموعة المستقلة (للمدير العام/مدير القسم فقط؛
+        // الموظف العادي يستخدم مسار المنشئ/المُسند أدناه حتى عند تمرير deptId من واجهات النقل/الدمج)
         const directDeptId = deptId && /^\d+$/.test(String(deptId)) ? parseInt(String(deptId), 10) : null;
-        if (directDeptId != null) {
+        const isManagerForDeptSearch = directDeptId != null && !isAdminBool
+            ? await isUserManagerOrAdmin(pool, userId, false)
+            : true;
+        if (directDeptId != null && isManagerForDeptSearch) {
             const groupDeptIds = await resolveIndependentDeptGroup(pool, directDeptId);
             const resolvedIds = groupDeptIds.length > 0 ? groupDeptIds : [directDeptId];
             resolvedIds.forEach((dId, i) => {
@@ -2563,11 +2586,14 @@ exports.searchActiveTasks = async (req, res) => {
         } else {
 
             const principal = await resolvePrincipalForCompletedSearch(pool, userId, ctx);
-            const scopeDepartmentIds = await resolveUserDirectorateDepartmentIds(pool, userId);
+            // رؤية "نفس المديرية" محصورة بالمدير العام ومدير القسم — الموظف العادي يبحث فقط ضمن
+            // ما أنشأه أو أُسند إليه مباشرة (راجع التعليق في getTasksWithNotifications)
+            const isManager = await isUserManagerOrAdmin(pool, userId, false);
+            const scopeDepartmentIds = isManager ? await resolveUserDirectorateDepartmentIds(pool, userId) : [];
 
-            // Fallback: إذا لم يُعثر على أقسام المديرية، استخدم القسم المباشر للمستخدم
+            // Fallback: إذا لم يُعثر على أقسام المديرية، استخدم القسم المباشر للمستخدم (للمدير فقط)
             let fallbackDeptId = null;
-            if (scopeDepartmentIds.length === 0) {
+            if (isManager && scopeDepartmentIds.length === 0) {
                 try {
                     const actorCtx = await resolveActorContext(pool, userId);
                     if (actorCtx?.departmentId != null) {
@@ -2697,6 +2723,137 @@ exports.searchActiveTasks = async (req, res) => {
     } catch (err) {
         console.error('searchActiveTasks error:', err.message, err.stack);
         res.status(500).json({ message: err.message || 'خطأ في البحث' });
+    }
+};
+
+// يُقسّم نصاً إلى كلمات (حروف/أرقام بأي لغة) بطول حرفين فأكثر — لحساب تشابه العناوين
+function tokenizeTitle(text) {
+    return String(text || '')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .split(/\s+/)
+        .filter(w => w.length >= 2);
+}
+
+// نسبة تشابه جاكار بين مجموعتي كلمات (0 = لا تشابه، 1 = تطابق تام في الكلمات)
+function jaccardSimilarity(wordsA, wordsB) {
+    const setA = new Set(wordsA);
+    const setB = new Set(wordsB);
+    if (setA.size === 0 || setB.size === 0) return 0;
+    let intersection = 0;
+    for (const w of setA) if (setB.has(w)) intersection++;
+    const union = setA.size + setB.size - intersection;
+    return union === 0 ? 0 : intersection / union;
+}
+
+// نسبة تشابه على مستوى الأحرف (معامل دايس على ثنائيات الأحرف) — تلتقط تشابه العناوين حتى مع
+// اختلاف ترتيب الكلمات أو صيغها (مفرد/جمع، تصريف مختلف)، بخلاف تشابه جاكار القائم على الكلمات فقط.
+function charBigrams(text) {
+    const s = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const grams = [];
+    for (let i = 0; i < s.length - 1; i++) grams.push(s.substring(i, i + 2));
+    return grams;
+}
+function diceCharSimilarity(textA, textB) {
+    const a = charBigrams(textA);
+    const b = charBigrams(textB);
+    if (a.length === 0 || b.length === 0) return 0;
+    const bCounts = new Map();
+    for (const g of b) bCounts.set(g, (bCounts.get(g) || 0) + 1);
+    let matches = 0;
+    for (const g of a) {
+        const count = bCounts.get(g) || 0;
+        if (count > 0) { matches++; bCounts.set(g, count - 1); }
+    }
+    return (2 * matches) / (a.length + b.length);
+}
+
+const SIMILAR_TASK_THRESHOLD = 0.4;
+const SIMILAR_TASK_CHAR_THRESHOLD = 0.6;
+
+// GET /api/tasks/similar?title=...&userId=...&isAdmin=...&excludeTaskId=...
+// يبحث عن مهام مشابهة العنوان عبر كل قاعدة البيانات (وليس ضمن نطاق وصول المستخدم فقط) لمنع
+// ازدواجية العمل. للمهام التي لا يملك المستخدم صلاحية الوصول إليها، تُعاد تسميتها ومنشئها فقط
+// (دون وصف/مهام فرعية/تعليقات) لاقتراح التواصل مع منشئها بدل كشف محتواها.
+exports.findSimilarTasks = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { title, userId, isAdmin, excludeTaskId } = req.query;
+
+    const queryWords = tokenizeTitle(title);
+    if (!userId || queryWords.length === 0) {
+        return res.json([]);
+    }
+
+    try {
+        const ctx = await buildCompletedTasksContext(pool);
+        const isAdminFlag = isAdmin === 'true' || isAdmin === true;
+        const excludeId = excludeTaskId ? parseInt(excludeTaskId, 10) : null;
+
+        // لا يمكن فلترة العناوين المُعمّاة عبر SQL — نجلب كل المهام غير الشخصية (عمود خفيف) ونقارن بعد فك التعمية
+        const personalProbe = await pool.request().query(`SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`);
+        const hasPersonalCol = !!(personalProbe.recordset[0]?.Len);
+        const personalFilter = hasPersonalCol ? 'WHERE PersonalOwnerUserID IS NULL' : '';
+
+        const allResult = await pool.request().query(`
+            SELECT TaskID, Title FROM dbo.Tasks ${personalFilter}
+        `);
+
+        const scored = [];
+        for (const row of allResult.recordset) {
+            if (excludeId && row.TaskID === excludeId) continue;
+            let decryptedTitle = row.Title;
+            try { decryptedTitle = encryptionConfig.decrypt(decryptedTitle); } catch (_) {}
+            const candidateWords = tokenizeTitle(decryptedTitle);
+            const wordScore = jaccardSimilarity(queryWords, candidateWords);
+            const charScore = diceCharSimilarity(title, decryptedTitle);
+            const isSubstring = decryptedTitle && title &&
+                (decryptedTitle.toLowerCase().includes(String(title).toLowerCase().trim()) ||
+                 String(title).toLowerCase().includes(decryptedTitle.toLowerCase().trim()));
+            if (wordScore >= SIMILAR_TASK_THRESHOLD || charScore >= SIMILAR_TASK_CHAR_THRESHOLD || isSubstring) {
+                const score = isSubstring ? 1 : Math.max(wordScore, charScore);
+                scored.push({ TaskID: row.TaskID, Title: decryptedTitle, score });
+            }
+        }
+
+        scored.sort((a, b) => b.score - a.score);
+        const topMatches = scored.slice(0, 5);
+
+        const results = [];
+        for (const match of topMatches) {
+            const accessCheck = await checkTaskAccess(pool, match.TaskID, userId, isAdminFlag, 'view');
+            if (accessCheck.hasAccess) {
+                const full = await pool.request().input('TaskID', sql.Int, match.TaskID).query(`
+                    SELECT t.TaskID, t.Status, t.DueDate
+                    FROM dbo.Tasks t WHERE t.TaskID = @TaskID
+                `);
+                const row = full.recordset[0];
+                results.push({
+                    TaskID: match.TaskID,
+                    Title: match.Title,
+                    Status: row?.Status || '',
+                    DueDate: row?.DueDate || null,
+                    hasAccess: true,
+                });
+            } else {
+                const creatorInfo = await pool.request().input('TaskID', sql.Int, match.TaskID).query(`
+                    SELECT creator.${ctx.idName} AS CreatedByName
+                    FROM dbo.Tasks t
+                    LEFT JOIN ${ctx.idTable} creator ON t.${ctx.taskCreatedCol} = creator.${ctx.idKey}
+                    WHERE t.TaskID = @TaskID
+                `);
+                results.push({
+                    TaskID: match.TaskID,
+                    Title: match.Title,
+                    hasAccess: false,
+                    CreatedByName: creatorInfo.recordset[0]?.CreatedByName || null,
+                });
+            }
+        }
+
+        res.json(results);
+    } catch (err) {
+        console.error('findSimilarTasks error:', err.message, err.stack);
+        res.status(500).json({ message: err.message || 'خطأ في البحث عن مهام مشابهة' });
     }
 };
 
