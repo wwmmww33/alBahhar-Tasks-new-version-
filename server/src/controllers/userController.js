@@ -13,6 +13,66 @@ async function probeUserRolesSchema(pool) {
     return r.recordset[0] || {};
 }
 
+// يتحقق من كون صاحب الطلب "مدير عام" (Role=1) فعلياً عبر قاعدة البيانات — لا يُعتمد على أي
+// قيمة isAdmin قادمة من العميل، لأن هذا التحقق يحمي ميزة حساسة (عرض كلمة مرور بصيغة واضحة).
+async function isSystemAdmin(pool, rawUserId) {
+    const loginId = String(rawUserId || '').trim();
+    if (!loginId) return false;
+    const s = await probeUserRolesSchema(pool);
+    if (!s.HasTable) return false;
+    try {
+        const colProbe = await pool.request().query(`
+            SELECT
+              CASE WHEN COL_LENGTH('dbo.Users','LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
+              CASE WHEN COL_LENGTH('dbo.Users','ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID
+        `);
+        const p = colProbe.recordset[0] || {};
+        const whereParts = [`LTRIM(RTRIM(u.UserID)) = @LoginID`];
+        if (p.HasLegacyUserID) whereParts.push(`LTRIM(RTRIM(u.LegacyUserID)) = @LoginID`);
+        if (p.HasServiceID) whereParts.push(`LTRIM(RTRIM(u.ServiceID)) = @LoginID`);
+        const result = await pool.request()
+            .input('LoginID', sql.NVarChar, loginId)
+            .query(`
+                SELECT TOP 1 r.Role
+                FROM dbo.Users u
+                INNER JOIN dbo.UserRoles r ON r.UserID = u.UserID
+                WHERE ${whereParts.join(' OR ')}
+            `);
+        return result.recordset[0]?.Role === 1;
+    } catch (_) {
+        return false;
+    }
+}
+
+// GET /api/users/:id/password — يعيد كلمة مرور المستخدم بصيغة واضحة (غير مشفّرة)، للمدير العام فقط
+exports.revealPassword = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+    const { id } = req.params;
+    const requesterId = String(req.query?.userId || req.headers['user-id'] || '').trim();
+    try {
+        const allowed = await isSystemAdmin(pool, requesterId);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة للمدير العام فقط.' });
+        }
+        const result = await pool.request().input('UserID', sql.NVarChar, id)
+            .query(`SELECT PasswordHash FROM dbo.Users WHERE UserID = @UserID`);
+        const row = result.recordset[0];
+        if (!row) return res.status(404).json({ message: 'المستخدم غير موجود.' });
+        if (!row.PasswordHash) return res.status(404).json({ message: 'لا توجد كلمة مرور محفوظة لهذا المستخدم.' });
+        let password;
+        try {
+            password = encryptionConfig.decrypt(row.PasswordHash);
+        } catch (e) {
+            return res.status(500).json({ message: 'تعذر فك تعمية كلمة المرور.' });
+        }
+        res.json({ Password: password });
+    } catch (err) {
+        console.error('REVEAL PASSWORD ERROR:', err);
+        res.status(500).json({ message: 'خطأ في الخادم.', detail: err.message });
+    }
+};
+
 exports.getAllUsers = async (req, res) => {
     const pool = req.app.locals.db;
     if (!pool) {

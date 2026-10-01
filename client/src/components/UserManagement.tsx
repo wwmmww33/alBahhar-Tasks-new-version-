@@ -1,6 +1,6 @@
 // src/components/UserManagement.tsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { Edit, Power, PowerOff } from 'lucide-react';
+import { Edit, Power, PowerOff, Eye, X } from 'lucide-react';
 import type { CurrentUser } from '../types';
 
 type User = {
@@ -29,6 +29,9 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const [editingServiceId, setEditingServiceId] = useState('');
   const [encryptingPasswords, setEncryptingPasswords] = useState(false);
   const [encryptResult, setEncryptResult] = useState<string | null>(null);
+  const [revealingUserId, setRevealingUserId] = useState<string | null>(null);
+  const [revealedPassword, setRevealedPassword] = useState<{ user: User; password: string } | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -89,6 +92,24 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
       body: JSON.stringify({ role }),
     });
     fetchData();
+  };
+
+  const handleRevealPassword = async (user: User) => {
+    setRevealError(null);
+    setRevealingUserId(user.UserID);
+    try {
+      const res = await fetch(`/api/users/${user.UserID}/password?userId=${encodeURIComponent(currentUser?.UserID || '')}`);
+      const data = await res.json();
+      if (res.ok) {
+        setRevealedPassword({ user, password: data.Password });
+      } else {
+        setRevealError(data.message || 'تعذر عرض كلمة المرور.');
+      }
+    } catch {
+      setRevealError('خطأ في الاتصال بالخادم.');
+    } finally {
+      setRevealingUserId(null);
+    }
   };
 
   const handleEncryptPasswords = async () => {
@@ -175,9 +196,21 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
                       )}
                     </td>
                     <td className="p-2">
-                      <button onClick={() => { setEditingUser(user); setNewPassword(''); setEditingServiceId(user.ServiceID || ''); }} className="text-primary hover:text-primary-dark">
-                        <Edit size={16}/>
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => { setEditingUser(user); setNewPassword(''); setEditingServiceId(user.ServiceID || ''); }} className="text-primary hover:text-primary-dark" title="تعديل">
+                          <Edit size={16}/>
+                        </button>
+                        {currentUserRole === 1 && (
+                          <button
+                            onClick={() => handleRevealPassword(user)}
+                            disabled={revealingUserId === user.UserID}
+                            className="text-amber-600 hover:text-amber-700 disabled:opacity-50"
+                            title="عرض كلمة المرور (بدون تشفير)"
+                          >
+                            <Eye size={16}/>
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -228,6 +261,37 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
           </form>
         )}
       </div>
+
+      {revealError && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-red-600 text-white text-sm px-4 py-2 rounded-md shadow-lg z-50">
+          {revealError}
+          <button onClick={() => setRevealError(null)} className="mr-3 underline">إغلاق</button>
+        </div>
+      )}
+
+      {revealedPassword && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setRevealedPassword(null)}>
+          <div
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-sm"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-content">كلمة مرور المستخدم</h3>
+              <button onClick={() => setRevealedPassword(null)} className="text-content-secondary hover:text-content">
+                <X size={18}/>
+              </button>
+            </div>
+            <p className="text-sm text-content-secondary mb-1">{revealedPassword.user.FullName}</p>
+            <p className="text-xs font-mono text-content-secondary mb-4">{revealedPassword.user.ServiceID}</p>
+            <div className="bg-content/5 border border-content/10 rounded-md px-3 py-2 font-mono text-sm break-all select-all">
+              {revealedPassword.password}
+            </div>
+            <p className="text-xs text-amber-700 dark:text-amber-400 mt-3">
+              هذه الميزة متاحة للمدير العام فقط. تجنّب مشاركة كلمات المرور خارج هذه الصفحة.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

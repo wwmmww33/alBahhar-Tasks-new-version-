@@ -8,6 +8,7 @@ router.get('/', userController.getAllUsers);
 router.post('/bootstrap-admin', userController.bootstrapAdmin);
 router.post('/encrypt-passwords', userController.encryptExistingPasswords);
 router.put('/:id/role', userController.setUserRole);
+router.get('/:id/password', userController.revealPassword);
 router.put('/:id', userController.updateUser);
 
 // المسارات الخاصة بطلبات التسجيل
