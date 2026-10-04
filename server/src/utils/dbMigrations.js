@@ -733,4 +733,27 @@ module.exports = {
       throw err;
     }
   },
+
+  // عمود يسمح لمدير القسم بإيقاف ظهور أحداث التقويم المُعلَّمة (ShowInCalendar) لمنصب معيّن —
+  // الأحداث الخاصة بالمستخدم نفسه (أُسندت إليه أو من تعليقه) تبقى تظهر له دائماً بغض النظر عن هذا العلم.
+  ensureVacancyCalendarBroadcastColumn: async function ensureVacancyCalendarBroadcastColumn(pool) {
+    try {
+      const check = await pool.request().query(
+        `SELECT COL_LENGTH('dbo.JobVacancies','ExcludeFromCalendarBroadcast') AS Len`
+      );
+      if (check.recordset[0].Len) {
+        console.log('ℹ️ JobVacancies.ExcludeFromCalendarBroadcast already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        ALTER TABLE dbo.JobVacancies
+        ADD ExcludeFromCalendarBroadcast BIT NOT NULL CONSTRAINT DF_JobVacancies_ExcludeFromCalendarBroadcast DEFAULT(0);
+      `);
+      console.log('✅ Added JobVacancies.ExcludeFromCalendarBroadcast column.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring JobVacancies.ExcludeFromCalendarBroadcast:', err);
+      throw err;
+    }
+  },
 };

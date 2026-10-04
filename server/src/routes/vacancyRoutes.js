@@ -33,6 +33,9 @@ router.post('/', vacancyController.createVacancy);
 // PUT /api/vacancies/:id — تعديل منصب
 router.put('/:id', vacancyController.updateVacancy);
 
+// PATCH /api/vacancies/:id/calendar-broadcast — إيقاف/تفعيل بث أحداث التقويم الجماعية لمنصب (لمدير القسم/العام)
+router.patch('/:id/calendar-broadcast', vacancyController.setCalendarBroadcastExclusion);
+
 // GET /api/vacancies/:id/rank — رتبة منصب محدد
 router.get('/:id/rank', vacancyController.getVacancyRank);
 

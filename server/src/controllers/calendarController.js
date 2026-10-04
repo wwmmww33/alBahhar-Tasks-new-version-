@@ -1,7 +1,26 @@
 // src/controllers/calendarController.js
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
-const { isUserManagerOrAdmin } = require('../utils/delegationUtils');
+
+// يتحقق هل منصب (JobVacancies) معيّن مستثنى من بث أحداث التقويم الجماعي للقسم — يُضبط هذا العلم
+// من قبل مدير القسم (أو المدير العام) عبر صفحة إدارة الأقسام. أحداث المستخدم الشخصية (أُسندت إليه
+// أو من تعليقه) تبقى تظهر له دائماً عبر مسار السقوط الاحتياطي، بغض النظر عن هذا العلم.
+async function isVacancyExcludedFromCalendarBroadcast(pool, vacancyId) {
+  const parsedId = parseInt(String(vacancyId ?? '').trim(), 10);
+  if (!Number.isInteger(parsedId)) return false;
+  try {
+    const colProbe = await pool.request().query(
+      `SELECT COL_LENGTH('dbo.JobVacancies','ExcludeFromCalendarBroadcast') AS Len`
+    );
+    if (!colProbe.recordset[0]?.Len) return false;
+    const result = await pool.request()
+      .input('VacancyID', sql.Int, parsedId)
+      .query(`SELECT ExcludeFromCalendarBroadcast FROM dbo.JobVacancies WHERE VacancyID = @VacancyID`);
+    return !!result.recordset[0]?.ExcludeFromCalendarBroadcast;
+  } catch (_) {
+    return false;
+  }
+}
 
 async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
   const normalizedBaseDepartmentId = String(baseDepartmentId || '').trim();
@@ -229,10 +248,14 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
       }
     }
 
-    // رؤية "نفس المديرية" في التقويم محصورة بالمدير العام ومدير القسم — الموظف العادي يرى فقط
-    // مهامه الفرعية وتعليقاته هو (عبر المسار الاحتياطي أدناه)، وليس كل تقويم قسمه.
+    // الأحداث المُعلَّمة للتقويم (ShowInCalendar) تظهر افتراضياً لكل موظفي القسم — إلا إن عطّل
+    // مدير القسم بثها لمنصب المستخدم بالتحديد، وفي هذه الحالة يسقط المستخدم إلى مسار عناصره
+    // الشخصية فقط (مهامه المُسندة وتعليقاته) عبر السقوط الاحتياطي أدناه.
+    const viewerPositionExcluded = usesVacancySchema && resolvedVacancyId
+      ? await isVacancyExcludedFromCalendarBroadcast(pool, resolvedVacancyId)
+      : false;
     const userHasDept = !!(resolvedDepartmentId != null || fallbackDepartmentId != null)
-      && (await isUserManagerOrAdmin(pool, userId, false));
+      && !viewerPositionExcluded;
     const departmentId = resolvedDepartmentId != null
       ? resolvedDepartmentId
       : fallbackDepartmentId;
@@ -842,8 +865,15 @@ exports.getCalendarComments = async (req, res) => {
 
     let items = [];
 
-    // رؤية "نفس المديرية" محصورة بالمدير العام ومدير القسم — راجع التعليق في getDepartmentCalendarSubtasks
-    const commentsUserHasDeptScope = resolvedDepartmentId != null && (await isUserManagerOrAdmin(pool, userId, false));
+    // راجع التعليق في getDepartmentCalendarSubtasks: البث الجماعي مفعّل افتراضياً لكل القسم،
+    // إلا إن عطّله مدير القسم لمنصب المُعلّق بالتحديد.
+    const viewerVacancyIdForComments = usesVacancySchema && currentProfile?.VacancyID != null
+      ? String(currentProfile.VacancyID).trim()
+      : null;
+    const commentsViewerPositionExcluded = viewerVacancyIdForComments
+      ? await isVacancyExcludedFromCalendarBroadcast(pool, viewerVacancyIdForComments)
+      : false;
+    const commentsUserHasDeptScope = resolvedDepartmentId != null && !commentsViewerPositionExcluded;
 
     if (commentsUserHasDeptScope) {
       const scopeDepartmentIds = await resolveDirectorateScopeByDepartment(pool, resolvedDepartmentId);

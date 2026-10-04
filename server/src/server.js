@@ -122,6 +122,7 @@ const {
   ensureSubtaskDueDateTimeType,
   ensureSubtaskReminderColumns,
   ensureAnnouncementsTables,
+  ensureVacancyCalendarBroadcastColumn,
 } = require('./utils/dbMigrations');
 
 
@@ -296,6 +297,13 @@ const startServer = async () => {
       await ensureAnnouncementsTables(pool);
     } catch (announcementsErr) {
       console.error('⚠️ Database migration (Announcements) failed. Server continues running.', announcementsErr);
+    }
+
+    // --- عمود إيقاف بث التقويم لمنصب معيّن ---
+    try {
+      await ensureVacancyCalendarBroadcastColumn(pool);
+    } catch (calBroadcastErr) {
+      console.error('⚠️ Database migration (JobVacancies.ExcludeFromCalendarBroadcast) failed. Server continues running.', calBroadcastErr);
     }
 
     app.listen(port, '0.0.0.0', () => {

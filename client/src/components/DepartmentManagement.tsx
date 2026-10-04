@@ -1,6 +1,6 @@
 // src/components/DepartmentManagement.tsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { Trash2, Edit, Plus, ChevronDown, ChevronRight, Briefcase, UserPlus, UserMinus, X, Check, Upload, FileSpreadsheet } from 'lucide-react';
+import { Trash2, Edit, Plus, ChevronDown, ChevronRight, Briefcase, UserPlus, UserMinus, X, Check, Upload, FileSpreadsheet, Calendar, CalendarOff } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import type { CurrentUser } from '../types';
 
@@ -27,6 +27,7 @@ type Vacancy = {
   CurrentUserID?: string | null;
   CurrentUserFullName?: string | null;
   CurrentUserIsActive?: boolean | number | null;
+  ExcludeFromCalendarBroadcast?: boolean | number | null;
 };
 
 type RankRow = {
@@ -439,6 +440,30 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
     } catch (err) {
       console.error(err);
       alert('حدث خطأ أثناء حفظ المنصب');
+    }
+  };
+
+  const handleToggleCalendarBroadcast = async (vacancy: Vacancy) => {
+    const nextExcluded = !vacancy.ExcludeFromCalendarBroadcast;
+    try {
+      const res = await fetch(`/api/vacancies/${vacancy.VacancyID}/calendar-broadcast`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser?.UserID,
+          isAdmin: !!currentUser?.IsAdmin,
+          excluded: nextExcluded,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.message || 'تعذّر تحديث إعداد التقويم لهذا المنصب');
+        return;
+      }
+      if (selectedDepartmentId != null) fetchVacancies(selectedDepartmentId);
+    } catch (err) {
+      console.error(err);
+      alert('حدث خطأ أثناء تحديث إعداد التقويم');
     }
   };
 
@@ -1001,6 +1026,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                     <th className="p-2 font-semibold">الرتبة</th>
                     <th className="p-2 font-semibold">الحالة</th>
                     <th className="p-2 font-semibold">الموظف الحالي</th>
+                    <th className="p-2 font-semibold">بث التقويم</th>
                     <th className="p-2 font-semibold">إجراءات</th>
                   </tr>
                 </thead>
@@ -1072,6 +1098,22 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                             ) : (
                               <span className="text-xs text-gray-400">شاغر</span>
                             )}
+                          </td>
+                          <td className="p-2">
+                            <button
+                              onClick={() => handleToggleCalendarBroadcast(v)}
+                              className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${
+                                v.ExcludeFromCalendarBroadcast
+                                  ? 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                                  : 'bg-green-100 text-green-700 hover:bg-green-200'
+                              }`}
+                              title={v.ExcludeFromCalendarBroadcast
+                                ? 'بث أحداث التقويم الجماعية موقوف لهذا المنصب — اضغط للتفعيل'
+                                : 'بث أحداث التقويم الجماعية مفعّل لهذا المنصب — اضغط للإيقاف'}
+                            >
+                              {v.ExcludeFromCalendarBroadcast ? <CalendarOff size={14}/> : <Calendar size={14}/>}
+                              {v.ExcludeFromCalendarBroadcast ? 'موقّف' : 'مفعّل'}
+                            </button>
                           </td>
                           <td className="p-2 flex gap-2">
                             {isEditingThis ? (

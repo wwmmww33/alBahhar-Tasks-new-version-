@@ -3,6 +3,8 @@
 // كل العمليات دفاعية: تفحص وجود الجداول والأعمدة الاختيارية قبل استخدامها.
 
 const sql = require('mssql');
+const { isUserManagerOrAdmin } = require('../utils/delegationUtils');
+const { resolveActorContext, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
 
 // ---- فحص دفعي لوجود الأعمدة/الجداول المهمّة ----
 async function probeVacancySchema(pool) {
@@ -192,6 +194,13 @@ exports.listByDepartment = async (req, res) => {
         const isActiveCol = s.HasVacIsActive ? 'jv.IsActive' : 'CAST(1 AS BIT)';
         const deptFilter  = s.HasVacDept ? 'jv.DepartmentID = @DepartmentID' : '1 = 0';
 
+        const calBroadcastProbe = await pool.request().query(
+            `SELECT COL_LENGTH('dbo.JobVacancies','ExcludeFromCalendarBroadcast') AS Len`
+        );
+        const calBroadcastCol = calBroadcastProbe.recordset[0]?.Len
+            ? 'jv.ExcludeFromCalendarBroadcast'
+            : 'CAST(0 AS BIT)';
+
         // فحص وجود جدول Ranks وعمود Name فيه
         const ranksProbe = await pool.request().query(`
             SELECT
@@ -242,7 +251,8 @@ exports.listByDepartment = async (req, res) => {
                     jv.VacancyID,
                     ${nameCol}     AS Name,
                     ${isActiveCol} AS IsActive,
-                    ${s.HasVacDept ? 'jv.DepartmentID' : 'CAST(NULL AS INT) AS DepartmentID'}
+                    ${s.HasVacDept ? 'jv.DepartmentID' : 'CAST(NULL AS INT) AS DepartmentID'},
+                    ${calBroadcastCol} AS ExcludeFromCalendarBroadcast
                     ${rankSelect}
                     ${selectUser}
                 FROM dbo.JobVacancies jv
@@ -256,6 +266,71 @@ exports.listByDepartment = async (req, res) => {
     } catch (err) {
         console.error('LIST VACANCIES BY DEPARTMENT ERROR:', err);
         res.status(500).send({ message: 'Error fetching vacancies', detail: err.message });
+    }
+};
+
+// ---- PATCH /api/vacancies/:id/calendar-broadcast ----
+// يتحكم مدير القسم (أو المدير العام) بإيقاف/تفعيل بث أحداث التقويم الجماعية (ShowInCalendar) على
+// منصب معيّن ضمن قسمه. أحداث المستخدم الشخصية (المُسندة إليه أو من تعليقه) تبقى تظهر له دائماً
+// بغض النظر عن هذا الإعداد — راجع calendarController.js: isVacancyExcludedFromCalendarBroadcast.
+exports.setCalendarBroadcastExclusion = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+
+    const vacancyId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(vacancyId)) {
+        return res.status(400).json({ message: 'id must be an integer.' });
+    }
+
+    const { userId, isAdmin, excluded } = req.body || {};
+    if (typeof excluded !== 'boolean') {
+        return res.status(400).json({ message: 'excluded must be a boolean.' });
+    }
+    if (!userId) {
+        return res.status(401).json({ message: 'User identification is required.' });
+    }
+
+    try {
+        const isManager = await isUserManagerOrAdmin(pool, userId, isAdmin);
+        if (!isManager) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم أو المدير العام فقط.' });
+        }
+
+        const isRealAdmin = isAdmin === true || isAdmin === 'true';
+        if (!isRealAdmin) {
+            // مدير قسم (وليس مديراً عاماً): يجب أن يكون المنصب الهدف داخل نطاق مديريته فقط
+            const vacancyRow = await pool.request().input('VacancyID', sql.Int, vacancyId)
+                .query('SELECT DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID');
+            const targetDeptId = vacancyRow.recordset[0]?.DepartmentID;
+            if (targetDeptId == null) {
+                return res.status(404).json({ message: 'المنصب غير موجود.' });
+            }
+            const actorCtx = await resolveActorContext(pool, userId);
+            if (!actorCtx?.departmentId) {
+                return res.status(403).json({ message: 'لا يمكن تحديد قسمك.' });
+            }
+            const scopeDeptIds = await resolveIndependentDeptGroup(pool, actorCtx.departmentId);
+            if (!scopeDeptIds.map(String).includes(String(targetDeptId))) {
+                return res.status(403).json({ message: 'هذا المنصب خارج نطاق مديريتك.' });
+            }
+        }
+
+        const colProbe = await pool.request().query(
+            `SELECT COL_LENGTH('dbo.JobVacancies','ExcludeFromCalendarBroadcast') AS Len`
+        );
+        if (!colProbe.recordset[0]?.Len) {
+            return res.status(400).json({ message: 'العمود غير متوفر في قاعدة البيانات. أعد تشغيل الخادم.' });
+        }
+
+        await pool.request()
+            .input('VacancyID', sql.Int, vacancyId)
+            .input('Excluded', sql.Bit, excluded ? 1 : 0)
+            .query('UPDATE dbo.JobVacancies SET ExcludeFromCalendarBroadcast = @Excluded WHERE VacancyID = @VacancyID');
+
+        res.status(200).json({ message: 'تم تحديث إعداد التقويم للمنصب.', ExcludeFromCalendarBroadcast: excluded });
+    } catch (err) {
+        console.error('SET CALENDAR BROADCAST EXCLUSION ERROR:', err);
+        res.status(500).json({ message: 'خطأ في الخادم', detail: err.message });
     }
 };
 
