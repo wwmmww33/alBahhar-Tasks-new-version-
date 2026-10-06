@@ -2,6 +2,8 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 const { hasActiveDelegation, checkTaskAccess } = require('../utils/delegationUtils');
+const { setItemDepartmentShares, canManageDepartmentSharingAndBroadcast, resolveAllowedBroadcastChain } = require('../utils/departmentSharing');
+const { resolveActorContext } = require('../utils/vacancyResolver');
 
 async function resolveActorId(pool, rawUserId, prefersVacancy) {
     const loginId = String(rawUserId || '').trim();
@@ -153,7 +155,7 @@ function hasCommentOwnership(existingComment, actorCandidates) {
 
 exports.createComment = async (req, res) => {
     const pool = req.app.locals.db;
-    const { TaskID, UserID, ActedBy, Content, CreatedAt, ShowInCalendar, isAdmin } = req.body;
+    const { TaskID, UserID, ActedBy, Content, ShowInCalendar, CalendarDisplayDate, isAdmin } = req.body;
 
     if (!TaskID || !UserID || !Content) {
         return res.status(400).json({ message: 'TaskID, UserID, and Content are required.' });
@@ -167,6 +169,7 @@ exports.createComment = async (req, res) => {
                 CASE WHEN COL_LENGTH('dbo.Comments', 'ActedBy') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentActedBy,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentLastActedByVacancy,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentShowInCalendar,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarDisplayDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentCalendarDisplayDate,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyUser,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifCommentedByVacancy,
@@ -195,12 +198,19 @@ exports.createComment = async (req, res) => {
             return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية إضافة تعليق على هذه المهمة.' });
         }
 
-        // استخدام التاريخ المخصص إذا تم تمريره، وإلا استخدام التوقيت الحالي
-        const commentCreatedAt = CreatedAt ? new Date(CreatedAt) : new Date();
-        
-        // التحقق من صحة التاريخ المخصص
-        if (CreatedAt && isNaN(commentCreatedAt.getTime())) {
-            return res.status(400).json({ message: 'Invalid CreatedAt date format.' });
+        // تاريخ الإنشاء الفعلي دائماً هو اللحظة الحالية — لا يُسمح بتمريره من العميل (راجع
+        // CalendarDisplayDate أدناه لتاريخ الظهور في التقويم، وهو حقل مستقل تماماً).
+        const commentCreatedAt = new Date();
+
+        // تاريخ ظهور التعليق في التقويم: يُستخدم فقط عند تفعيل ShowInCalendar، ويُطلَب من
+        // المستخدم عبر نافذة اختيار تاريخ/وقت في الواجهة. إن غاب لأي سبب نسقط افتراضياً للحظة
+        // الحالية بدلاً من رفض الطلب.
+        let calendarDisplayDate = null;
+        if (ShowInCalendar) {
+            calendarDisplayDate = CalendarDisplayDate ? new Date(CalendarDisplayDate) : new Date();
+            if (isNaN(calendarDisplayDate.getTime())) {
+                return res.status(400).json({ message: 'Invalid CalendarDisplayDate date format.' });
+            }
         }
 
         let actorUserId = null;
@@ -247,6 +257,12 @@ exports.createComment = async (req, res) => {
             insertRequest.input('ShowInCalendar', sql.Bit, ShowInCalendar ? 1 : 0);
             insertColumns.push('ShowInCalendar');
             insertValues.push('@ShowInCalendar');
+        }
+
+        if (schema.HasCommentCalendarDisplayDate) {
+            insertRequest.input('CalendarDisplayDate', sql.DateTime, calendarDisplayDate);
+            insertColumns.push('CalendarDisplayDate');
+            insertValues.push('@CalendarDisplayDate');
         }
 
         await insertRequest.query(`
@@ -343,7 +359,7 @@ exports.createComment = async (req, res) => {
 exports.updateComment = async (req, res) => {
     const pool = req.app.locals.db;
     const { commentId } = req.params;
-    const { Content, UserID, ShowInCalendar, isAdmin } = req.body || {};
+    const { Content, UserID, ShowInCalendar, CalendarDisplayDate, isAdmin } = req.body || {};
 
     if (!commentId || !UserID) {
         return res.status(400).json({ message: 'commentId and UserID are required.' });
@@ -360,7 +376,8 @@ exports.updateComment = async (req, res) => {
                 CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
-                CASE WHEN COL_LENGTH('dbo.Comments', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar
+                CASE WHEN COL_LENGTH('dbo.Comments', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarDisplayDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCalendarDisplayDate
         `);
         const schema = schemaProbe.recordset[0] || {};
 
@@ -413,6 +430,19 @@ exports.updateComment = async (req, res) => {
         if (typeof ShowInCalendar !== 'undefined') {
             request.input('ShowInCalendar', sql.Bit, ShowInCalendar ? 1 : 0);
             setClauses.push('ShowInCalendar = @ShowInCalendar');
+
+            if (schema.HasCalendarDisplayDate) {
+                if (ShowInCalendar) {
+                    const parsed = CalendarDisplayDate ? new Date(CalendarDisplayDate) : new Date();
+                    if (isNaN(parsed.getTime())) {
+                        return res.status(400).json({ message: 'Invalid CalendarDisplayDate date format.' });
+                    }
+                    request.input('CalendarDisplayDate', sql.DateTime, parsed);
+                    setClauses.push('CalendarDisplayDate = @CalendarDisplayDate');
+                } else {
+                    setClauses.push('CalendarDisplayDate = NULL');
+                }
+            }
         }
 
         const setSql = setClauses.join(', ');
@@ -603,5 +633,122 @@ exports.moveComment = async (req, res) => {
     } catch (error) {
         console.error('MOVE COMMENT ERROR:', error);
         res.status(500).json({ message: 'Error moving comment', detail: error.message });
+    }
+};
+
+// PATCH /api/comments/:commentId/department-shares — يحدد منشئ التعليق الجهات المستقلة التي
+// يراها هذا التعليق تحديداً (ضمن القنوات المفتوحة على مستوى المهمة فقط). قابل للتعديل دائماً.
+exports.setCommentDepartmentShares = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { commentId } = req.params;
+    const { UserID, isAdmin, DepartmentIDs } = req.body || {};
+
+    if (!commentId || !UserID) {
+        return res.status(400).json({ message: 'commentId and UserID are required.' });
+    }
+    if (!Array.isArray(DepartmentIDs)) {
+        return res.status(400).json({ message: 'DepartmentIDs must be an array.' });
+    }
+
+    try {
+        const schemaProbe = await pool.request().query(`
+            SELECT
+                CASE WHEN COL_LENGTH('dbo.Comments', 'UserID') IS NOT NULL THEN 1 ELSE 0 END AS HasUserID,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByVacancy,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy
+        `);
+        const schema = schemaProbe.recordset[0] || {};
+
+        const existingResult = await pool.request()
+            .input('CommentID', sql.Int, commentId)
+            .query(`
+                SELECT TOP 1
+                    CommentID,
+                    TaskID,
+                    ${schema.HasUserID ? 'UserID' : 'CAST(NULL AS NVARCHAR(255)) AS UserID'},
+                    ActedBy,
+                    ${schema.HasCommentedByVacancy ? 'CommentedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS CommentedByVacancyID'},
+                    ${schema.HasCommentedByUser ? 'CommentedByUserID' : 'CAST(NULL AS NVARCHAR(255)) AS CommentedByUserID'},
+                    ${schema.HasLastActedByVacancy ? 'LastActedByVacancyID' : 'CAST(NULL AS NVARCHAR(255)) AS LastActedByVacancyID'}
+                FROM Comments
+                WHERE CommentID = @CommentID
+            `);
+        if (!existingResult.recordset.length) {
+            return res.status(404).json({ message: 'Comment not found.' });
+        }
+        const existing = existingResult.recordset[0];
+        const actingUserId = String(UserID);
+        const actorCandidates = await resolveActorCandidates(pool, actingUserId);
+        const ownsComment = hasCommentOwnership(existing, actorCandidates);
+        const isAdminFlag = isAdmin === true || isAdmin === 'true';
+        if (!ownsComment && !isAdminFlag) {
+            return res.status(403).json({ message: 'فقط صاحب التعليق يمكنه تحديد مشاركته مع جهات أخرى.' });
+        }
+
+        const result = await setItemDepartmentShares(pool, {
+            kind: 'comment',
+            itemId: parseInt(commentId, 10),
+            taskId: existing.TaskID,
+            departmentIds: DepartmentIDs,
+            actorUserId: actingUserId,
+        });
+        if (!result.ok) {
+            return res.status(400).json({ message: result.reason });
+        }
+        res.status(200).json({ message: 'تم تحديث مشاركة التعليق.' });
+    } catch (error) {
+        console.error('SET COMMENT DEPARTMENT SHARES ERROR:', error);
+        res.status(500).json({ message: 'Error setting comment department shares', detail: error.message });
+    }
+};
+
+// PATCH /api/comments/:commentId/broadcast-level — رفع بث تعليق معيّن على التقويم لمستوى أعلى من
+// مستوى المهمة الافتراضي. يتطلب صلاحية إدارة المشاركة/البث (مدير القسم أو المفوَّض له)، وليس منشئ
+// التعليق. DepartmentID=null يُعيد التعليق لاتّباع مستوى المهمة.
+exports.setCommentBroadcastLevel = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { commentId } = req.params;
+    const { userId, isAdmin, DepartmentID } = req.body || {};
+
+    if (!commentId || !userId) {
+        return res.status(400).json({ message: 'commentId and userId are required.' });
+    }
+
+    try {
+        const existingResult = await pool.request()
+            .input('CommentID', sql.Int, commentId)
+            .query(`
+                SELECT c.CommentID, c.TaskID, t.DepartmentID AS TaskDepartmentID
+                FROM Comments c
+                INNER JOIN Tasks t ON t.TaskID = c.TaskID
+                WHERE c.CommentID = @CommentID
+            `);
+        if (!existingResult.recordset.length) {
+            return res.status(404).json({ message: 'Comment not found.' });
+        }
+        const existing = existingResult.recordset[0];
+        const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, existing.TaskDepartmentID);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل أو المفوَّض له فقط.' });
+        }
+
+        const deptId = DepartmentID == null ? null : parseInt(DepartmentID, 10);
+        if (deptId != null) {
+            const actorCtx = await resolveActorContext(pool, userId).catch(() => null);
+            const allowedChain = await resolveAllowedBroadcastChain(pool, existing.TaskDepartmentID, actorCtx?.vacancyId ?? null);
+            if (!allowedChain.some(d => d.DepartmentID === deptId)) {
+                return res.status(400).json({ message: 'هذا المستوى غير مسموح به لمستوى البث.' });
+            }
+        }
+        await pool.request()
+            .input('CommentID', sql.Int, commentId)
+            .input('DepartmentID', sql.Int, deptId)
+            .query('UPDATE Comments SET CalendarBroadcastDepartmentID = @DepartmentID WHERE CommentID = @CommentID');
+
+        res.status(200).json({ message: 'تم تحديث مستوى بث التعليق في التقويم.', CalendarBroadcastDepartmentID: deptId });
+    } catch (error) {
+        console.error('SET COMMENT BROADCAST LEVEL ERROR:', error);
+        res.status(500).json({ message: 'Error setting comment broadcast level', detail: error.message });
     }
 };

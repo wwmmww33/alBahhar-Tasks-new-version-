@@ -72,6 +72,40 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
   const [suggestions, setSuggestions] = useState<SuggestedTask[]>([]);
   const [selectedSuggestions, setSelectedSuggestions] = useState<Set<number>>(new Set());
   const [isSearchingSuggestions, setIsSearchingSuggestions] = useState(false);
+  const [canManageBroadcast, setCanManageBroadcast] = useState(false);
+  const [ancestorChain, setAncestorChain] = useState<{ DepartmentID: number; Name: string }[]>([]);
+  const [broadcastDeptId, setBroadcastDeptId] = useState<number | null>(null);
+
+  // مستوى بث التقويم الافتراضي للمهمة — متاح فقط لمدير القسم المستقل أو المفوَّض له
+  useEffect(() => {
+    if (isPersonal || !currentUser?.DepartmentID) {
+      setCanManageBroadcast(false);
+      setAncestorChain([]);
+      setBroadcastDeptId(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const permRes = await fetch(getApiUrl(`departments/${currentUser.DepartmentID}/sharing-permission?userId=${encodeURIComponent(actorId)}&isAdmin=${currentUser.IsAdmin}`));
+        const permData = permRes.ok ? await permRes.json() : { allowed: false };
+        if (cancelled) return;
+        setCanManageBroadcast(!!permData.allowed);
+        if (!permData.allowed) return;
+        const chainRes = await fetch(getApiUrl(`departments/${currentUser.DepartmentID}/ancestor-chain?userId=${encodeURIComponent(actorId)}`));
+        if (chainRes.ok) {
+          const chain = await chainRes.json();
+          if (!cancelled) {
+            setAncestorChain(chain);
+            setBroadcastDeptId(currentUser.DepartmentID);
+          }
+        }
+      } catch (_) {
+        if (!cancelled) setCanManageBroadcast(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isPersonal, currentUser?.DepartmentID, actorId, currentUser.IsAdmin]);
 
   // جلب قائمة المهام الافتراضية والتصنيفات عند تحميل الصفحة
   useEffect(() => {
@@ -193,6 +227,10 @@ const handleSubmit = async (e: React.FormEvent) => {
     ActedBy: _isDelegationMode ? delegateUserId : actingUserId,
     CategoryID: !isPersonal && selectedCategory ? parseInt(selectedCategory) : null,
     URL: taskUrl.trim() || null,
+    ...(!isPersonal && canManageBroadcast && broadcastDeptId != null && broadcastDeptId !== currentUser.DepartmentID
+      ? { CalendarBroadcastDepartmentID: broadcastDeptId }
+      : {}),
+    isAdmin: currentUser.IsAdmin,
   };
 
   try {
@@ -377,6 +415,28 @@ const handleSubmit = async (e: React.FormEvent) => {
           </div>
         )}
 
+        {!isPersonal && canManageBroadcast && ancestorChain.length > 1 && (
+          <div>
+            <label htmlFor="broadcastLevel" className="block text-sm font-medium text-content-secondary">
+              مستوى ظهور مهامها الفرعية وتعليقاتها في التقويم
+            </label>
+            <select
+              id="broadcastLevel"
+              value={broadcastDeptId ?? ''}
+              onChange={(e) => setBroadcastDeptId(parseInt(e.target.value, 10))}
+              className="mt-1 block w-full px-3 py-2 border border-content/20 bg-bkg rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary"
+            >
+              {ancestorChain.map((d, idx) => (
+                <option key={d.DepartmentID} value={d.DepartmentID}>
+                  {idx === 0 ? `قسمي (${d.Name})` : d.Name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-content-secondary">
+              كل مهمة فرعية أو تعليق تُعلّمه لاحقاً "إظهار في التقويم" يتبع هذا المستوى تلقائياً — يمكن تعديله لاحقاً من تفاصيل المهمة.
+            </p>
+          </div>
+        )}
 
         <div>
           <label htmlFor="taskUrl" className="block text-sm font-medium text-content-secondary">الرابط الخارجي (اختياري)</label>

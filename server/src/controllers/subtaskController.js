@@ -2,6 +2,8 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 const { checkTaskAccess } = require('../utils/delegationUtils');
+const { setItemDepartmentShares, canManageDepartmentSharingAndBroadcast, resolveAllowedBroadcastChain } = require('../utils/departmentSharing');
+const { resolveActorContext } = require('../utils/vacancyResolver');
 
 // يحوّل VacancyID رقمي → UserID حقيقي (للتحقق من ملكية المهام الشخصية)
 async function resolveUserIDForPersonal(pool, rawActorId) {
@@ -1062,5 +1064,98 @@ exports.updateSubtaskCalendarFlag = async (req, res) => {
   } catch (error) {
     console.error('Error updating subtask calendar flag:', error);
     return res.status(500).json({ message: 'Error updating subtask calendar flag.' });
+  }
+};
+
+// PATCH /api/subtasks/:subtaskId/department-shares — يحدد منشئ المهمة الفرعية الجهات المستقلة
+// التي تراها هذه المهمة الفرعية تحديداً (ضمن القنوات المفتوحة على مستوى المهمة فقط). قابل للتعديل دائماً.
+exports.setSubtaskDepartmentShares = async (req, res) => {
+  const pool = req.app.locals.db;
+  const { subtaskId } = req.params;
+  const { DepartmentIDs } = req.body || {};
+  const actingUserId = resolveActingUserId(req);
+  const isAdminFlag = resolveIsAdmin(req);
+
+  if (!subtaskId || !actingUserId) {
+    return res.status(400).json({ message: 'subtaskId and userId are required.' });
+  }
+  if (!Array.isArray(DepartmentIDs)) {
+    return res.status(400).json({ message: 'DepartmentIDs must be an array.' });
+  }
+
+  try {
+    const check = await pool.request().input('SubtaskID', sql.Int, subtaskId)
+      .query('SELECT TOP 1 * FROM Subtasks WHERE SubtaskID = @SubtaskID');
+    if (!check.recordset.length) {
+      return res.status(404).json({ message: 'Subtask not found.' });
+    }
+    const subtask = check.recordset[0];
+    const isCreator = await isActorSubtaskCreator(pool, subtask, actingUserId);
+    if (!isCreator && !isAdminFlag) {
+      return res.status(403).json({ message: 'فقط منشئ المهمة الفرعية يمكنه تحديد مشاركتها مع جهات أخرى.' });
+    }
+
+    const result = await setItemDepartmentShares(pool, {
+      kind: 'subtask',
+      itemId: parseInt(subtaskId, 10),
+      taskId: subtask.TaskID,
+      departmentIds: DepartmentIDs,
+      actorUserId: actingUserId,
+    });
+    if (!result.ok) {
+      return res.status(400).json({ message: result.reason });
+    }
+    res.status(200).json({ message: 'تم تحديث مشاركة المهمة الفرعية.' });
+  } catch (error) {
+    console.error('SET SUBTASK DEPARTMENT SHARES ERROR:', error);
+    res.status(500).json({ message: 'Error setting subtask department shares', detail: error.message });
+  }
+};
+
+// PATCH /api/subtasks/:subtaskId/broadcast-level — رفع بث مهمة فرعية معيّنة على التقويم لمستوى
+// أعلى من مستوى المهمة الافتراضي. يتطلب صلاحية إدارة المشاركة/البث، وليس منشئ المهمة الفرعية.
+// DepartmentID=null يُعيدها لاتّباع مستوى المهمة.
+exports.setSubtaskBroadcastLevel = async (req, res) => {
+  const pool = req.app.locals.db;
+  const { subtaskId } = req.params;
+  const { userId, isAdmin, DepartmentID } = req.body || {};
+
+  if (!subtaskId || !userId) {
+    return res.status(400).json({ message: 'subtaskId and userId are required.' });
+  }
+
+  try {
+    const check = await pool.request().input('SubtaskID', sql.Int, subtaskId).query(`
+      SELECT s.SubtaskID, s.TaskID, t.DepartmentID AS TaskDepartmentID
+      FROM Subtasks s
+      INNER JOIN Tasks t ON t.TaskID = s.TaskID
+      WHERE s.SubtaskID = @SubtaskID
+    `);
+    if (!check.recordset.length) {
+      return res.status(404).json({ message: 'Subtask not found.' });
+    }
+    const subtask = check.recordset[0];
+    const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, subtask.TaskDepartmentID);
+    if (!allowed) {
+      return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل أو المفوَّض له فقط.' });
+    }
+
+    const deptId = DepartmentID == null ? null : parseInt(DepartmentID, 10);
+    if (deptId != null) {
+      const actorCtx = await resolveActorContext(pool, userId).catch(() => null);
+      const allowedChain = await resolveAllowedBroadcastChain(pool, subtask.TaskDepartmentID, actorCtx?.vacancyId ?? null);
+      if (!allowedChain.some(d => d.DepartmentID === deptId)) {
+        return res.status(400).json({ message: 'هذا المستوى غير مسموح به لمستوى البث.' });
+      }
+    }
+    await pool.request()
+      .input('SubtaskID', sql.Int, subtaskId)
+      .input('DepartmentID', sql.Int, deptId)
+      .query('UPDATE Subtasks SET CalendarBroadcastDepartmentID = @DepartmentID WHERE SubtaskID = @SubtaskID');
+
+    res.status(200).json({ message: 'تم تحديث مستوى بث المهمة الفرعية في التقويم.', CalendarBroadcastDepartmentID: deptId });
+  } catch (error) {
+    console.error('SET SUBTASK BROADCAST LEVEL ERROR:', error);
+    res.status(500).json({ message: 'Error setting subtask broadcast level', detail: error.message });
   }
 };

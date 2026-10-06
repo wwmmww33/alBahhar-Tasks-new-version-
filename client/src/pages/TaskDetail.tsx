@@ -5,9 +5,10 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import UnifiedTimeline from '../components/UnifiedTimeline';
 import RelatedTasksSection from '../components/RelatedTasksSection';
 import MergeTaskModal from '../components/MergeTaskModal';
+import TaskSharingModal from '../components/TaskSharingModal';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, User, Category, Task, Comment } from '../types';
-import { Trash2, ExternalLink, Copy, Check, ArrowRight, FileDown, GitMerge } from 'lucide-react';
+import { Trash2, ExternalLink, Copy, Check, ArrowRight, FileDown, GitMerge, Share2 } from 'lucide-react';
 import { getApiUrl } from '../config/api';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
@@ -46,6 +47,11 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   const [isUpdatingTitle, setIsUpdatingTitle] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
   const [showMergeModal, setShowMergeModal] = useState(false);
+  const [showSharingModal, setShowSharingModal] = useState(false);
+  const [canManageSharing, setCanManageSharing] = useState(false);
+  const [sharedDepartmentNames, setSharedDepartmentNames] = useState<string[]>([]);
+  const [broadcastLevelName, setBroadcastLevelName] = useState<string | null>(null);
+  const [shareDepartmentNamesById, setShareDepartmentNamesById] = useState<Record<number, string>>({});
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   // في وضع التفويض: actorId = معرّف المفوِّض؛ ActedBy يجب أن يحمل معرّف المفوَّض له
   const _tdAccount = getActiveAccount();
@@ -97,19 +103,20 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
       }
 
       if (taskData) {
-        const [subtasksRes, commentsRes, usersRes, categoriesRes] = await Promise.all([
+        const [subtasksRes, commentsRes, usersRes, categoriesRes, sharesRes] = await Promise.all([
           fetch(getApiUrl(`tasks/${taskId}/subtasks?userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}`)),
           fetch(getApiUrl(`tasks/${taskId}/comments?userId=${actingUserId}&isAdmin=${currentUser.IsAdmin}`)),
           fetch(getApiUrl(`vacancies/department/${currentUser.DepartmentID || taskData.DepartmentID}/scope`)),
-          fetch(getApiUrl(`categories/department/${taskData.DepartmentID}`))
+          fetch(getApiUrl(`categories/department/${taskData.DepartmentID}`)),
+          taskData.DepartmentID != null ? fetch(getApiUrl(`tasks/${taskId}/shares`)) : Promise.resolve(null),
         ]);
-        
+
         // التحقق من صلاحية الوصول للمهام الفرعية
         if (subtasksRes.status === 403) {
           setError('ليس لديك صلاحية لعرض المهام الفرعية لهذه المهمة.');
           return;
         }
-        
+
         // التحقق من صلاحية الوصول للتعليقات
         if (commentsRes.status === 403) {
           setError('ليس لديك صلاحية لعرض التعليقات لهذه المهمة.');
@@ -126,8 +133,49 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
           : [];
         setSubtasks(Array.isArray(subtasksData) ? subtasksData : []);
         setComments(Array.isArray(commentsData) ? commentsData : []);
-        setUsersInDepartment(Array.isArray(usersData) ? usersData : []);
         setCategories(Array.isArray(categoriesData) ? categoriesData : []);
+
+        // تبادل المهام بين المديريات المستقلة: نضيف لقائمة الإسناد منسوبي كل جهة فُتحت لها
+        // قناة مشاركة على هذه المهمة. مديرية المهمة الأصلية (صاحبة المهمة) تُضاف ضمنياً دوماً
+        // أيضاً — حتى لو كان العارض الحالي منتسباً لجهة أخرى اكتسب وصولاً بالإسناد المباشر (نفس
+        // القاعدة المطبّقة في مشاركة العناصر نفسها: جهة المهمة الأصلية متاحة دوماً دون قناة)،
+        // وإلا لا تظهر له خيارات الإسناد لأفراد الجهة الأصلية. كل صف يحمل DepartmentID/DepartmentName
+        // الحقيقيين من الخادم مباشرة (لا حاجة لتخمين الاسم أو إلحاقه كنص بالاسم الكامل).
+        const ownUsers: User[] = Array.isArray(usersData) ? usersData : [];
+        let mergedUsers = ownUsers;
+        const baseDeptId = currentUser.DepartmentID || taskData.DepartmentID;
+        const extraDeptIds = new Set<number>();
+
+        if (sharesRes && sharesRes.ok) {
+          const shares = await sharesRes.json().catch(() => []);
+          if (Array.isArray(shares)) {
+            shares.forEach((s: any) => extraDeptIds.add(s.SharedWithDepartmentID));
+          }
+        }
+        if (taskData.DepartmentID != null && taskData.DepartmentID !== baseDeptId) {
+          extraDeptIds.add(taskData.DepartmentID);
+        }
+
+        if (extraDeptIds.size > 0) {
+          const extraLists = await Promise.all(
+            Array.from(extraDeptIds).map(async (deptId) => {
+              try {
+                const r = await fetch(getApiUrl(`vacancies/department/${deptId}/scope`));
+                if (!r.ok) return [];
+                const list = await r.json().catch(() => []);
+                return Array.isArray(list) ? list : [];
+              } catch (_) { return []; }
+            })
+          );
+          const seen = new Set(ownUsers.map(u => u.UserID));
+          const extraMerged = extraLists.flat().filter((u: User) => {
+            if (seen.has(u.UserID)) return false;
+            seen.add(u.UserID);
+            return true;
+          });
+          mergedUsers = [...ownUsers, ...extraMerged];
+        }
+        setUsersInDepartment(mergedUsers);
       }
     } catch (err: any) { setError(err.message); } 
     finally { setIsLoading(false); }
@@ -266,6 +314,59 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     updateTaskView();
   }, [fetchAllDetails]);
 
+  // التحقق هل صاحب الطلب يملك صلاحية إدارة المشاركة بين المديريات ومستوى بث التقويم لهذه المهمة
+  useEffect(() => {
+    if (!task || !task.DepartmentID || task.PersonalOwnerUserID) {
+      setCanManageSharing(false);
+      return;
+    }
+    let cancelled = false;
+    fetch(getApiUrl(`departments/${task.DepartmentID}/sharing-permission?userId=${encodeURIComponent(actorId)}&isAdmin=${currentUser.IsAdmin}`))
+      .then(r => r.ok ? r.json() : { allowed: false })
+      .then(data => { if (!cancelled) setCanManageSharing(!!data.allowed); })
+      .catch(() => { if (!cancelled) setCanManageSharing(false); });
+    return () => { cancelled = true; };
+  }, [task?.DepartmentID, task?.PersonalOwnerUserID, actorId, currentUser.IsAdmin]);
+
+  // عرض ملخص المشاركة ومستوى بث التقويم — مرئي لأي مُشاهد (معلوماتي فقط، التعديل محصور بالمدير)
+  useEffect(() => {
+    if (!task || !task.DepartmentID || task.PersonalOwnerUserID) {
+      setSharedDepartmentNames([]);
+      setBroadcastLevelName(null);
+      setShareDepartmentNamesById({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const sharesRes = await fetch(getApiUrl(`tasks/${task.TaskID}/shares`));
+        if (sharesRes.ok && !cancelled) {
+          const shares = await sharesRes.json();
+          setSharedDepartmentNames(shares.map((s: any) => s.DepartmentName || `#${s.SharedWithDepartmentID}`));
+        }
+        // خريطة مُعرّف القسم ← اسمه لكل خيارات المشاركة الممكنة (القنوات المفتوحة + قسم المهمة
+        // الأصلي)، تُستخدم لعرض رمز بصري باسم الجهة على كل عنصر مُشارَك في الخط الزمني.
+        const optionsRes = await fetch(getApiUrl(`tasks/${task.TaskID}/share-options`));
+        if (optionsRes.ok && !cancelled) {
+          const options = await optionsRes.json();
+          const map: Record<number, string> = {};
+          options.forEach((o: any) => { map[o.SharedWithDepartmentID] = o.DepartmentName || `#${o.SharedWithDepartmentID}`; });
+          setShareDepartmentNamesById(map);
+        }
+        const chainRes = await fetch(getApiUrl(`departments/${task.DepartmentID}/ancestor-chain?userId=${encodeURIComponent(actorId)}`));
+        if (chainRes.ok && !cancelled) {
+          const chain = await chainRes.json();
+          const targetId = task.CalendarBroadcastDepartmentID ?? task.DepartmentID;
+          const match = chain.find((d: any) => d.DepartmentID === targetId);
+          setBroadcastLevelName(match ? match.Name : null);
+        }
+      } catch (_) {
+        if (!cancelled) { setSharedDepartmentNames([]); setBroadcastLevelName(null); setShareDepartmentNamesById({}); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [task?.TaskID, task?.DepartmentID, task?.PersonalOwnerUserID, task?.CalendarBroadcastDepartmentID, actorId]);
+
   const updateTaskView = async () => {
     if (!taskId) return;
     try {
@@ -282,24 +383,24 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     }
   };
 
-  const handleCommentSubmit = async (commentData: string | { content: string; customDateTime: string | null; showInCalendar?: boolean }) => {
+  const handleCommentSubmit = async (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean }) => {
     setIsSubmittingComment(true);
     try {
         // التعامل مع البيانات القديمة (string) والجديدة (object)
         let content: string;
-        let createdAt: string | null = null;
+        let calendarDisplayDate: string | null = null;
         let showInCalendar = false;
-        
+
         if (typeof commentData === 'string') {
             content = commentData;
         } else {
             content = commentData.content;
-            createdAt = commentData.customDateTime;
+            calendarDisplayDate = commentData.calendarDisplayDate;
             if (typeof commentData.showInCalendar === 'boolean') {
               showInCalendar = commentData.showInCalendar;
             }
         }
-        
+
         const requestBody: any = {
             TaskID: taskId,
             UserID: actorId,
@@ -307,12 +408,12 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             Content: content,
             ShowInCalendar: showInCalendar
         };
-        
-        // إضافة التاريخ المخصص إذا تم تمريره
-        if (createdAt) {
-            requestBody.CreatedAt = createdAt;
+
+        // تاريخ ظهور التعليق في التقويم (مستقل عن تاريخ الإنشاء الفعلي)
+        if (showInCalendar && calendarDisplayDate) {
+            requestBody.CalendarDisplayDate = calendarDisplayDate;
         }
-        
+
         const res = await fetch(getApiUrl('comments'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -404,6 +505,16 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             دمج مهمة
           </button>
           )}
+          {canManageSharing && (
+          <button
+            onClick={() => setShowSharingModal(true)}
+            className="text-xs px-3 py-1.5 rounded-full border border-primary text-primary hover:bg-primary/5 flex items-center gap-1 transition-colors"
+            title="مشاركة المهمة مع مديرية مستقلة أخرى، وضبط مستوى بثها في التقويم"
+          >
+            <Share2 size={12} />
+            مشاركة المهمة
+          </button>
+          )}
           <button
             onClick={() => exportTaskToPdf({
               TaskID: task.TaskID,
@@ -471,6 +582,23 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
           )}
         </div>
       </div>
+
+      {!task.PersonalOwnerUserID && (sharedDepartmentNames.length > 0 || broadcastLevelName) && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+          {sharedDepartmentNames.length > 0 && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary/10 text-primary">
+              <Share2 size={12} />
+              مُشارَكة مع: {sharedDepartmentNames.join('، ')}
+            </span>
+          )}
+          {broadcastLevelName && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">
+              مستوى بث التقويم: {broadcastLevelName}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="flex justify-between items-start">
         <div className="w-full">
           {!!task.PersonalOwnerUserID && (
@@ -797,6 +925,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         onCommentSubmit={handleCommentSubmit}
         isSubmittingComment={isSubmittingComment}
         onCommentsUpdate={fetchAllDetails}
+        shareDepartmentNamesById={shareDepartmentNamesById}
       />
       
       {/* Merge Task Modal */}
@@ -809,6 +938,19 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
           deptId={task.DepartmentID ?? null}
           onClose={() => setShowMergeModal(false)}
           onMerged={() => { setShowMergeModal(false); fetchAllDetails(); refreshTasks(); }}
+        />
+      )}
+
+      {/* Task Sharing Modal */}
+      {showSharingModal && task && task.DepartmentID != null && (
+        <TaskSharingModal
+          taskId={task.TaskID}
+          taskDepartmentId={task.DepartmentID}
+          taskBroadcastDepartmentId={task.CalendarBroadcastDepartmentID ?? null}
+          userId={String(actorId)}
+          isAdmin={!!currentUser.IsAdmin}
+          onClose={() => setShowSharingModal(false)}
+          onBroadcastLevelChanged={() => { fetchAllDetails(); }}
         />
       )}
 

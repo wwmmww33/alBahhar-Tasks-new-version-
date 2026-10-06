@@ -36,6 +36,12 @@ router.put('/:id', vacancyController.updateVacancy);
 // PATCH /api/vacancies/:id/calendar-broadcast — إيقاف/تفعيل بث أحداث التقويم الجماعية لمنصب (لمدير القسم/العام)
 router.patch('/:id/calendar-broadcast', vacancyController.setCalendarBroadcastExclusion);
 
+// PATCH /api/vacancies/:id/sharing-delegation — تفويض منصب بإدارة المشاركة بين المديريات وبث التقويم
+router.patch('/:id/sharing-delegation', vacancyController.setSharingDelegation);
+
+// PATCH /api/vacancies/:id/max-broadcast-level — حد أعلى لمستوى البث خاص بهذا المنصب (المدير العام فقط)
+router.patch('/:id/max-broadcast-level', vacancyController.setVacancyMaxBroadcastLevel);
+
 // GET /api/vacancies/:id/rank — رتبة منصب محدد
 router.get('/:id/rank', vacancyController.getVacancyRank);
 

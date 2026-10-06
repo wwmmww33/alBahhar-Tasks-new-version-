@@ -1,6 +1,126 @@
 // src/controllers/calendarController.js
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
+const { resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
+
+// تبادل المهام/التقويم بين المديريات المستقلة: عنصر (مهمة فرعية/تعليق) قد يُرفَع لمستوى بث أعلى
+// من قسمه الأصلي (مستوى المهمة نفسها، أو تجاوزه لمستوى العنصر تحديداً) — راجع departmentSharing.js.
+// resolveIndependentDeptGroup (بخلاف resolveDirectorateScopeByDepartment المحلية أدناه) لا تتوقف
+// عند حدود الأقسام المستقلة المتداخلة أثناء النزول، وهذا هو المطلوب تحديداً عند البث لمستوى أعلى
+// يشمل عدة مديريات مستقلة معاً.
+async function fetchEscalatedBroadcastItems(pool, {
+  kind, viewerDepartmentId, viewerPositionExcluded, useRange, startDateParam, endDateParam,
+  safeLimit, includeAllFlag, assignedCol, identityTable, identityKey, assignedNameSelect,
+  assignedNameJoins, endDateSelect, hasEndDate,
+}) {
+  if (viewerPositionExcluded || viewerDepartmentId == null) return [];
+  try {
+    const colProbe = await pool.request().query(`
+      SELECT COL_LENGTH('dbo.Subtasks','CalendarBroadcastDepartmentID') AS SubtaskLen,
+             COL_LENGTH('dbo.Tasks','CalendarBroadcastDepartmentID') AS TaskLen
+    `);
+    if (!colProbe.recordset[0]?.SubtaskLen || !colProbe.recordset[0]?.TaskLen) return [];
+
+    const dateRangeWhere = hasEndDate
+      ? `CAST(s.DueDate AS DATE) < @EndDate
+            AND (
+              (CAST(s.EndDate AS DATE) IS NOT NULL AND CAST(s.EndDate AS DATE) >= @StartDate)
+              OR (CAST(s.EndDate AS DATE) IS NULL AND CAST(s.DueDate AS DATE) >= @StartDate)
+            )`
+      : `CAST(s.DueDate AS DATE) >= @StartDate AND CAST(s.DueDate AS DATE) < @EndDate`;
+    const dateFilter = useRange ? dateRangeWhere : `CAST(s.DueDate AS DATE) >= CAST(GETDATE() AS DATE)`;
+
+    const request = pool.request().input('Limit', sql.Int, safeLimit).input('IncludeAllSubtasks', sql.Bit, includeAllFlag ? 1 : 0);
+    if (useRange) request.input('StartDate', sql.Date, startDateParam).input('EndDate', sql.Date, endDateParam);
+
+    const result = await request.query(`
+      SELECT ${useRange ? '' : 'TOP(@Limit)'}
+        s.SubtaskID, s.TaskID, s.Title as SubtaskTitle, s.DueDate, s.IsCompleted,
+        ${endDateSelect}
+        t.Title as TaskTitle, t.DepartmentID, t.PersonalOwnerUserID,
+        s.${assignedCol} as AssignedToID, ${assignedNameSelect},
+        COALESCE(s.CalendarBroadcastDepartmentID, t.CalendarBroadcastDepartmentID) AS EffectiveBroadcastRoot
+      FROM Subtasks s
+      INNER JOIN Tasks t ON s.TaskID = t.TaskID
+      LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey}
+      ${assignedNameJoins}
+      WHERE (@IncludeAllSubtasks = 1 OR s.ShowInCalendar = 1)
+        AND s.DueDate IS NOT NULL
+        AND ${dateFilter}
+        AND t.PersonalOwnerUserID IS NULL
+        AND COALESCE(s.CalendarBroadcastDepartmentID, t.CalendarBroadcastDepartmentID) IS NOT NULL
+      ORDER BY s.DueDate ASC
+    `);
+
+    const rows = result.recordset || [];
+    if (!rows.length) return [];
+
+    const distinctRoots = [...new Set(rows.map(r => r.EffectiveBroadcastRoot))];
+    const reachableRoots = new Set();
+    for (const root of distinctRoots) {
+      const group = await resolveIndependentDeptGroup(pool, root);
+      if (group.map(String).includes(String(viewerDepartmentId))) reachableRoots.add(root);
+    }
+
+    return rows.filter(r => reachableRoots.has(r.EffectiveBroadcastRoot));
+  } catch (_) {
+    return [];
+  }
+}
+
+// نفس fetchEscalatedBroadcastItems لكن للتعليقات
+async function fetchEscalatedBroadcastComments(pool, {
+  viewerDepartmentId, viewerPositionExcluded, useRange, startDateParam, endDateParam,
+  includeAllFlag, commentActorCol,
+}) {
+  if (viewerPositionExcluded || viewerDepartmentId == null) return [];
+  try {
+    const colProbe = await pool.request().query(`
+      SELECT COL_LENGTH('dbo.Comments','CalendarBroadcastDepartmentID') AS CommentLen,
+             COL_LENGTH('dbo.Tasks','CalendarBroadcastDepartmentID') AS TaskLen,
+             COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS CalDisplayDateLen
+    `);
+    if (!colProbe.recordset[0]?.CommentLen || !colProbe.recordset[0]?.TaskLen) return [];
+    const commentDateExpr = colProbe.recordset[0]?.CalDisplayDateLen
+      ? 'COALESCE(c.CalendarDisplayDate, c.CreatedAt)'
+      : 'c.CreatedAt';
+
+    const dateFilter = useRange
+      ? `AND CAST(${commentDateExpr} AS DATE) >= @StartDate AND CAST(${commentDateExpr} AS DATE) < @EndDate`
+      : `AND CAST(${commentDateExpr} AS DATE) >= CAST(GETDATE() AS DATE)`;
+
+    const request = pool.request().input('IncludeAllComments', sql.Bit, includeAllFlag ? 1 : 0);
+    if (useRange) request.input('StartDate', sql.Date, startDateParam).input('EndDate', sql.Date, endDateParam);
+
+    const result = await request.query(`
+      SELECT
+        c.CommentID, c.TaskID, c.${commentActorCol} as UserID, c.Content, ${commentDateExpr} AS CreatedAt,
+        t.Title as TaskTitle, t.PersonalOwnerUserID,
+        COALESCE(c.CalendarBroadcastDepartmentID, t.CalendarBroadcastDepartmentID) AS EffectiveBroadcastRoot
+      FROM Comments c
+      INNER JOIN Tasks t ON c.TaskID = t.TaskID
+      WHERE (@IncludeAllComments = 1 OR c.ShowInCalendar = 1)
+        ${dateFilter}
+        AND t.PersonalOwnerUserID IS NULL
+        AND COALESCE(c.CalendarBroadcastDepartmentID, t.CalendarBroadcastDepartmentID) IS NOT NULL
+      ORDER BY ${commentDateExpr} ASC, c.CommentID ASC
+    `);
+
+    const rows = result.recordset || [];
+    if (!rows.length) return [];
+
+    const distinctRoots = [...new Set(rows.map(r => r.EffectiveBroadcastRoot))];
+    const reachableRoots = new Set();
+    for (const root of distinctRoots) {
+      const group = await resolveIndependentDeptGroup(pool, root);
+      if (group.map(String).includes(String(viewerDepartmentId))) reachableRoots.add(root);
+    }
+
+    return rows.filter(r => reachableRoots.has(r.EffectiveBroadcastRoot));
+  } catch (_) {
+    return [];
+  }
+}
 
 // يتحقق هل منصب (JobVacancies) معيّن مستثنى من بث أحداث التقويم الجماعي للقسم — يُضبط هذا العلم
 // من قبل مدير القسم (أو المدير العام) عبر صفحة إدارة الأقسام. أحداث المستخدم الشخصية (أُسندت إليه
@@ -529,6 +649,29 @@ exports.getDepartmentCalendarSubtasks = async (req, res) => {
       const result = await request.query(query);
       items = result.recordset;
     }
+
+    // تبادل التقويم بين المديريات المستقلة: عناصر رُفع بثّها صراحةً لمستوى أعلى (مهمة أو عنصر
+    // محدد) تُضاف هنا — بغض النظر عن نطاق القسم العادي أعلاه — إن كان قسم المُشاهد داخل ذلك النطاق.
+    try {
+      const escalated = await fetchEscalatedBroadcastItems(pool, {
+        viewerDepartmentId: departmentId,
+        viewerPositionExcluded,
+        useRange, startDateParam, endDateParam, safeLimit, includeAllFlag,
+        assignedCol, identityTable, identityKey, assignedNameSelect, assignedNameJoins,
+        endDateSelect, hasEndDate,
+      });
+      if (escalated.length) {
+        const existingIds = new Set(items.map(it => it.SubtaskID));
+        for (const row of escalated) {
+          if (!existingIds.has(row.SubtaskID)) {
+            delete row.EffectiveBroadcastRoot;
+            items.push(row);
+            existingIds.add(row.SubtaskID);
+          }
+        }
+      }
+    } catch (_) { /* تجاهل دفاعياً — لا يُسقط الاستجابة الأساسية */ }
+
     const decrypted = items.map(r => {
       try { if (r.SubtaskTitle) r.SubtaskTitle = encryptionConfig.decrypt(r.SubtaskTitle); } catch (_) {}
       try { if (r.TaskTitle) r.TaskTitle = encryptionConfig.decrypt(r.TaskTitle); } catch (_) {}
@@ -863,6 +1006,14 @@ exports.getCalendarComments = async (req, res) => {
       ? `AND (t.PersonalOwnerUserID IS NULL OR t.PersonalOwnerUserID = @PersonalUserID)`
       : '';
 
+    // تاريخ ظهور التعليق في التقويم مستقل عن تاريخ إنشائه الفعلي (CreatedAt) — راجع
+    // Comments.CalendarDisplayDate. نستخدمه هنا للفلترة/الترتيب، مع COALESCE احتياطي لـ CreatedAt
+    // دفاعياً (تعليق لم يُهاجَر بعد أو العمود غير متوفر على قاعدة بيانات قديمة لم تُحدَّث).
+    const commentCalDateProbe = await pool.request().query(`SELECT COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS Len`);
+    const commentDateExpr = commentCalDateProbe.recordset[0]?.Len
+      ? 'COALESCE(c.CalendarDisplayDate, c.CreatedAt)'
+      : 'c.CreatedAt';
+
     let items = [];
 
     // راجع التعليق في getDepartmentCalendarSubtasks: البث الجماعي مفعّل افتراضياً لكل القسم،
@@ -894,8 +1045,8 @@ exports.getCalendarComments = async (req, res) => {
       }
 
       const dateFilter = useRange
-        ? `AND CAST(c.CreatedAt AS DATE) >= @StartDate AND CAST(c.CreatedAt AS DATE) < @EndDate`
-        : `AND CAST(c.CreatedAt AS DATE) >= CAST(GETDATE() AS DATE)`;
+        ? `AND CAST(${commentDateExpr} AS DATE) >= @StartDate AND CAST(${commentDateExpr} AS DATE) < @EndDate`
+        : `AND CAST(${commentDateExpr} AS DATE) >= CAST(GETDATE() AS DATE)`;
 
       const result = await request.query(`
         SELECT
@@ -903,7 +1054,7 @@ exports.getCalendarComments = async (req, res) => {
           c.TaskID,
           c.${commentActorCol} as UserID,
           c.Content,
-          c.CreatedAt,
+          ${commentDateExpr} AS CreatedAt,
           t.Title as TaskTitle,
           t.PersonalOwnerUserID
         FROM Comments c
@@ -912,7 +1063,7 @@ exports.getCalendarComments = async (req, res) => {
           ${dateFilter}
           AND (${departmentScopeCondition} ${commentPersonalOrClause})
           ${commentPersonalScopeFilter}
-        ORDER BY c.CreatedAt ASC, c.CommentID ASC
+        ORDER BY ${commentDateExpr} ASC, c.CommentID ASC
       `);
       items = result.recordset;
     } else {
@@ -931,8 +1082,8 @@ exports.getCalendarComments = async (req, res) => {
       }
 
       const dateFilter = useRange
-        ? `AND CAST(c.CreatedAt AS DATE) >= @StartDate AND CAST(c.CreatedAt AS DATE) < @EndDate`
-        : `AND CAST(c.CreatedAt AS DATE) >= CAST(GETDATE() AS DATE)`;
+        ? `AND CAST(${commentDateExpr} AS DATE) >= @StartDate AND CAST(${commentDateExpr} AS DATE) < @EndDate`
+        : `AND CAST(${commentDateExpr} AS DATE) >= CAST(GETDATE() AS DATE)`;
 
       const actorClause = actorId ? `c.${commentActorCol} = @ActorID` : '1=0';
       const result = await request.query(`
@@ -941,7 +1092,7 @@ exports.getCalendarComments = async (req, res) => {
           c.TaskID,
           c.${commentActorCol} as UserID,
           c.Content,
-          c.CreatedAt,
+          ${commentDateExpr} AS CreatedAt,
           t.Title as TaskTitle,
           t.PersonalOwnerUserID
         FROM Comments c
@@ -950,10 +1101,29 @@ exports.getCalendarComments = async (req, res) => {
           AND (${actorClause} ${commentPersonalOrClause})
           ${commentPersonalScopeFilter}
           ${dateFilter}
-        ORDER BY c.CreatedAt ASC, c.CommentID ASC
+        ORDER BY ${commentDateExpr} ASC, c.CommentID ASC
       `);
       items = result.recordset;
     }
+
+    // تبادل التقويم بين المديريات المستقلة — راجع التعليق المقابل في getDepartmentCalendarSubtasks
+    try {
+      const escalated = await fetchEscalatedBroadcastComments(pool, {
+        viewerDepartmentId: resolvedDepartmentId,
+        viewerPositionExcluded: commentsViewerPositionExcluded,
+        useRange, startDateParam, endDateParam, includeAllFlag, commentActorCol,
+      });
+      if (escalated.length) {
+        const existingIds = new Set(items.map(it => it.CommentID));
+        for (const row of escalated) {
+          if (!existingIds.has(row.CommentID)) {
+            delete row.EffectiveBroadcastRoot;
+            items.push(row);
+            existingIds.add(row.CommentID);
+          }
+        }
+      }
+    } catch (_) { /* تجاهل دفاعياً */ }
 
     const decrypted = items.map((r) => {
       try { if (r.Content) r.Content = encryptionConfig.decrypt(r.Content); } catch (_) {}

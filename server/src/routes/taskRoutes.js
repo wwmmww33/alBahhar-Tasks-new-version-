@@ -77,6 +77,15 @@ router.get('/:id/subtasks', taskController.getSubtasksForTask);
 // GET /api/tasks/1/comments (للحصول على التعليقات)
 router.get('/:id/comments', taskController.getCommentsForTask);
 
+// تبادل المهام بين المديريات المستقلة: قناة المشاركة على مستوى المهمة
+router.get('/:id/shares', taskController.listTaskDepartmentShares);
+router.get('/:id/share-options', taskController.listTaskShareOptions);
+router.post('/:id/shares', taskController.openTaskDepartmentShare);
+router.delete('/:id/shares/:departmentId', taskController.closeTaskDepartmentShare);
+
+// مستوى بث التقويم الافتراضي للمهمة (يرثه عناصرها المُعلَّمة للتقويم)
+router.patch('/:id/broadcast-level', taskController.setTaskBroadcastLevel);
+
 // DELETE /api/tasks/1 (لحذف مهمة كاملة مع مهامها الفرعية)
 router.delete('/:id', taskController.deleteTask);
 

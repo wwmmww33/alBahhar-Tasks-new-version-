@@ -33,6 +33,28 @@ type ViewMode = 'month' | 'week' | 'day' | 'year';
 type ViewFilter = 'both' | 'shared' | 'vacancy' | 'personal';
 type ViewLayout = 'list' | 'grid';
 
+// يدمج المهام الفرعية (الوظيفية والشخصية) والتعليقات في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث،
+// بدل عرضها في أقسام منفصلة غير مرتبة بالنسبة لبعضها — يُستخدم في عرض الشبكة وعرض القائمة.
+type DayEntry =
+  | { kind: 'span'; time: number; item: CalendarItemWithSpan }
+  | { kind: 'single'; time: number; item: CalendarItemWithSpan }
+  | { kind: 'personal'; time: number; item: CalendarItemWithSpan }
+  | { kind: 'comment'; time: number; comment: CalendarCommentItem };
+
+function buildDayEntries(
+  spanStarts: CalendarItemWithSpan[],
+  singles: CalendarItemWithSpan[],
+  personal: CalendarItemWithSpan[],
+  comments: CalendarCommentItem[],
+): DayEntry[] {
+  return [
+    ...spanStarts.map(item => ({ kind: 'span' as const, time: new Date(item.DueDate).getTime(), item })),
+    ...singles.map(item => ({ kind: 'single' as const, time: new Date(item.DueDate).getTime(), item })),
+    ...personal.map(item => ({ kind: 'personal' as const, time: new Date(item.DueDate).getTime(), item })),
+    ...comments.map(comment => ({ kind: 'comment' as const, time: new Date(comment.CreatedAt).getTime(), comment })),
+  ].sort((a, b) => a.time - b.time);
+}
+
 type CalendarPageProps = {
   currentUser: CurrentUser;
 };
@@ -561,38 +583,40 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                               ))}
                             </div>
                           )}
-                          {startSpansCell.map(it => (
-                            <button key={`start-${it.SubtaskID}`} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
-                              style={{ color: getSpanColor(it.SubtaskID) }}
-                              className="font-bold hover:underline text-right w-full block break-words"
-                              title={`${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} — ضمن: ${it.TaskTitle}`}>
-                              {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
-                            </button>
-                          ))}
-                          {singlesCell.map(it => (
-                            <button key={`single-${it.SubtaskID}`} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
-                              style={{ color: getSpanColor(it.SubtaskID) }}
-                              className="font-semibold hover:underline text-right w-full block break-words"
-                              title={`${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} — ضمن: ${it.TaskTitle}`}>
-                              {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
-                            </button>
-                          ))}
-                          {[...personalForDay].sort((a,b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime()).map(it => (
-                            <button key={it.SubtaskID} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
-                              className="w-full text-right break-words hover:underline font-semibold"
-                              style={{ color: '#059669' }}>
-                              {formatEventTime(it.DueDate)}★ {it.SubtaskTitle || it.TaskTitle}
-                            </button>
-                          ))}
-                          {commentsForDay.map(cm => (
-                            <button key={cm.CommentID} type="button" onClick={() => openTaskInNewTab(cm.TaskID)}
-                              style={{ color: '#7c3aed' }}
-                              className="hover:underline text-right w-full block break-words"
-                              title={`${cm.Content} — ضمن: ${cm.TaskTitle}`}>
-                              {formatEventTime(cm.CreatedAt)}💬 {cm.Content}
-                              <span className="opacity-60 text-[9px] block">ضمن مهمة: {cm.TaskTitle}</span>
-                            </button>
-                          ))}
+                          {/* نُدمج المهام (الفرعية والشخصية) والتعليقات في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث */}
+                          {buildDayEntries(startSpansCell, singlesCell, personalForDay, commentsForDay).map(entry => {
+                            if (entry.kind === 'span' || entry.kind === 'single') {
+                              const it = entry.item;
+                              return (
+                                <button key={`${entry.kind}-${it.SubtaskID}`} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                                  style={{ color: getSpanColor(it.SubtaskID) }}
+                                  className={`${entry.kind === 'span' ? 'font-bold' : 'font-semibold'} hover:underline text-right w-full block break-words`}
+                                  title={`${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} — ضمن: ${it.TaskTitle}`}>
+                                  {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
+                                </button>
+                              );
+                            }
+                            if (entry.kind === 'personal') {
+                              const it = entry.item;
+                              return (
+                                <button key={`personal-${it.SubtaskID}`} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                                  className="w-full text-right break-words hover:underline font-semibold"
+                                  style={{ color: '#059669' }}>
+                                  {formatEventTime(it.DueDate)}★ {it.SubtaskTitle || it.TaskTitle}
+                                </button>
+                              );
+                            }
+                            const cm = entry.comment;
+                            return (
+                              <button key={`comment-${cm.CommentID}`} type="button" onClick={() => openTaskInNewTab(cm.TaskID)}
+                                style={{ color: '#7c3aed' }}
+                                className="hover:underline text-right w-full block break-words"
+                                title={`${cm.Content} — ضمن: ${cm.TaskTitle}`}>
+                                {formatEventTime(cm.CreatedAt)}💬 {cm.Content}
+                                <span className="opacity-60 text-[9px] block">ضمن مهمة: {cm.TaskTitle}</span>
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
                     );
@@ -1015,37 +1039,40 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             ))}
                           </div>
                         )}
-                        {startList.map(it => (
-                          <div key={`start-${it.SubtaskID}`} className="text-xs">
-                            <button type="button" onClick={() => openTaskInNewTab(it.TaskID)}
-                              style={{ color: getSpanColor(it.SubtaskID) }} className="font-bold hover:underline break-words text-right">
-                              {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
+                        {/* نُدمج المهام (الفرعية والشخصية) والتعليقات في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث */}
+                        {buildDayEntries(startList, singleList, visiblePersonal, visibleComments).map(entry => {
+                          if (entry.kind === 'span' || entry.kind === 'single') {
+                            const it = entry.item;
+                            return (
+                              <div key={`${entry.kind}-${it.SubtaskID}`} className="text-xs">
+                                <button type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                                  style={{ color: getSpanColor(it.SubtaskID) }}
+                                  className={`${entry.kind === 'span' ? 'font-bold' : 'font-semibold'} hover:underline break-words text-right`}>
+                                  {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
+                                </button>
+                              </div>
+                            );
+                          }
+                          if (entry.kind === 'personal') {
+                            const it = entry.item;
+                            return (
+                              <button key={`personal-${it.SubtaskID}`} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                                className="text-xs font-semibold hover:underline text-right w-full break-words"
+                                style={{ color: '#059669' }}>
+                                {formatEventTime(it.DueDate)}★ {it.SubtaskTitle || it.TaskTitle}
+                              </button>
+                            );
+                          }
+                          const cm = entry.comment;
+                          return (
+                            <button key={`comment-${cm.CommentID}`} type="button" onClick={() => openTaskInNewTab(cm.TaskID)}
+                              className="text-xs font-semibold hover:underline text-right w-full break-words"
+                              style={{ color: '#7c3aed' }}>
+                              {formatEventTime(cm.CreatedAt)}💬 {cm.Content}
+                              <span className="opacity-60 text-[9px] block font-normal">ضمن مهمة: {cm.TaskTitle}</span>
                             </button>
-                          </div>
-                        ))}
-                        {singleList.map(it => (
-                          <div key={`single-${it.SubtaskID}`} className="text-xs">
-                            <button type="button" onClick={() => openTaskInNewTab(it.TaskID)}
-                              style={{ color: getSpanColor(it.SubtaskID) }} className="font-semibold hover:underline break-words text-right">
-                              {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
-                            </button>
-                          </div>
-                        ))}
-                        {[...visiblePersonal].sort((a, b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime()).map(it => (
-                          <button key={it.SubtaskID} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
-                            className="text-xs font-semibold hover:underline text-right w-full break-words"
-                            style={{ color: '#059669' }}>
-                            {formatEventTime(it.DueDate)}★ {it.SubtaskTitle || it.TaskTitle}
-                          </button>
-                        ))}
-                        {visibleComments.map(cm => (
-                          <button key={cm.CommentID} type="button" onClick={() => openTaskInNewTab(cm.TaskID)}
-                            className="text-xs font-semibold hover:underline text-right w-full break-words"
-                            style={{ color: '#7c3aed' }}>
-                            {formatEventTime(cm.CreatedAt)}💬 {cm.Content}
-                            <span className="opacity-60 text-[9px] block font-normal">ضمن مهمة: {cm.TaskTitle}</span>
-                          </button>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   </Fragment>

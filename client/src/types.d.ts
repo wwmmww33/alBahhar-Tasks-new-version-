@@ -22,6 +22,7 @@ export type Subtask = {
   ReminderEnabled?: boolean | number;
   ReminderMinutes?: number | null;
   Notes?: string | null;
+  SharedDepartmentIds?: number[];
 };
 
 export type Task = {
@@ -50,6 +51,7 @@ export type Task = {
   CategoryName?: string;
   Subtasks?: Subtask[];
   PersonalOwnerUserID?: string | null;
+  CalendarBroadcastDepartmentID?: number | null;
 };
 
 // Category related types
@@ -80,6 +82,9 @@ export type User = {
   UpdatedAt: string;
   DepartmentName?: string;
   IsAdmin: boolean;
+  RankLevel?: number | null;
+  CurrentUserID?: string | null;
+  CurrentUserFullName?: string | null;
 };
 
 export type Comment = {

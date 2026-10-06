@@ -5,6 +5,7 @@
 const sql = require('mssql');
 const { isUserManagerOrAdmin } = require('../utils/delegationUtils');
 const { resolveActorContext, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
+const { isTrueSystemAdmin, setVacancyMaxBroadcastDepartmentId } = require('../utils/departmentSharing');
 
 // ---- فحص دفعي لوجود الأعمدة/الجداول المهمّة ----
 async function probeVacancySchema(pool) {
@@ -54,7 +55,11 @@ exports.listByDepartmentScope = async (req, res) => {
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacDept,
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','Name')         IS NOT NULL THEN 1 ELSE 0 END AS HasVacName,
                 CASE WHEN COL_LENGTH('dbo.JobVacancies','IsActive')     IS NOT NULL THEN 1 ELSE 0 END AS HasVacIsActive,
-                CASE WHEN COL_LENGTH('dbo.Assignments', 'IsCurrent')    IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent
+                CASE WHEN COL_LENGTH('dbo.JobVacancies','Rank')         IS NOT NULL THEN 1 ELSE 0 END AS HasVacRank,
+                CASE WHEN COL_LENGTH('dbo.Assignments', 'IsCurrent')    IS NOT NULL THEN 1 ELSE 0 END AS HasAssIsCurrent,
+                CASE WHEN OBJECT_ID('dbo.Ranks','U')      IS NOT NULL THEN 1 ELSE 0 END AS HasRanks,
+                CASE WHEN COL_LENGTH('dbo.Ranks','Level')  IS NOT NULL THEN 1 ELSE 0 END AS HasRankLevel,
+                CASE WHEN COL_LENGTH('dbo.Departments','Name') IS NOT NULL THEN 1 ELSE 0 END AS HasDeptName
         `);
         const s = sr.recordset[0] || {};
         if (!s.HasVacancies || !s.HasVacDept) return res.status(200).json([]);
@@ -145,7 +150,17 @@ exports.listByDepartmentScope = async (req, res) => {
             : '';
         const personName = s.HasAssignments ? 'u.FullName' : 'CAST(NULL AS NVARCHAR(200))';
         const personId   = s.HasAssignments ? 'ca.UserID'  : 'CAST(NULL AS NVARCHAR(50))';
+        // لا تظهر إلا المناصب التى يشغلها شخص فعلاً — إسناد مهمة إلى منصب شاغر لا معنى له
+        const vacantFilter = s.HasAssignments ? `AND ${personId} IS NOT NULL` : '';
 
+        const rankJoin = (s.HasVacRank && s.HasRanks)
+            ? 'LEFT JOIN dbo.Ranks rk ON rk.RankID = jv.Rank'
+            : '';
+        const rankLevelExpr = (s.HasVacRank && s.HasRanks && s.HasRankLevel) ? 'rk.Level' : 'NULL';
+        const deptNameExpr = s.HasDeptName ? 'd.Name' : 'CAST(NULL AS NVARCHAR(200))';
+
+        // ترتيب من الأعلى منصب إلى الأدنى ضمن كل مديرية: تصاعدياً حسب Level (الأصغر = الأعلى رتبة)،
+        // مع وضع من لا رتبة له في الآخر، ثم حسب الاسم كفاصل أخير
         const mainSql = `
             SELECT DISTINCT
                 CAST(jv.VacancyID AS NVARCHAR(50)) AS UserID,
@@ -156,13 +171,20 @@ exports.listByDepartmentScope = async (req, res) => {
                     ELSE N''
                   END AS FullName,
                 jv.VacancyID,
+                jv.DepartmentID AS DepartmentID,
+                ${deptNameExpr} AS DepartmentName,
+                ${rankLevelExpr} AS RankLevel,
+                CASE WHEN ${rankLevelExpr} IS NULL THEN 999999 ELSE ${rankLevelExpr} END AS RankSortKey,
                 ${personId}   AS CurrentUserID,
                 ${personName} AS CurrentUserFullName
             FROM dbo.JobVacancies jv
             ${assJoin}
+            ${rankJoin}
+            LEFT JOIN dbo.Departments d ON d.DepartmentID = jv.DepartmentID
             WHERE jv.DepartmentID IN (${inClause})
             ${isActiveFilter}
-            ORDER BY FullName
+            ${vacantFilter}
+            ORDER BY DepartmentID, RankSortKey, FullName
         `;
 
         const result = await pool.request().query(mainSql);
@@ -200,6 +222,23 @@ exports.listByDepartment = async (req, res) => {
         const calBroadcastCol = calBroadcastProbe.recordset[0]?.Len
             ? 'jv.ExcludeFromCalendarBroadcast'
             : 'CAST(0 AS BIT)';
+
+        const sharingDelegationProbe = await pool.request().query(
+            `SELECT COL_LENGTH('dbo.JobVacancies','CanManageSharingAndBroadcast') AS Len`
+        );
+        const sharingDelegationCol = sharingDelegationProbe.recordset[0]?.Len
+            ? 'jv.CanManageSharingAndBroadcast'
+            : 'CAST(0 AS BIT)';
+
+        const maxBroadcastProbe = await pool.request().query(
+            `SELECT COL_LENGTH('dbo.JobVacancies','MaxBroadcastDepartmentID') AS Len`
+        );
+        const hasMaxBroadcastCol = !!maxBroadcastProbe.recordset[0]?.Len;
+        const maxBroadcastCol = hasMaxBroadcastCol ? 'jv.MaxBroadcastDepartmentID' : 'CAST(NULL AS INT)';
+        const maxBroadcastJoin = hasMaxBroadcastCol
+            ? 'LEFT JOIN dbo.Departments mbd ON mbd.DepartmentID = jv.MaxBroadcastDepartmentID'
+            : '';
+        const maxBroadcastNameCol = hasMaxBroadcastCol ? 'mbd.Name' : 'CAST(NULL AS NVARCHAR(200))';
 
         // فحص وجود جدول Ranks وعمود Name فيه
         const ranksProbe = await pool.request().query(`
@@ -252,12 +291,16 @@ exports.listByDepartment = async (req, res) => {
                     ${nameCol}     AS Name,
                     ${isActiveCol} AS IsActive,
                     ${s.HasVacDept ? 'jv.DepartmentID' : 'CAST(NULL AS INT) AS DepartmentID'},
-                    ${calBroadcastCol} AS ExcludeFromCalendarBroadcast
+                    ${calBroadcastCol} AS ExcludeFromCalendarBroadcast,
+                    ${sharingDelegationCol} AS CanManageSharingAndBroadcast,
+                    ${maxBroadcastCol} AS MaxBroadcastDepartmentID,
+                    ${maxBroadcastNameCol} AS MaxBroadcastDepartmentName
                     ${rankSelect}
                     ${selectUser}
                 FROM dbo.JobVacancies jv
                 ${rankJoin}
                 ${assignJoin}
+                ${maxBroadcastJoin}
                 WHERE ${deptFilter}
                 ORDER BY ${s.HasVacName ? 'jv.Name' : 'jv.VacancyID'}
             `);
@@ -330,6 +373,118 @@ exports.setCalendarBroadcastExclusion = async (req, res) => {
         res.status(200).json({ message: 'تم تحديث إعداد التقويم للمنصب.', ExcludeFromCalendarBroadcast: excluded });
     } catch (err) {
         console.error('SET CALENDAR BROADCAST EXCLUSION ERROR:', err);
+        res.status(500).json({ message: 'خطأ في الخادم', detail: err.message });
+    }
+};
+
+// ---- PATCH /api/vacancies/:id/sharing-delegation ----
+// يمنح مدير القسم المستقل (أو المدير العام) منصباً آخر ضمن مديريته تفويضاً إدارياً موسّعاً:
+// فتح/إغلاق قنوات مشاركة المهام مع مديريات أخرى، والتحكم بمستوى بث التقويم — بنفس نطاق صلاحية
+// المدير الحقيقي نفسه (كل مديريته المستقلة). هذا التفويض نفسه لا يُمنح إلا من مدير حقيقي
+// (وليس من مفوَّض آخر) — راجع departmentSharing.js: canManageDepartmentSharingAndBroadcast.
+exports.setSharingDelegation = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+
+    const vacancyId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(vacancyId)) {
+        return res.status(400).json({ message: 'id must be an integer.' });
+    }
+
+    const { userId, isAdmin, enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ message: 'enabled must be a boolean.' });
+    }
+    if (!userId) {
+        return res.status(401).json({ message: 'User identification is required.' });
+    }
+
+    try {
+        const isManager = await isUserManagerOrAdmin(pool, userId, isAdmin);
+        if (!isManager) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل أو المدير العام فقط.' });
+        }
+
+        const isRealAdmin = isAdmin === true || isAdmin === 'true';
+        if (!isRealAdmin) {
+            const vacancyRow = await pool.request().input('VacancyID', sql.Int, vacancyId)
+                .query('SELECT DepartmentID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID');
+            const targetDeptId = vacancyRow.recordset[0]?.DepartmentID;
+            if (targetDeptId == null) {
+                return res.status(404).json({ message: 'المنصب غير موجود.' });
+            }
+            const actorCtx = await resolveActorContext(pool, userId);
+            if (!actorCtx?.departmentId) {
+                return res.status(403).json({ message: 'لا يمكن تحديد قسمك.' });
+            }
+            const scopeDeptIds = await resolveIndependentDeptGroup(pool, actorCtx.departmentId);
+            if (!scopeDeptIds.map(String).includes(String(targetDeptId))) {
+                return res.status(403).json({ message: 'هذا المنصب خارج نطاق مديريتك.' });
+            }
+        }
+
+        const colProbe = await pool.request().query(
+            `SELECT COL_LENGTH('dbo.JobVacancies','CanManageSharingAndBroadcast') AS Len`
+        );
+        if (!colProbe.recordset[0]?.Len) {
+            return res.status(400).json({ message: 'العمود غير متوفر في قاعدة البيانات. أعد تشغيل الخادم.' });
+        }
+
+        await pool.request()
+            .input('VacancyID', sql.Int, vacancyId)
+            .input('Enabled', sql.Bit, enabled ? 1 : 0)
+            .query('UPDATE dbo.JobVacancies SET CanManageSharingAndBroadcast = @Enabled WHERE VacancyID = @VacancyID');
+
+        res.status(200).json({ message: 'تم تحديث التفويض.', CanManageSharingAndBroadcast: enabled });
+    } catch (err) {
+        console.error('SET SHARING DELEGATION ERROR:', err);
+        res.status(500).json({ message: 'خطأ في الخادم', detail: err.message });
+    }
+};
+
+// ---- PATCH /api/vacancies/:id/max-broadcast-level ----
+// حد أعلى لمستوى البث خاص بهذا المنصب تحديداً — يتجاوز الحد العام الافتراضي (الذي يضبطه المدير
+// العام من لوحة إدارة الأقسام) لهذا المنصب فقط. المدير العام للنظام فقط (Role=1) — إعداد حسّاس
+// يخص منصباً بعينه، وليس ميزة تُمنح لمديري الأقسام أو المفوَّضين. Body: { userId, DepartmentID }
+// DepartmentID = null يعني: استخدم الحد العام الافتراضي كالمعتاد لهذا المنصب.
+exports.setVacancyMaxBroadcastLevel = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+
+    const vacancyId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(vacancyId)) {
+        return res.status(400).json({ message: 'id must be an integer.' });
+    }
+
+    const { userId, DepartmentID } = req.body || {};
+    if (!userId) {
+        return res.status(401).json({ message: 'User identification is required.' });
+    }
+
+    try {
+        const allowed = await isTrueSystemAdmin(pool, userId);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة للمدير العام للنظام فقط.' });
+        }
+
+        const colProbe = await pool.request().query(
+            `SELECT COL_LENGTH('dbo.JobVacancies','MaxBroadcastDepartmentID') AS Len`
+        );
+        if (!colProbe.recordset[0]?.Len) {
+            return res.status(400).json({ message: 'العمود غير متوفر في قاعدة البيانات. أعد تشغيل الخادم.' });
+        }
+
+        const vacancyExists = await pool.request().input('VacancyID', sql.Int, vacancyId)
+            .query('SELECT TOP 1 VacancyID FROM dbo.JobVacancies WHERE VacancyID = @VacancyID');
+        if (!vacancyExists.recordset[0]) {
+            return res.status(404).json({ message: 'المنصب غير موجود.' });
+        }
+
+        const deptId = DepartmentID == null ? null : parseInt(DepartmentID, 10);
+        await setVacancyMaxBroadcastDepartmentId(pool, vacancyId, deptId);
+        res.status(200).json({ message: 'تم تحديث الحد الأعلى لمستوى البث الخاص بالمنصب.', MaxBroadcastDepartmentID: deptId });
+    } catch (err) {
+        console.error('SET VACANCY MAX BROADCAST LEVEL ERROR:', err);
         res.status(500).json({ message: 'خطأ في الخادم', detail: err.message });
     }
 };

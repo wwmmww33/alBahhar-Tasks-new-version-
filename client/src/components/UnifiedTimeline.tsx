@@ -1,5 +1,5 @@
 // src/components/UnifiedTimeline.tsx
-import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy, ArrowRightLeft } from 'lucide-react';
+import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy, ArrowRightLeft, Share2, X } from 'lucide-react';
 import React, { useState, useMemo, useCallback, useRef } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
@@ -8,6 +8,8 @@ import { resolveCurrentActorId, resolveUserActorId } from '../utils/actorIdentit
 import { useDirectoryMention } from '../hooks/useDirectoryMention';
 import DirectoryMentionDropdown from './DirectoryMentionDropdown';
 import MoveToTaskModal from './MoveToTaskModal';
+import ShareItemModal from './ShareItemModal';
+import { UserSearchSelect, UserMultiSearchList } from './UserSearchSelect';
 
 // قائمتا اختيار الساعة (00-23) والدقيقة (00-59) بنظام 24 ساعة مستقل عن الـ locale
 const renderTimeSelects = (
@@ -53,9 +55,11 @@ type Comment = {
   CommentedByVacancyID?: number | string | null;
   UserName?: string;
   CreatedAt: string;
+  CalendarDisplayDate?: string | null;
   ActedBy?: string;
   ActedByName?: string;
   ShowInCalendar?: boolean;
+  SharedDepartmentIds?: number[];
 };
 
 type TimelineItem = {
@@ -74,9 +78,10 @@ type UnifiedTimelineProps = {
   currentUser: CurrentUser;
   task: any;
   onSubtaskUpdate: () => void;
-  onCommentSubmit: (commentData: string | { content: string; customDateTime: string | null; showInCalendar?: boolean }) => Promise<void>;
+  onCommentSubmit: (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean }) => Promise<void>;
   isSubmittingComment: boolean;
   onCommentsUpdate: () => void;
+  shareDepartmentNamesById?: Record<number, string>;
 };
 
 const UnifiedTimeline = ({
@@ -89,10 +94,26 @@ const UnifiedTimeline = ({
   onSubtaskUpdate,
   onCommentSubmit,
   isSubmittingComment,
-  onCommentsUpdate
+  onCommentsUpdate,
+  shareDepartmentNamesById = {}
 }: UnifiedTimelineProps) => {
   const { refreshTasks, refreshNotifications } = useNotification();
   const safeUsers = Array.isArray(users) ? users : [];
+
+  // رمز بصري يُظهر أن هذا العنصر (مهمة فرعية/تعليق) مشارَك مع جهة مستقلة أخرى، مع اسمها
+  const renderShareBadge = (ids?: number[]) => {
+    if (!ids || ids.length === 0) return null;
+    const names = ids.map(id => shareDepartmentNamesById[id] || `#${id}`);
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary whitespace-nowrap"
+        title={`مشارَك مع: ${names.join('، ')}`}
+      >
+        <Share2 size={10} />
+        {names.join('، ')}
+      </span>
+    );
+  };
   const MD_COLORS: Record<string, string> = {
     red:'#ef4444', green:'#16a34a', blue:'#2563eb', orange:'#ea580c',
     purple:'#9333ea', pink:'#db2777', teal:'#0d9488', gray:'#6b7280', yellow:'#ca8a04'
@@ -207,9 +228,10 @@ const UnifiedTimeline = ({
   const [newComment, setNewComment] = useState('');
   const [showCommentPreview, setShowCommentPreview] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
-  const [useCustomDateTime, setUseCustomDateTime] = useState(false);
-  const [customDateTime, setCustomDateTime] = useState(getCurrentDateTime());
   const [showCommentInCalendar, setShowCommentInCalendar] = useState(false);
+  const [commentCalendarDisplayDate, setCommentCalendarDisplayDate] = useState<string | null>(null);
+  const [calendarDateModal, setCalendarDateModal] = useState<{ kind: 'new' } | { kind: 'existing'; commentId: number } | null>(null);
+  const [calendarDateModalValue, setCalendarDateModalValue] = useState(getCurrentDateTime());
   const [showSubtaskForm, setShowSubtaskForm] = useState(false);
   const [showCommentForm, setShowCommentForm] = useState(false);
 
@@ -229,6 +251,8 @@ const UnifiedTimeline = ({
   // نافذة نقل مهمة فرعية/تعليق إلى مهمة أخرى
   const [movingSubtask, setMovingSubtask] = useState<Subtask | null>(null);
   const [movingComment, setMovingComment] = useState<Comment | null>(null);
+  const [sharingSubtask, setSharingSubtask] = useState<Subtask | null>(null);
+  const [sharingComment, setSharingComment] = useState<Comment | null>(null);
 
   // Bulk Assign State
   const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
@@ -733,29 +757,61 @@ const UnifiedTimeline = ({
   const handleCommentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newComment.trim() || isSubmittingComment) return;
-    
-    if (useCustomDateTime) {
-      const selectedDate = new Date(customDateTime);
-      if (isNaN(selectedDate.getTime())) {
-        alert('يرجى إدخال تاريخ ووقت صحيح');
-        return;
-      }
-    }
-    
-    // تمرير التاريخ المخصص إذا تم تفعيله
+
     const hadCalendar = showCommentInCalendar;
     const commentData = {
       content: newComment,
-      customDateTime: useCustomDateTime ? customDateTime : null,
+      calendarDisplayDate: hadCalendar ? commentCalendarDisplayDate : null,
       showInCalendar: hadCalendar
     };
 
     await onCommentSubmit(commentData);
     setNewComment('');
-    setCustomDateTime(getCurrentDateTime());
     setShowCommentInCalendar(false);
+    setCommentCalendarDisplayDate(null);
     if (hadCalendar) {
       window.dispatchEvent(new CustomEvent('calendar:comment:created', { detail: { ShowInCalendar: true } }));
+    }
+  };
+
+  // يُستدعى عند تأكيد التاريخ/الوقت من نافذة اختيار "تاريخ ظهور التعليق في التقويم" —
+  // سواء كانت المهمة تفعيل الإظهار لتعليق جديد قيد الكتابة أو لتعليق موجود مسبقاً.
+  const handleConfirmCalendarDate = async () => {
+    if (!calendarDateModal) return;
+    if (calendarDateModal.kind === 'new') {
+      setShowCommentInCalendar(true);
+      setCommentCalendarDisplayDate(calendarDateModalValue);
+      setCalendarDateModal(null);
+    } else {
+      await handleToggleCommentCalendar(calendarDateModal.commentId, true, calendarDateModalValue);
+      setCalendarDateModal(null);
+    }
+  };
+
+  // تبديل إظهار تعليق موجود مسبقاً في التقويم. عند التفعيل يُرسَل تاريخ العرض المحدَّد من
+  // نافذة الاختيار؛ عند الإلغاء لا حاجة لتاريخ.
+  const handleToggleCommentCalendar = async (commentId: number, next: boolean, calendarDisplayDate: string | null) => {
+    try {
+      const resp = await fetch(`/api/comments/${commentId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          UserID: actingUserId,
+          ShowInCalendar: next,
+          CalendarDisplayDate: calendarDisplayDate,
+          isAdmin: currentUser.IsAdmin,
+        }),
+      });
+      if (resp.ok) {
+        onCommentsUpdate();
+        window.dispatchEvent(new CustomEvent('calendar:comment:updated', { detail: { CommentID: commentId, ShowInCalendar: next } }));
+      } else {
+        const text = await resp.text().catch(() => '');
+        alert(`فشل تحديث إظهار التعليق في التقويم (${resp.status}). ${text}`);
+      }
+    } catch (err) {
+      console.error('Network error while toggling comment calendar flag:', err);
+      alert('تعذر الاتصال بالخادم أثناء تحديث إظهار التعليق في التقويم.');
     }
   };
 
@@ -903,6 +959,7 @@ const UnifiedTimeline = ({
                 </span>
               )}
               <span className="text-xs text-content-secondary font-mono ml-2">#{subtask.SubtaskID}</span>
+              {renderShareBadge(subtask.SharedDepartmentIds)}
               {(subtask as any).Notes && (
                 <div className="flex flex-col gap-0.5 mr-1">
                   {String((subtask as any).Notes).split('\n').map((line: string, i: number) => (
@@ -933,6 +990,15 @@ const UnifiedTimeline = ({
                 )}
                 {canDelete && (
                   <button
+                    onClick={() => setSharingSubtask(subtask)}
+                    className={`${(subtask.SharedDepartmentIds?.length ?? 0) > 0 ? 'text-primary' : 'text-content-secondary hover:text-primary'}`}
+                    title="مشاركة مع جهة مستقلة أخرى"
+                  >
+                    <Share2 size={16} />
+                  </button>
+                )}
+                {canDelete && (
+                  <button
                     onClick={() => handleDeleteSubtask(subtask)}
                     className="text-red-500 hover:text-red-700"
                   >
@@ -950,21 +1016,18 @@ const UnifiedTimeline = ({
                   <span className="text-xs text-content-secondary">مسندة إليك</span>
                 ) : (
                   <>
-                    <select
+                    <UserSearchSelect
+                      users={safeUsers}
                       value={assignedId}
-                      onChange={(e) => handleAssign(subtask, e.target.value)}
+                      onChange={(id) => handleAssign(subtask, id)}
                       disabled={!canManageAssignments}
-                      className="bg-transparent text-xs focus:outline-none disabled:opacity-70 dark:text-gray-300 max-w-[120px]"
-                    >
-                      <option value="">غير مسندة</option>
-                      <option value="bulk" className="font-bold text-primary">👥 إسناد متعدد...</option>
-                      {assignedId && !assignedInUsersList && (
-                        <option value={assignedId}>{assignedFallbackLabel}</option>
-                      )}
-                      {safeUsers.map(user => (
-                        <option key={userActorId(user)} value={userActorId(user)}>{user.FullName}</option>
-                      ))}
-                    </select>
+                      topOptions={[
+                        { value: '', label: 'غير مسندة' },
+                        { value: 'bulk', label: '👥 إسناد متعدد...', className: 'font-bold text-primary' },
+                      ]}
+                      fallbackOption={assignedId && !assignedInUsersList ? { value: assignedId, label: assignedFallbackLabel } : null}
+                      className="text-xs max-w-[140px]"
+                    />
                     {canManageAssignments && (
                       <button
                         onClick={() => {
@@ -1198,29 +1261,6 @@ const UnifiedTimeline = ({
   const renderCommentItem = (comment: Comment) => {
     const canManage = isCommentOwner(comment);
     const isEditing = editingCommentId === comment.CommentID;
-    const handleToggleCommentCalendar = async (next: boolean) => {
-      try {
-        const resp = await fetch(`/api/comments/${comment.CommentID}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            UserID: actingUserId,
-            ShowInCalendar: next,
-            isAdmin: currentUser.IsAdmin,
-          }),
-        });
-        if (resp.ok) {
-          onCommentsUpdate();
-          window.dispatchEvent(new CustomEvent('calendar:comment:updated', { detail: { CommentID: comment.CommentID, ShowInCalendar: next } }));
-        } else {
-          const text = await resp.text().catch(() => '');
-          alert(`فشل تحديث إظهار التعليق في التقويم (${resp.status}). ${text}`);
-        }
-      } catch (err) {
-        console.error('Network error while toggling comment calendar flag:', err);
-        alert('تعذر الاتصال بالخادم أثناء تحديث إظهار التعليق في التقويم.');
-      }
-    };
 
     return (
       <div className="flex items-start gap-3">
@@ -1292,8 +1332,8 @@ const UnifiedTimeline = ({
                   dir="auto"
                   dangerouslySetInnerHTML={{ __html: renderMarkdown(comment.Content || '') }}
                 />
-                {!!comment.ShowInCalendar && comment.CreatedAt && (() => {
-                  const d = new Date(comment.CreatedAt);
+                {!!comment.ShowInCalendar && comment.CalendarDisplayDate && (() => {
+                  const d = new Date(comment.CalendarDisplayDate);
                   const y = d.getFullYear();
                   const m = d.getMonth() + 1;
                   const day = d.getDate();
@@ -1309,16 +1349,28 @@ const UnifiedTimeline = ({
             )}
             <div className="flex justify-between items-center">
               <div className="flex flex-col gap-1">
-                <p className="text-xs text-content-secondary">
-                  المنشيء: {comment.UserName || comment.UserID}
-                  {comment.ActedBy ? ` بواسطة (${comment.ActedByName || getUserNameById(comment.ActedBy)})` : ''}
+                <p className="text-xs text-content-secondary flex items-center gap-1.5 flex-wrap">
+                  <span>
+                    المنشيء: {comment.UserName || comment.UserID}
+                    {comment.ActedBy ? ` بواسطة (${comment.ActedByName || getUserNameById(comment.ActedBy)})` : ''}
+                  </span>
+                  {renderShareBadge(comment.SharedDepartmentIds)}
                 </p>
                 {canManage && (
                   <label className="flex items-center gap-2 text-xs text-content-secondary">
                     <input
                       type="checkbox"
                       checked={!!comment.ShowInCalendar}
-                      onChange={(e) => handleToggleCommentCalendar(e.target.checked)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setCalendarDateModalValue(
+                            comment.CalendarDisplayDate ? formatToDateTimeLocal(new Date(comment.CalendarDisplayDate)) : getCurrentDateTime()
+                          );
+                          setCalendarDateModal({ kind: 'existing', commentId: comment.CommentID });
+                        } else {
+                          handleToggleCommentCalendar(comment.CommentID, false, null);
+                        }
+                      }}
                     />
                     <span>إظهار هذا التعليق في التقويم</span>
                   </label>
@@ -1332,6 +1384,15 @@ const UnifiedTimeline = ({
                     title="نقل إلى مهمة أخرى"
                   >
                     <ArrowRightLeft size={14} />
+                  </button>
+                )}
+                {canManage && (
+                  <button
+                    onClick={() => setSharingComment(comment)}
+                    className={`${(comment.SharedDepartmentIds?.length ?? 0) > 0 ? 'text-primary' : 'text-content-secondary hover:text-primary'}`}
+                    title="مشاركة مع جهة مستقلة أخرى"
+                  >
+                    <Share2 size={14} />
                   </button>
                 )}
                 {canManage && (
@@ -1387,19 +1448,12 @@ const UnifiedTimeline = ({
             <p className="text-sm text-content-secondary mb-4">
               اختر الموظفين الذين تريد إسناد المهمة لهم. سيتم تكرار المهمة لكل موظف إضافي.
             </p>
-            <div className="max-h-60 overflow-y-auto space-y-2 mb-4 border border-content/10 p-2 rounded">
-              {safeUsers.map(user => (
-                <label key={userActorId(user)} className="flex items-center gap-2 cursor-pointer hover:bg-content/5 p-2 rounded transition-colors">
-                  <input
-                    type="checkbox"
-                    checked={bulkSelectedUsers.includes(userActorId(user))}
-                    onChange={() => toggleUserSelection(userActorId(user))}
-                    className="w-4 h-4 text-primary rounded focus:ring-primary"
-                  />
-                  <span className="text-sm">{user.FullName}</span>
-                </label>
-              ))}
-            </div>
+            <UserMultiSearchList
+              users={safeUsers}
+              selected={bulkSelectedUsers}
+              onToggle={toggleUserSelection}
+              className="mb-4"
+            />
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setIsBulkModalOpen(false)} className="px-4 py-2 text-content-secondary hover:bg-content/10 rounded">إلغاء</button>
               <button type="button" onClick={submitBulkAssign} className="px-4 py-2 bg-primary text-white rounded hover:bg-primary-dark shadow-sm">حفظ وتكرار</button>
@@ -1419,19 +1473,12 @@ const UnifiedTimeline = ({
                   <p className="text-sm text-content-secondary mb-4">
                       اختر الموظفين الذين تريد إسناد المهمة لهم. سيتم إنشاء مهمة فرعية لكل موظف.
                   </p>
-                  <div className="max-h-60 overflow-y-auto space-y-2 mb-4 border border-content/10 p-2 rounded">
-                        {safeUsers.map(user => (
-                          <label key={userActorId(user)} className="flex items-center gap-2 cursor-pointer hover:bg-content/5 p-2 rounded transition-colors">
-                              <input 
-                                type="checkbox" 
-                                checked={newSubtaskBulkUsers.includes(userActorId(user))} 
-                                onChange={() => setNewSubtaskBulkUsers(prev => prev.includes(userActorId(user)) ? prev.filter(id => id !== userActorId(user)) : [...prev, userActorId(user)])}
-                                className="w-4 h-4 text-primary rounded focus:ring-primary"
-                              />
-                              <span className="text-sm">{user.FullName}</span>
-                          </label>
-                      ))}
-                  </div>
+                  <UserMultiSearchList
+                    users={safeUsers}
+                    selected={newSubtaskBulkUsers}
+                    onToggle={(id) => setNewSubtaskBulkUsers(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
+                    className="mb-4"
+                  />
                   <div className="flex justify-end gap-2">
                   <button type="button" onClick={() => { setIsNewTaskBulkModalOpen(false); setAssignTo(''); setNewSubtaskBulkUsers([]); }} className="px-4 py-2 text-content-secondary hover:bg-content/10 rounded">إلغاء</button>
                   <button type="button" onClick={() => { setIsNewTaskBulkModalOpen(false); setAssignTo('bulk'); }} className="px-4 py-2 bg-primary text-white rounded hover:bg-primary-dark shadow-sm">تأكيد الاختيار ({newSubtaskBulkUsers.length})</button>
@@ -1484,24 +1531,23 @@ const UnifiedTimeline = ({
                 />
               </div>
               <div className="flex gap-1 items-center">
-                <select
+                <UserSearchSelect
+                  users={safeUsers}
                   value={assignTo}
-                  onChange={e => {
-                    if (e.target.value === 'bulk') {
+                  onChange={(id) => {
+                    if (id === 'bulk') {
                       setIsNewTaskBulkModalOpen(true);
                       setAssignTo('bulk');
                     } else {
-                      setAssignTo(e.target.value);
+                      setAssignTo(id);
                     }
                   }}
-                  className="p-2 border rounded-md bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
-                >
-                  <option value="">إسناد لـ: (نفسي)</option>
-                  <option value="bulk" className="font-bold text-primary">👥 إسناد متعدد...</option>
-                  {safeUsers.map(user => (
-                    <option key={userActorId(user)} value={userActorId(user)}>{user.FullName}</option>
-                  ))}
-                </select>
+                  topOptions={[
+                    { value: '', label: 'إسناد لـ: (نفسي)' },
+                    { value: 'bulk', label: '👥 إسناد متعدد...', className: 'font-bold text-primary' },
+                  ]}
+                  className="min-w-[160px]"
+                />
                 <button
                   type="button"
                   onClick={() => { setIsNewTaskBulkModalOpen(true); setAssignTo('bulk'); }}
@@ -1665,52 +1711,43 @@ const UnifiedTimeline = ({
             )}
           </div>
           
-          {/* خيار تحديد التاريخ والوقت المخصص مع زر الإرسال */}
+          {/* خيار إظهار التعليق في التقويم مع زر الإرسال */}
           <div className="flex flex-col md:flex-row gap-3 items-start">
             <div className="flex-1 p-3">
-              <div className="flex items-center gap-2 mb-2">
-                <input
-                  type="checkbox"
-                  id="useCustomDateTime"
-                  checked={useCustomDateTime}
-                  onChange={(e) => setUseCustomDateTime(e.target.checked)}
-                  className="rounded"
-                />
-                <label htmlFor="useCustomDateTime" className="text-sm font-medium text-content">
-                  تحديد تاريخ ووقت مخصص للتعليق
-                </label>
-              </div>
-              
-              {useCustomDateTime && (
-                <div className="mt-2">
-                  <label className="block text-xs text-content-secondary mb-1">
-                    التاريخ والوقت (نظام 24 ساعة):
-                  </label>
-                  <input
-                    type="datetime-local"
-                    value={customDateTime}
-                    onChange={(e) => setCustomDateTime(e.target.value)}
-                    className="w-full p-2 border rounded-md bg-bkg border-content/20 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
-                  />
-                  <p className="text-xs text-content-secondary mt-1">
-                    💡 يمكنك اختيار تاريخ سابق لترتيب التعليقات حسب التسلسل الزمني الصحيح
-                  </p>
-                </div>
-              )}
-              <div className="flex items-center gap-2 mt-3">
+              <div className="flex items-center gap-2">
                 <input
                   type="checkbox"
                   id="showCommentInCalendar"
                   checked={showCommentInCalendar}
-                  onChange={(e) => setShowCommentInCalendar(e.target.checked)}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setCalendarDateModalValue(getCurrentDateTime());
+                      setCalendarDateModal({ kind: 'new' });
+                    } else {
+                      setShowCommentInCalendar(false);
+                      setCommentCalendarDisplayDate(null);
+                    }
+                  }}
                   className="rounded"
                 />
                 <label htmlFor="showCommentInCalendar" className="text-sm font-medium text-content">
                   إظهار هذا التعليق في التقويم
                 </label>
               </div>
+              {showCommentInCalendar && commentCalendarDisplayDate && (
+                <p className="text-xs text-content-secondary mt-1 flex items-center gap-2">
+                  📅 سيظهر في التقويم بتاريخ: {formatDateTimeDisplay(commentCalendarDisplayDate)}
+                  <button
+                    type="button"
+                    onClick={() => { setCalendarDateModalValue(commentCalendarDisplayDate); setCalendarDateModal({ kind: 'new' }); }}
+                    className="text-primary hover:underline"
+                  >
+                    تعديل
+                  </button>
+                </p>
+              )}
             </div>
-            
+
             <button
               type="submit"
               disabled={isSubmittingComment}
@@ -1764,6 +1801,61 @@ const UnifiedTimeline = ({
           onClose={() => setMovingComment(null)}
           onMove={handleMoveCommentConfirm}
         />
+      )}
+      {sharingSubtask && (
+        <ShareItemModal
+          kind="subtask"
+          itemId={sharingSubtask.SubtaskID}
+          taskId={Number(taskId)}
+          userId={actingUserId}
+          isAdmin={!!currentUser.IsAdmin}
+          currentSharedDepartmentIds={sharingSubtask.SharedDepartmentIds || []}
+          onClose={() => setSharingSubtask(null)}
+          onSaved={() => { setSharingSubtask(null); onSubtaskUpdate(); }}
+        />
+      )}
+      {sharingComment && (
+        <ShareItemModal
+          kind="comment"
+          itemId={sharingComment.CommentID}
+          taskId={Number(taskId)}
+          userId={actingUserId}
+          isAdmin={!!currentUser.IsAdmin}
+          currentSharedDepartmentIds={sharingComment.SharedDepartmentIds || []}
+          onClose={() => setSharingComment(null)}
+          onSaved={() => { setSharingComment(null); onCommentsUpdate(); }}
+        />
+      )}
+      {calendarDateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={e => e.target === e.currentTarget && setCalendarDateModal(null)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-sm flex flex-col gap-4 p-5" dir="rtl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-primary flex items-center gap-2">
+                <Calendar size={18} /> تاريخ ظهور التعليق في التقويم
+              </h3>
+              <button onClick={() => setCalendarDateModal(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                type="date"
+                value={calendarDateModalValue.split('T')[0]}
+                onChange={(e) => setCalendarDateModalValue(e.target.value + 'T' + (calendarDateModalValue.split('T')[1] || '00:00'))}
+                className="flex-1 min-w-[140px] p-2 border rounded-md bg-bkg border-content/20 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+              />
+              {renderTimeSelects(calendarDateModalValue, setCalendarDateModalValue)}
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={handleConfirmCalendarDate} className="flex-1 bg-primary text-white py-2 rounded-md hover:bg-primary-dark">
+                حفظ
+              </button>
+              <button type="button" onClick={() => setCalendarDateModal(null)} className="flex-1 border border-content/20 py-2 rounded-md text-gray-600 dark:text-gray-300 hover:bg-content/5">
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

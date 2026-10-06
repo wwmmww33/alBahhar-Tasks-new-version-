@@ -756,4 +756,191 @@ module.exports = {
       throw err;
     }
   },
+
+  // جداول تبادل المهام بين المديريات المستقلة: قناة على مستوى المهمة (يفتحها المدير/المفوَّض له)،
+  // ومشاركة فعلية على مستوى كل مهمة فرعية/تعليق (يحددها منشئ العنصر، ضمن القنوات المفتوحة فقط).
+  ensureCrossDepartmentSharingTables: async function ensureCrossDepartmentSharingTables(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME IN ('TaskDepartmentShares','SubtaskDepartmentShares','CommentDepartmentShares')
+      `);
+      if (check.recordset[0].cnt >= 3) {
+        console.log('ℹ️ Cross-department sharing tables already exist.');
+        return { changed: false };
+      }
+
+      await pool.request().query(`
+        IF OBJECT_ID('dbo.TaskDepartmentShares','U') IS NULL
+        CREATE TABLE dbo.TaskDepartmentShares (
+          TaskID                  INT NOT NULL,
+          SharedWithDepartmentID  INT NOT NULL,
+          SharedByUserID          NVARCHAR(50) NOT NULL,
+          CreatedAt               DATETIME NOT NULL CONSTRAINT DF_TaskDeptShares_CreatedAt DEFAULT(GETDATE()),
+          CONSTRAINT PK_TaskDepartmentShares PRIMARY KEY (TaskID, SharedWithDepartmentID),
+          CONSTRAINT FK_TaskDeptShares_Task FOREIGN KEY (TaskID) REFERENCES dbo.Tasks(TaskID) ON DELETE CASCADE
+        );
+
+        IF OBJECT_ID('dbo.SubtaskDepartmentShares','U') IS NULL
+        CREATE TABLE dbo.SubtaskDepartmentShares (
+          SubtaskID               INT NOT NULL,
+          SharedWithDepartmentID  INT NOT NULL,
+          SharedByUserID          NVARCHAR(50) NOT NULL,
+          CreatedAt               DATETIME NOT NULL CONSTRAINT DF_SubtaskDeptShares_CreatedAt DEFAULT(GETDATE()),
+          CONSTRAINT PK_SubtaskDepartmentShares PRIMARY KEY (SubtaskID, SharedWithDepartmentID),
+          CONSTRAINT FK_SubtaskDeptShares_Subtask FOREIGN KEY (SubtaskID) REFERENCES dbo.Subtasks(SubtaskID) ON DELETE CASCADE
+        );
+
+        IF OBJECT_ID('dbo.CommentDepartmentShares','U') IS NULL
+        CREATE TABLE dbo.CommentDepartmentShares (
+          CommentID               INT NOT NULL,
+          SharedWithDepartmentID  INT NOT NULL,
+          SharedByUserID          NVARCHAR(50) NOT NULL,
+          CreatedAt               DATETIME NOT NULL CONSTRAINT DF_CommentDeptShares_CreatedAt DEFAULT(GETDATE()),
+          CONSTRAINT PK_CommentDepartmentShares PRIMARY KEY (CommentID, SharedWithDepartmentID),
+          CONSTRAINT FK_CommentDeptShares_Comment FOREIGN KEY (CommentID) REFERENCES dbo.Comments(CommentID) ON DELETE CASCADE
+        );
+      `);
+      console.log('✅ Created TaskDepartmentShares, SubtaskDepartmentShares, CommentDepartmentShares tables.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring cross-department sharing tables:', err);
+      throw err;
+    }
+  },
+
+  // مستوى بث التقويم: يُحدَّد افتراضياً على مستوى المهمة (يرثه كل عناصرها المُعلَّمة للتقويم)،
+  // مع إمكانية رفع عنصر معيّن (مهمة فرعية/تعليق) لمستوى أعلى يتجاوز مستوى المهمة الافتراضي.
+  // NULL = يتبع مستوى المهمة نفسها (أو قسم المهمة إن كان الحقل على Tasks نفسه فارغاً = السلوك الحالي).
+  ensureCalendarBroadcastLevelColumns: async function ensureCalendarBroadcastLevelColumns(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT
+          COL_LENGTH('dbo.Tasks','CalendarBroadcastDepartmentID')     AS TaskLen,
+          COL_LENGTH('dbo.Subtasks','CalendarBroadcastDepartmentID')  AS SubtaskLen,
+          COL_LENGTH('dbo.Comments','CalendarBroadcastDepartmentID')  AS CommentLen
+      `);
+      const row = check.recordset[0] || {};
+      if (row.TaskLen && row.SubtaskLen && row.CommentLen) {
+        console.log('ℹ️ CalendarBroadcastDepartmentID columns already exist.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        IF COL_LENGTH('dbo.Tasks','CalendarBroadcastDepartmentID') IS NULL
+          ALTER TABLE dbo.Tasks ADD CalendarBroadcastDepartmentID INT NULL;
+        IF COL_LENGTH('dbo.Subtasks','CalendarBroadcastDepartmentID') IS NULL
+          ALTER TABLE dbo.Subtasks ADD CalendarBroadcastDepartmentID INT NULL;
+        IF COL_LENGTH('dbo.Comments','CalendarBroadcastDepartmentID') IS NULL
+          ALTER TABLE dbo.Comments ADD CalendarBroadcastDepartmentID INT NULL;
+      `);
+      console.log('✅ Added CalendarBroadcastDepartmentID columns to Tasks/Subtasks/Comments.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring CalendarBroadcastDepartmentID columns:', err);
+      throw err;
+    }
+  },
+
+  // تفويض إداري موسّع على مستوى المنصب: يمنحه مدير القسم المستقل لمنصب آخر ضمن مديريته،
+  // فيصبح بإمكان حامل هذا المنصب فتح/إغلاق قنوات المشاركة مع مديريات أخرى، والتحكم بمستوى
+  // بث التقويم (للمهمة وللعنصر) — بنفس نطاق صلاحية المدير الحقيقي (كل مديريته المستقلة).
+  ensureVacancySharingDelegationColumn: async function ensureVacancySharingDelegationColumn(pool) {
+    try {
+      const check = await pool.request().query(
+        `SELECT COL_LENGTH('dbo.JobVacancies','CanManageSharingAndBroadcast') AS Len`
+      );
+      if (check.recordset[0].Len) {
+        console.log('ℹ️ JobVacancies.CanManageSharingAndBroadcast already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        ALTER TABLE dbo.JobVacancies
+        ADD CanManageSharingAndBroadcast BIT NOT NULL CONSTRAINT DF_JobVacancies_CanManageSharingAndBroadcast DEFAULT(0);
+      `);
+      console.log('✅ Added JobVacancies.CanManageSharingAndBroadcast column.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring JobVacancies.CanManageSharingAndBroadcast:', err);
+      throw err;
+    }
+  },
+
+  // جدول إعدادات عامة بسيط (مفتاح/قيمة) — أول استخدام له: الحد الأعلى لمستوى بث التقويم
+  // المسموح للمديريات اختياره (يضبطه المدير العام فقط)، بدلاً من الصعود حتى جذر النظام المطلق.
+  ensureSystemSettingsTable: async function ensureSystemSettingsTable(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'SystemSettings'
+      `);
+      if (check.recordset[0].cnt > 0) {
+        console.log('ℹ️ SystemSettings table already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        CREATE TABLE dbo.SystemSettings (
+          SettingKey      NVARCHAR(100) NOT NULL PRIMARY KEY,
+          SettingValue    NVARCHAR(500) NULL,
+          UpdatedAt       DATETIME NOT NULL CONSTRAINT DF_SystemSettings_UpdatedAt DEFAULT(GETDATE()),
+          UpdatedByUserID NVARCHAR(50) NULL
+        );
+      `);
+      console.log('✅ Created SystemSettings table.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring SystemSettings table:', err);
+      throw err;
+    }
+  },
+
+  // حد أعلى لمستوى البث خاص بمنصب معيّن — يضبطه المدير العام للنظام فقط، ويتجاوز (لهذا المنصب
+  // تحديداً) الحد الأعلى الافتراضي العام (SystemSettings.MaxBroadcastDepartmentID) عند وجوده.
+  // NULL = هذا المنصب يتبع الحد الافتراضي العام كالمعتاد (السلوك الحالي، بلا تغيير).
+  ensureVacancyMaxBroadcastColumn: async function ensureVacancyMaxBroadcastColumn(pool) {
+    try {
+      const check = await pool.request().query(
+        `SELECT COL_LENGTH('dbo.JobVacancies','MaxBroadcastDepartmentID') AS Len`
+      );
+      if (check.recordset[0].Len) {
+        console.log('ℹ️ JobVacancies.MaxBroadcastDepartmentID already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        ALTER TABLE dbo.JobVacancies ADD MaxBroadcastDepartmentID INT NULL;
+      `);
+      console.log('✅ Added JobVacancies.MaxBroadcastDepartmentID column.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring JobVacancies.MaxBroadcastDepartmentID:', err);
+      throw err;
+    }
+  },
+
+  // حقل مستقل تماماً عن CreatedAt لتاريخ ظهور التعليق في التقويم. CreatedAt يبقى دائماً لحظة
+  // الإدراج الفعلية (لا يُعدَّل بعد الإنشاء)، بينما CalendarDisplayDate هو ما يحدد اليوم الذي
+  // يظهر فيه التعليق على التقويم — يُحدَّد عبر نافذة اختيار تاريخ/وقت عند تفعيل "إظهار في التقويم".
+  // للبيانات الموجودة سابقاً: نُنسخ CreatedAt إلى CalendarDisplayDate مرة واحدة فقط (عند إضافة
+  // العمود لأول مرة) للحفاظ على موضعها الحالي في التقويم دون تغيير.
+  ensureCommentCalendarDisplayDateColumn: async function ensureCommentCalendarDisplayDateColumn(pool) {
+    try {
+      const check = await pool.request().query(
+        `SELECT COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS Len`
+      );
+      if (check.recordset[0].Len) {
+        console.log('ℹ️ Comments.CalendarDisplayDate already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        ALTER TABLE dbo.Comments ADD CalendarDisplayDate DATETIME NULL;
+      `);
+      await pool.request().query(`
+        UPDATE dbo.Comments SET CalendarDisplayDate = CreatedAt WHERE CalendarDisplayDate IS NULL;
+      `);
+      console.log('✅ Added Comments.CalendarDisplayDate column and backfilled it from CreatedAt.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring Comments.CalendarDisplayDate:', err);
+      throw err;
+    }
+  },
 };

@@ -1,6 +1,6 @@
 // src/components/DepartmentManagement.tsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { Trash2, Edit, Plus, ChevronDown, ChevronRight, Briefcase, UserPlus, UserMinus, X, Check, Upload, FileSpreadsheet, Calendar, CalendarOff } from 'lucide-react';
+import { Trash2, Edit, Plus, ChevronDown, ChevronRight, Briefcase, UserPlus, UserMinus, X, Check, Upload, FileSpreadsheet, Calendar, CalendarOff, ShieldCheck, ShieldOff } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import type { CurrentUser } from '../types';
 
@@ -28,6 +28,9 @@ type Vacancy = {
   CurrentUserFullName?: string | null;
   CurrentUserIsActive?: boolean | number | null;
   ExcludeFromCalendarBroadcast?: boolean | number | null;
+  CanManageSharingAndBroadcast?: boolean | number | null;
+  MaxBroadcastDepartmentID?: number | null;
+  MaxBroadcastDepartmentName?: string | null;
 };
 
 type RankRow = {
@@ -84,6 +87,146 @@ function getSubtreeIds(rootId: number, allDepts: Department[]): Set<number> {
   return result;
 }
 
+const normalizeDeptParentId = (dep: Department): number | null => {
+  const pid = dep.ParentID ?? dep.ParentDepartmentID;
+  if (pid === undefined || pid === null) return null;
+  const n = Number(pid);
+  return Number.isFinite(n) ? n : null;
+};
+
+const buildDeptTree = (items: Department[]): TreeNode[] => {
+  const map = new Map<number, TreeNode>();
+  const roots: TreeNode[] = [];
+  items.forEach((d) => map.set(d.DepartmentID, { ...d, children: [] }));
+  map.forEach((node) => {
+    const pid = normalizeDeptParentId(node);
+    if (pid != null && map.has(pid)) {
+      map.get(pid)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+  const sortNodes = (nodes: TreeNode[]) => {
+    nodes.sort((a, b) => a.Name.localeCompare(b.Name));
+    nodes.forEach((n) => sortNodes(n.children));
+  };
+  sortNodes(roots);
+  return roots;
+};
+
+// منتقٍ قسم واحد على شكل شجرة قابلة للطي/التوسيع — بديل عن القائمة الأبجدية المسطّحة، يسهّل تحديد
+// القسم الصحيح بصرياً عبر تتبّع الهرمية (قسم ← أقسامه الفرعية ← ...) بدلاً من البحث في قائمة طويلة.
+type DepartmentTreeSelectProps = {
+  departments: Department[];
+  value: number | null;
+  onChange: (id: number | null) => void;
+  noneLabel: string;
+};
+
+const DepartmentTreeSelect: React.FC<DepartmentTreeSelectProps> = ({ departments, value, onChange, noneLabel }) => {
+  const [open, setOpen] = useState(false);
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const containerRef = React.useRef<HTMLDivElement>(null);
+
+  const tree = React.useMemo(() => buildDeptTree(departments), [departments]);
+  const nameById = React.useMemo(() => new Map(departments.map(d => [d.DepartmentID, d.Name])), [departments]);
+
+  useEffect(() => {
+    if (!open || value == null) return;
+    const map = new Map(departments.map(d => [d.DepartmentID, d]));
+    const toExpand: number[] = [];
+    let cur = map.get(value);
+    const visited = new Set<number>();
+    while (cur && !visited.has(cur.DepartmentID)) {
+      visited.add(cur.DepartmentID);
+      const pid = normalizeDeptParentId(cur);
+      if (pid == null) break;
+      toExpand.push(pid);
+      cur = map.get(pid);
+    }
+    if (toExpand.length) {
+      setExpandedIds(prev => new Set([...prev, ...toExpand]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, value]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const toggleNode = (id: number) => {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const renderTreeNode = (node: TreeNode, depth: number): React.ReactNode => {
+    const hasChildren = node.children.length > 0;
+    const isExpanded = expandedIds.has(node.DepartmentID);
+    const isSelected = value === node.DepartmentID;
+    return (
+      <li key={node.DepartmentID}>
+        <div
+          className={`flex items-center gap-1 py-1 px-1 rounded cursor-pointer text-sm ${isSelected ? 'bg-primary/10 text-primary font-semibold' : 'hover:bg-content/5'}`}
+          style={{ paddingRight: depth * 16 }}
+          onClick={() => { onChange(node.DepartmentID); setOpen(false); }}
+        >
+          {hasChildren ? (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); toggleNode(node.DepartmentID); }}
+              className="text-gray-400 shrink-0"
+            >
+              {isExpanded ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}
+            </button>
+          ) : <span className="w-[14px] shrink-0" />}
+          <span>{node.Name}</span>
+        </div>
+        {hasChildren && isExpanded && (
+          <ul>
+            {node.children.map(child => renderTreeNode(child, depth + 1))}
+          </ul>
+        )}
+      </li>
+    );
+  };
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full p-2 border rounded bg-white text-sm text-right flex items-center justify-between gap-2"
+      >
+        <span className={value == null ? 'text-gray-400' : ''}>
+          {value == null ? noneLabel : (nameById.get(value) || `#${value}`)}
+        </span>
+        <ChevronDown size={14} className="text-gray-400 shrink-0"/>
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 w-full max-h-72 overflow-y-auto bg-white border rounded shadow-lg p-2" dir="rtl">
+          <div
+            className={`py-1 px-1 rounded cursor-pointer text-sm mb-1 ${value == null ? 'bg-primary/10 text-primary font-semibold' : 'hover:bg-content/5 text-gray-600'}`}
+            onClick={() => { onChange(null); setOpen(false); }}
+          >
+            {noneLabel}
+          </div>
+          <ul className="space-y-0.5">
+            {tree.map(root => renderTreeNode(root, 0))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
   const isSystemAdmin = userRole === 1;
@@ -120,6 +263,78 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
   const [transferSearch, setTransferSearch] = useState('');
   const [transferLoading, setTransferLoading] = useState(false);
   const [transferDeptIdForPanel, setTransferDeptIdForPanel] = useState<number | ''>('');
+
+  // ---- الحد الأعلى لمستوى بث التقويم (المدير العام للنظام فقط) ----
+  const [maxBroadcastSelection, setMaxBroadcastSelection] = useState<string>('');
+  const [savingMaxBroadcast, setSavingMaxBroadcast] = useState(false);
+  const [maxBroadcastSaved, setMaxBroadcastSaved] = useState(false);
+
+  useEffect(() => {
+    if (!isSystemAdmin) return;
+    fetch('/api/departments/max-broadcast-level')
+      .then(r => r.ok ? r.json() : { DepartmentID: null })
+      .then(data => setMaxBroadcastSelection(data.DepartmentID != null ? String(data.DepartmentID) : ''))
+      .catch(() => {});
+  }, [isSystemAdmin]);
+
+  const handleSaveMaxBroadcast = async () => {
+    setSavingMaxBroadcast(true);
+    setMaxBroadcastSaved(false);
+    try {
+      const deptId = maxBroadcastSelection === '' ? null : parseInt(maxBroadcastSelection, 10);
+      const res = await fetch('/api/departments/max-broadcast-level', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser?.UserID, isAdmin: !!currentUser?.IsAdmin, DepartmentID: deptId }),
+      });
+      if (res.ok) {
+        setMaxBroadcastSaved(true);
+        setTimeout(() => setMaxBroadcastSaved(false), 2500);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.message || 'تعذّر حفظ الحد الأعلى لمستوى البث');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('حدث خطأ أثناء الحفظ');
+    } finally {
+      setSavingMaxBroadcast(false);
+    }
+  };
+
+  // ---- حد أعلى لمستوى البث خاص بمنصب معيّن (المدير العام للنظام فقط) ----
+  const [vacancyBroadcastModalFor, setVacancyBroadcastModalFor] = useState<Vacancy | null>(null);
+  const [vacancyBroadcastSelection, setVacancyBroadcastSelection] = useState<number | null>(null);
+  const [savingVacancyBroadcast, setSavingVacancyBroadcast] = useState(false);
+
+  const openVacancyBroadcastModal = (vacancy: Vacancy) => {
+    setVacancyBroadcastModalFor(vacancy);
+    setVacancyBroadcastSelection(vacancy.MaxBroadcastDepartmentID ?? null);
+  };
+
+  const handleSaveVacancyBroadcast = async () => {
+    if (!vacancyBroadcastModalFor) return;
+    setSavingVacancyBroadcast(true);
+    try {
+      const res = await fetch(`/api/vacancies/${vacancyBroadcastModalFor.VacancyID}/max-broadcast-level`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser?.UserID, DepartmentID: vacancyBroadcastSelection }),
+      });
+      if (res.ok) {
+        setVacancyBroadcastModalFor(null);
+        if (selectedDepartmentId != null) fetchVacancies(selectedDepartmentId);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.message || 'تعذّر حفظ الحد الأعلى الخاص بالمنصب');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('حدث خطأ أثناء الحفظ');
+    } finally {
+      setSavingVacancyBroadcast(false);
+    }
+  };
 
   // ---- استيراد من إكسل ----
   const [showImportPanel, setShowImportPanel] = useState(false);
@@ -467,6 +682,30 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
     }
   };
 
+  const handleToggleSharingDelegation = async (vacancy: Vacancy) => {
+    const nextEnabled = !vacancy.CanManageSharingAndBroadcast;
+    try {
+      const res = await fetch(`/api/vacancies/${vacancy.VacancyID}/sharing-delegation`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser?.UserID,
+          isAdmin: !!currentUser?.IsAdmin,
+          enabled: nextEnabled,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.message || 'تعذّر تحديث التفويض لهذا المنصب');
+        return;
+      }
+      if (selectedDepartmentId != null) fetchVacancies(selectedDepartmentId);
+    } catch (err) {
+      console.error(err);
+      alert('حدث خطأ أثناء تحديث التفويض');
+    }
+  };
+
   const handleDeleteVacancy = async (vacancyId: number, vacancyName: string) => {
     try {
       const usageRes = await fetch(`/api/vacancies/${vacancyId}/usage`);
@@ -710,6 +949,37 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
 
   return (
     <div className="space-y-8">
+      {isSystemAdmin && (
+        <div className="bg-white p-6 rounded-lg shadow">
+          <h2 className="text-xl font-semibold mb-2">الحد الأعلى لمستوى بث التقويم</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            يحدد أعلى مستوى (أكثر عمومية) يمكن لأي مدير قسم اختياره عند ضبط مستوى بث مهمة في التقويم. اتركه فارغاً للسماح بالصعود حتى ما قبل جذر النظام مباشرة.
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex-1 min-w-[220px]">
+              <DepartmentTreeSelect
+                departments={departments}
+                value={maxBroadcastSelection === '' ? null : parseInt(maxBroadcastSelection, 10)}
+                onChange={(id) => { setMaxBroadcastSelection(id == null ? '' : String(id)); setMaxBroadcastSaved(false); }}
+                noneLabel="بدون حد — حتى ما قبل جذر النظام (الافتراضي)"
+              />
+            </div>
+            <button
+              type="button"
+              disabled={savingMaxBroadcast}
+              onClick={handleSaveMaxBroadcast}
+              className={`px-4 py-2 rounded-md text-sm disabled:opacity-50 transition-colors ${
+                maxBroadcastSaved
+                  ? 'border border-green-500 text-green-600 bg-green-50'
+                  : 'bg-primary text-white hover:bg-primary-dark'
+              }`}
+            >
+              {savingMaxBroadcast ? 'جارٍ الحفظ...' : maxBroadcastSaved ? '✓ تم الحفظ' : 'حفظ'}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         {/* قائمة الأقسام الحالية على شكل شجرة */}
         <div className="bg-white p-6 rounded-lg shadow">
@@ -1027,6 +1297,8 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                     <th className="p-2 font-semibold">الحالة</th>
                     <th className="p-2 font-semibold">الموظف الحالي</th>
                     <th className="p-2 font-semibold">بث التقويم</th>
+                    <th className="p-2 font-semibold">تفويض المشاركة</th>
+                    {isSystemAdmin && <th className="p-2 font-semibold">حد البث الخاص بالمنصب</th>}
                     <th className="p-2 font-semibold">إجراءات</th>
                   </tr>
                 </thead>
@@ -1115,6 +1387,39 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                               {v.ExcludeFromCalendarBroadcast ? 'موقّف' : 'مفعّل'}
                             </button>
                           </td>
+                          <td className="p-2">
+                            <button
+                              onClick={() => handleToggleSharingDelegation(v)}
+                              className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${
+                                v.CanManageSharingAndBroadcast
+                                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                              }`}
+                              title={v.CanManageSharingAndBroadcast
+                                ? 'يملك هذا المنصب صلاحية إدارة المشاركة بين المديريات ومستوى بث التقويم — اضغط لإلغائها'
+                                : 'منح هذا المنصب صلاحية إدارة المشاركة بين المديريات ومستوى بث التقويم (كالمدير)'}
+                            >
+                              {v.CanManageSharingAndBroadcast ? <ShieldCheck size={14}/> : <ShieldOff size={14}/>}
+                              {v.CanManageSharingAndBroadcast ? 'مفوَّض' : 'غير مفوَّض'}
+                            </button>
+                          </td>
+                          {isSystemAdmin && (
+                            <td className="p-2">
+                              <button
+                                onClick={() => openVacancyBroadcastModal(v)}
+                                className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${
+                                  v.MaxBroadcastDepartmentID != null
+                                    ? 'bg-purple-100 text-purple-700 hover:bg-purple-200'
+                                    : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                                }`}
+                                title="تحديد حد أعلى لمستوى البث خاص بهذا المنصب (يتجاوز الحد العام الافتراضي)"
+                              >
+                                {v.MaxBroadcastDepartmentID != null
+                                  ? (v.MaxBroadcastDepartmentName || `#${v.MaxBroadcastDepartmentID}`)
+                                  : 'الحد العام الافتراضي'}
+                              </button>
+                            </td>
+                          )}
                           <td className="p-2 flex gap-2">
                             {isEditingThis ? (
                               <>
@@ -1238,6 +1543,38 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
               </table>
             </div>
           )}
+        </div>
+      )}
+
+      {vacancyBroadcastModalFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={e => e.target === e.currentTarget && setVacancyBroadcastModalFor(null)}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm flex flex-col gap-4 p-5" dir="rtl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-primary">
+                حد أعلى لمستوى البث — {vacancyBroadcastModalFor.Name}
+              </h3>
+              <button onClick={() => setVacancyBroadcastModalFor(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              إن تُرك دون تحديد، يتبع هذا المنصب الحد الأعلى العام الافتراضي (أعلاه). حدِّد قسماً ليتجاوز به هذا المنصب تحديداً.
+            </p>
+            <DepartmentTreeSelect
+              departments={departments}
+              value={vacancyBroadcastSelection}
+              onChange={setVacancyBroadcastSelection}
+              noneLabel="بدون حد خاص — اتباع الحد العام الافتراضي"
+            />
+            <button
+              type="button"
+              disabled={savingVacancyBroadcast}
+              onClick={handleSaveVacancyBroadcast}
+              className="w-full bg-primary text-white py-2 rounded-md hover:bg-primary-dark disabled:opacity-50"
+            >
+              {savingVacancyBroadcast ? 'جارٍ الحفظ...' : 'حفظ'}
+            </button>
+          </div>
         </div>
       )}
     </div>

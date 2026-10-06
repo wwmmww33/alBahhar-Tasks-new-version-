@@ -1,4 +1,14 @@
 const sql = require('mssql');
+const {
+    canManageDepartmentSharingAndBroadcast,
+    resolveAllowedBroadcastChain,
+    getMaxBroadcastDepartmentId,
+    setMaxBroadcastDepartmentId,
+    getVacancyMaxBroadcastDepartmentId,
+    setVacancyMaxBroadcastDepartmentId,
+    isTrueSystemAdmin,
+} = require('../utils/departmentSharing');
+const { resolveActorContext } = require('../utils/vacancyResolver');
 
 let _deptColsCache = null;
 const resolveDeptColumns = async (pool) => {
@@ -453,5 +463,93 @@ exports.importDepartmentsFromExcel = async (req, res) => {
     } catch (err) {
         console.error('IMPORT EXCEL ERROR:', err);
         res.status(500).json({ message: 'خطأ أثناء استيراد الملف', detail: err.message });
+    }
+};
+
+// GET /api/departments/:id/ancestor-chain?userId= — سلسلة الأسلاف "المسموحة" من القسم نفسه صعوداً،
+// تُستخدم لعرض خيارات "مستوى البث" الحقيقية بالاسم (قسمي ← الأعلى ← الأعلى منه ← ...). لا تتوقف عند
+// حدود القسم المستقل (Type=1) عمداً — هذا هو الغرض من الميزة — لكنها تستثني جذر النظام المطلق
+// افتراضياً، أو تتوقف عند الحد الأعلى الذي ضبطه المدير العام (SystemSettings)، أو الحد الخاص بمنصب
+// صاحب الطلب (userId) إن وُجد له حد خاص يتجاوز الحد العام.
+exports.getAncestorChain = async (req, res) => {
+    const pool = req.app.locals.db;
+    const departmentId = parseInt(req.params.id, 10);
+    const { userId } = req.query;
+    if (!Number.isInteger(departmentId)) {
+        return res.status(400).json({ message: 'id must be an integer.' });
+    }
+    try {
+        let vacancyId = null;
+        if (userId) {
+            try {
+                const ctx = await resolveActorContext(pool, userId);
+                vacancyId = ctx?.vacancyId ?? null;
+            } catch (_) { /* تجاهل دفاعياً */ }
+        }
+        const chain = await resolveAllowedBroadcastChain(pool, departmentId, vacancyId);
+        res.status(200).json(chain.map(({ DepartmentID, Name, Type }) => ({ DepartmentID, Name, Type })));
+    } catch (err) {
+        console.error('GET ANCESTOR CHAIN ERROR:', err);
+        res.status(500).json({ message: 'Error fetching ancestor chain', detail: err.message });
+    }
+};
+
+// GET /api/departments/max-broadcast-level — القيمة الحالية للحد الأعلى لمستوى البث (عامة للجميع، قراءة فقط)
+exports.getMaxBroadcastLevel = async (req, res) => {
+    const pool = req.app.locals.db;
+    try {
+        const deptId = await getMaxBroadcastDepartmentId(pool);
+        if (deptId == null) {
+            return res.status(200).json({ DepartmentID: null, Name: null });
+        }
+        const r = await pool.request().input('DepartmentID', sql.Int, deptId)
+            .query('SELECT DepartmentID, Name FROM dbo.Departments WHERE DepartmentID = @DepartmentID');
+        res.status(200).json(r.recordset[0] || { DepartmentID: deptId, Name: null });
+    } catch (err) {
+        console.error('GET MAX BROADCAST LEVEL ERROR:', err);
+        res.status(500).json({ message: 'Error fetching max broadcast level', detail: err.message });
+    }
+};
+
+// PUT /api/departments/max-broadcast-level — المدير العام للنظام فقط (Role=1)
+exports.setMaxBroadcastLevel = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { userId, DepartmentID } = req.body || {};
+    if (!userId) {
+        return res.status(401).json({ message: 'userId is required.' });
+    }
+    try {
+        const allowed = await isTrueSystemAdmin(pool, userId);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة للمدير العام للنظام فقط.' });
+        }
+        const deptId = DepartmentID == null ? null : parseInt(DepartmentID, 10);
+        await setMaxBroadcastDepartmentId(pool, deptId, userId);
+        res.status(200).json({ message: 'تم تحديث الحد الأعلى لمستوى البث.', DepartmentID: deptId });
+    } catch (err) {
+        console.error('SET MAX BROADCAST LEVEL ERROR:', err);
+        res.status(500).json({ message: 'Error setting max broadcast level', detail: err.message });
+    }
+};
+
+// GET /api/departments/:id/sharing-permission?userId=&isAdmin= — يتحقق هل صاحب الطلب يملك صلاحية
+// إدارة المشاركة بين المديريات/مستوى بث التقويم على مهمة تابعة لهذا القسم (مدير حقيقي أو مفوَّض له
+// ضمن نطاقه). يُستخدم في الواجهة لإظهار/إخفاء أدوات المشاركة والبث دون تكرار منطق الصلاحية هناك.
+exports.checkSharingPermission = async (req, res) => {
+    const pool = req.app.locals.db;
+    const departmentId = parseInt(req.params.id, 10);
+    const { userId, isAdmin } = req.query;
+    if (!Number.isInteger(departmentId)) {
+        return res.status(400).json({ message: 'id must be an integer.' });
+    }
+    if (!userId) {
+        return res.status(400).json({ message: 'userId is required.' });
+    }
+    try {
+        const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, departmentId);
+        res.status(200).json({ allowed });
+    } catch (err) {
+        console.error('CHECK SHARING PERMISSION ERROR:', err);
+        res.status(500).json({ message: 'Error checking sharing permission', detail: err.message });
     }
 };

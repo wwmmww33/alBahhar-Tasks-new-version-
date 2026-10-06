@@ -13,8 +13,9 @@ type PersonalItem = {
   TaskTitle?: string;
   EventID?: number;
   Title?: string;
+  DueDate?: string;
 };
-type CommentItem = { CommentID: number; Content: string; TaskTitle: string };
+type CommentItem = { CommentID: number; Content: string; TaskTitle: string; CreatedAt: string };
 
 export type CalendarPdfParams = {
   monthLabel: string;
@@ -41,6 +42,60 @@ function norm(d: Date) { return new Date(d.getFullYear(), d.getMonth(), d.getDat
 function esc(s: string) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function fmtDate(d: string) {
   return new Date(d).toLocaleDateString('ar-EG-u-nu-latn', { year:'numeric', month:'long', day:'numeric' });
+}
+function fmtTime(dateStr?: string | null): string {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  const h = d.getHours();
+  const m = d.getMinutes();
+  if (h === 0 && m === 0) return '';
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')} `;
+}
+
+// يدمج المهام الفرعية (بداية امتداد + مفردة) والمهام الشخصية والتعليقات في قائمة واحدة مرتبة
+// زمنياً من الأقدم للأحدث، بدل عرضها في أقسام منفصلة غير مرتبة بالنسبة لبعضها.
+function buildMergedDayHTML(
+  startSpans: SpanEntry[],
+  singles: DisplayItem[],
+  personal: PersonalItem[],
+  comments: CommentItem[],
+  startClass: string,
+  otherClass: string,
+): string {
+  const entries: { time: number; html: string }[] = [];
+
+  for (const { item } of startSpans) {
+    const c = spanColor(item.SubtaskID);
+    const p = item.AssignedToName ? ` (${esc(item.AssignedToName)})` : '';
+    entries.push({
+      time: new Date(item.DueDate).getTime(),
+      html: `<div class="${startClass}" style="color:${c};">${fmtTime(item.DueDate)}${item.SubtaskID}◀ ${esc(item.SubtaskTitle)}${p} (ضمن: ${esc(item.TaskTitle)})</div>`,
+    });
+  }
+  for (const it of singles) {
+    const c = spanColor(it.SubtaskID);
+    const p = it.AssignedToName ? ` (${esc(it.AssignedToName)})` : '';
+    entries.push({
+      time: new Date(it.DueDate).getTime(),
+      html: `<div class="${otherClass}" style="color:${c};">${fmtTime(it.DueDate)}${it.SubtaskID}◀ ${esc(it.SubtaskTitle)}${p} (ضمن: ${esc(it.TaskTitle)})</div>`,
+    });
+  }
+  for (const ev of personal) {
+    const id = ev.SubtaskID ?? ev.TaskID ?? ev.EventID ?? '';
+    const lbl = ev.SubtaskTitle ?? ev.TaskTitle ?? ev.Title ?? '';
+    entries.push({
+      time: ev.DueDate ? new Date(ev.DueDate).getTime() : 0,
+      html: `<div class="${otherClass}" style="color:#059669;">${fmtTime(ev.DueDate)}${id}★ ${esc(String(lbl))}</div>`,
+    });
+  }
+  for (const cm of comments) {
+    entries.push({
+      time: new Date(cm.CreatedAt).getTime(),
+      html: `<div class="${otherClass}" style="color:#7c3aed;">${fmtTime(cm.CreatedAt)}${cm.CommentID}💬 ${esc(cm.Content)} (ضمن: ${esc(cm.TaskTitle)})</div>`,
+    });
+  }
+
+  return entries.sort((a, b) => a.time - b.time).map(e => e.html).join('');
 }
 
 // ─── indexing helpers ────────────────────────────────────────────────────────
@@ -141,15 +196,13 @@ function renderMonthGrid(
       const sorted     = [...singles].sort((a,b)=>new Date(a.DueDate).getTime()-new Date(b.DueDate).getTime());
 
       const contHTML   = contSpans.length ? `<div class="span-cont">${contSpans.map(({item})=>`<span style="color:${spanColor(item.SubtaskID)};">${item.SubtaskID}</span>`).join('<span class="sep">|</span>')}</div>` : '';
-      const startHTML  = startSpans.map(({item})=>{const c=spanColor(item.SubtaskID);const p=item.AssignedToName?` (${esc(item.AssignedToName)})`:'';return `<div class="span-start" style="color:${c};">${item.SubtaskID}◀ ${esc(item.SubtaskTitle)}${p} (ضمن: ${esc(item.TaskTitle)})</div>`;}).join('');
-      const singlesHTML= sorted.map(it=>{const c=spanColor(it.SubtaskID);const p=it.AssignedToName?` (${esc(it.AssignedToName)})`:'';return `<div class="item-row" style="color:${c};">${it.SubtaskID}◀ ${esc(it.SubtaskTitle)}${p} (ضمن: ${esc(it.TaskTitle)})</div>`;}).join('');
-      const personalHTML=personal.map(ev=>{const id=ev.SubtaskID??ev.TaskID??ev.EventID??'';const lbl=ev.SubtaskTitle??ev.TaskTitle??ev.Title??'';return `<div class="item-row" style="color:#059669;">${id}★ ${esc(String(lbl))}</div>`;}).join('');
-      const commentsHTML=comments.map(cm=>`<div class="item-row" style="color:#7c3aed;">${cm.CommentID}💬 ${esc(cm.Content)}</div>`).join('');
+      // نُدمج بداية الامتدادات والمهام المفردة والشخصية والتعليقات في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث
+      const mergedHTML = buildMergedDayHTML(startSpans, sorted, personal, comments, 'span-start', 'item-row');
 
       let cls = 'day-cell'; if (wk) cls+=' wk'; if (isToday) cls+=' today';
       return `<div class="${cls}">
         <div class="day-num${isToday?' today-num':''}">${date.getDate()}</div>
-        ${contHTML}${startHTML}${singlesHTML}${personalHTML}${commentsHTML}
+        ${contHTML}${mergedHTML}
       </div>`;
     }).join('');
     return `<div class="week-row">${dayCells}</div>`;
@@ -220,13 +273,10 @@ function renderListHTML(
       barCellHTML = `<div class="vbars-cell">${laneHTML}</div>`;
     }
 
-    // events content
+    // events content — نُدمج جميع الأنواع في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث
     const contHTML   = contSpans.length ? `<div class="list-cont">${contSpans.map(({item})=>`<span style="color:${spanColor(item.SubtaskID)};">${item.SubtaskID}</span>`).join('<span class="sep">|</span>')}</div>` : '';
-    const startHTML  = startSpans.map(({item})=>{const c=spanColor(item.SubtaskID);const p=item.AssignedToName?` (${esc(item.AssignedToName)})`:'';return `<div class="list-item" style="color:${c};">${item.SubtaskID}◀ ${esc(item.SubtaskTitle)}${p} (ضمن: ${esc(item.TaskTitle)})</div>`;}).join('');
-    const singlesHTML= sorted.map(it=>{const c=spanColor(it.SubtaskID);const p=it.AssignedToName?` (${esc(it.AssignedToName)})`:'';return `<div class="list-item" style="color:${c};">${it.SubtaskID}◀ ${esc(it.SubtaskTitle)}${p} (ضمن: ${esc(it.TaskTitle)})</div>`;}).join('');
-    const personalHTML=personal.map(ev=>{const id=ev.SubtaskID??ev.TaskID??ev.EventID??'';const lbl=ev.SubtaskTitle??ev.TaskTitle??ev.Title??'';return `<div class="list-item" style="color:#059669;">${id}★ ${esc(String(lbl))}</div>`;}).join('');
-    const commentsHTML=comments.map(cm=>`<div class="list-item" style="color:#7c3aed;">${cm.CommentID}💬 ${esc(cm.Content)}</div>`).join('');
-    const eventsHTML = contHTML + startHTML + singlesHTML + personalHTML + commentsHTML;
+    const mergedHTML = buildMergedDayHTML(startSpans, sorted, personal, comments, 'list-item', 'list-item');
+    const eventsHTML = contHTML + mergedHTML;
     const hasEvents  = !!eventsHTML;
 
     html += `${barCellHTML}<div class="day-content${isToday?' day-content-today':''}${!hasEvents?' day-content-empty':''}">

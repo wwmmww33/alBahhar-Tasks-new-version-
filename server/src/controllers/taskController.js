@@ -5,6 +5,7 @@ const path = require('path');
 const { getTasksQueryWithDelegation, checkTaskAccess, checkDelegationPermission, hasActiveDelegation, isUserManagerOrAdmin } = require('../utils/delegationUtils');
 const encryptionConfig = require('../config/encryption.config');
 const { detectSchema, resolveVacancyId, ensureVacancyId, resolveActorContext, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
+const { canManageDepartmentSharingAndBroadcast, listTaskShares, listItemShareOptions, openTaskShare, closeTaskShare, resolveAllowedBroadcastChain } = require('../utils/departmentSharing');
 
 // مسار ملف debug مؤقت — يُحذف بعد تشخيص المشكلة
 const _ACTIVITY_DEBUG_LOG = (() => {
@@ -884,7 +885,7 @@ exports.assignTask = async (req, res) => {
 
 exports.createTask = async (req, res) => {
   // createTask المصحح — يدعم مخطط VacancyID الجديد ومخطط UserID القديم، وكذلك المهام الشخصية
-  const { Title, Description, DepartmentID, Priority, DueDate, subtasks, CreatedBy, ActedBy, CategoryID, URL, IsPersonal, PersonalOwnerUserID } = req.body;
+  const { Title, Description, DepartmentID, Priority, DueDate, subtasks, CreatedBy, ActedBy, CategoryID, URL, IsPersonal, PersonalOwnerUserID, CalendarBroadcastDepartmentID, isAdmin } = req.body;
   const encryptedDescription = Description ? encryptionConfig.encrypt(Description) : null;
   const encryptedTitle = encryptionConfig.encrypt(Title);
   const isPersonalTask = !!(IsPersonal);
@@ -941,6 +942,27 @@ exports.createTask = async (req, res) => {
     taskCols.push('DepartmentID');
     taskVals.push('@DepartmentID');
     taskRequest.input('DepartmentID', sql.Int, isPersonalTask ? null : DepartmentID);
+
+    // مستوى بث التقويم الافتراضي للمهمة — فقط لمدير القسم المستقل أو المفوَّض له، وإلا يبقى NULL
+    // (يعني اتباع قسم المهمة نفسه، وهو السلوك الحالي بلا تغيير)
+    if (!isPersonalTask && CalendarBroadcastDepartmentID != null) {
+      const broadcastColProbe = await (new sql.Request(transaction)).query(
+        `SELECT COL_LENGTH('dbo.Tasks','CalendarBroadcastDepartmentID') AS Len`
+      );
+      if (broadcastColProbe.recordset[0]?.Len) {
+        const canSetBroadcast = await canManageDepartmentSharingAndBroadcast(pool, CreatedBy, isAdmin, DepartmentID);
+        const requestedDeptId = parseInt(CalendarBroadcastDepartmentID, 10);
+        const actorVacCtx = canSetBroadcast ? await resolveActorContext(pool, CreatedBy).catch(() => null) : null;
+        const allowedChain = canSetBroadcast
+          ? await resolveAllowedBroadcastChain(pool, DepartmentID, actorVacCtx?.vacancyId ?? null)
+          : [];
+        if (canSetBroadcast && allowedChain.some(d => d.DepartmentID === requestedDeptId)) {
+          taskCols.push('CalendarBroadcastDepartmentID');
+          taskVals.push('@CalendarBroadcastDepartmentID');
+          taskRequest.input('CalendarBroadcastDepartmentID', sql.Int, requestedDeptId);
+        }
+      }
+    }
 
     // PersonalOwnerUserID: فقط للمهام الشخصية إذا كان العمود موجوداً
     const personalColProbe = await (new sql.Request(transaction)).query(
@@ -1159,20 +1181,67 @@ exports.getSubtasksForTask = async (req, res) => {
         const identityTable = s.HasSubAssignedToVacancy ? 'JobVacancies' : 'Users';
         const identityKey = s.HasSubAssignedToVacancy ? 'VacancyID' : 'UserID';
         const identityName = s.HasSubAssignedToVacancy ? 'Name' : 'FullName';
+        const identityDeptProbe = await pool.request().query(
+          `SELECT COL_LENGTH('dbo.${identityTable}','DepartmentID') AS Len`
+        );
+        const creatorDeptSelect = identityDeptProbe.recordset[0]?.Len
+          ? 'creator.DepartmentID as CreatorDepartmentID'
+          : 'CAST(NULL AS INT) as CreatorDepartmentID';
 
         const query = `
-      SELECT s.*, 
+      SELECT s.*,
                          u.${identityName} as AssignedToName,
-                         creator.${identityName} as CreatedByName
-      FROM Subtasks s 
-            LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey} 
+                         creator.${identityName} as CreatedByName,
+                         ${creatorDeptSelect}
+      FROM Subtasks s
+            LEFT JOIN ${identityTable} u ON s.${assignedCol} = u.${identityKey}
             LEFT JOIN ${identityTable} creator ON s.${createdCol} = creator.${identityKey}
-      WHERE s.TaskID = @TaskID 
+      WHERE s.TaskID = @TaskID
       ORDER BY s.CreatedAt DESC
     `;
     const request = pool.request().input('TaskID', sql.Int, id);
     const result = await request.query(query);
-    const subtasks = result.recordset.map(s => {
+    let rows = result.recordset;
+
+    // تبادل المهام بين المديريات المستقلة: إن كانت لهذه المهمة قناة مشاركة مفتوحة، نُفلتر
+    // العناصر — يظهر العنصر فقط لمن أنشأه (نفس مديريته المستقلة) أو لمن شُورك معه تحديداً.
+    // المهام بلا أي مشاركة (الغالبية) لا تتأثر إطلاقاً — تبقى كما كانت.
+    try {
+      const sharesExistCheck = await pool.request().input('TaskID', sql.Int, id)
+        .query(`SELECT TOP 1 1 AS found FROM dbo.TaskDepartmentShares WHERE TaskID = @TaskID`);
+      if (sharesExistCheck.recordset[0] && rows.length) {
+        const viewerCtx = await resolveActorContext(pool, userId);
+        const viewerGroup = viewerCtx?.departmentId != null
+          ? (await resolveIndependentDeptGroup(pool, viewerCtx.departmentId)).map(String)
+          : [];
+
+        const subtaskIds = rows.map(r => r.SubtaskID);
+        const sharesMap = {};
+        if (subtaskIds.length) {
+          const shareReq = pool.request();
+          const idPlaceholders = subtaskIds.map((sid, i) => { shareReq.input(`s${i}`, sql.Int, sid); return `@s${i}`; }).join(',');
+          const sharesResult = await shareReq.query(
+            `SELECT SubtaskID, SharedWithDepartmentID FROM dbo.SubtaskDepartmentShares WHERE SubtaskID IN (${idPlaceholders})`
+          );
+          for (const row of sharesResult.recordset) {
+            (sharesMap[row.SubtaskID] = sharesMap[row.SubtaskID] || []).push(String(row.SharedWithDepartmentID));
+          }
+        }
+
+        // تُرفَق قائمة الجهات المشاركة على كل صف (لعرضها/تعديلها في الواجهة لمن يملك صلاحية ذلك)
+        for (const row of rows) {
+          row.SharedDepartmentIds = (sharesMap[row.SubtaskID] || []).map(Number);
+        }
+
+        rows = rows.filter(row => {
+          if (row.CreatorDepartmentID != null && viewerGroup.includes(String(row.CreatorDepartmentID))) return true;
+          const sharedWith = sharesMap[row.SubtaskID];
+          return !!sharedWith && sharedWith.some(d => viewerGroup.includes(d));
+        });
+      }
+    } catch (_) { /* الجدول قد لا يكون موجوداً بعد — تجاهل دفاعياً وأعد كل العناصر */ }
+
+    const subtasks = rows.map(s => {
       if (s.Title) {
         try { s.Title = encryptionConfig.decrypt(s.Title); } catch (_) {}
       }
@@ -1215,15 +1284,59 @@ exports.getCommentsForTask = async (req, res) => {
         const identityTable = s.HasCommentedByVacancy ? 'JobVacancies' : 'Users';
         const identityKey = s.HasCommentedByVacancy ? 'VacancyID' : 'UserID';
         const identityName = s.HasCommentedByVacancy ? 'Name' : 'FullName';
+        const identityDeptProbe = await pool.request().query(
+          `SELECT COL_LENGTH('dbo.${identityTable}','DepartmentID') AS Len`
+        );
+        const creatorDeptSelect = identityDeptProbe.recordset[0]?.Len
+          ? 'creator.DepartmentID as CreatorDepartmentID'
+          : 'CAST(NULL AS INT) as CreatorDepartmentID';
 
         const result = await pool.request().input('TaskID', sql.Int, id).query(`
-            SELECT c.*, u.${identityName} as UserName 
-            FROM Comments c 
-            LEFT JOIN ${identityTable} u ON COALESCE(c.ActedBy, c.LastActedByVacancyID, c.${commentActorCol}) = u.${identityKey} 
-            WHERE c.TaskID = @TaskID 
+            SELECT c.*, u.${identityName} as UserName, ${creatorDeptSelect}
+            FROM Comments c
+            LEFT JOIN ${identityTable} u ON COALESCE(c.ActedBy, c.LastActedByVacancyID, c.${commentActorCol}) = u.${identityKey}
+            LEFT JOIN ${identityTable} creator ON c.${commentActorCol} = creator.${identityKey}
+            WHERE c.TaskID = @TaskID
             ORDER BY c.CreatedAt DESC
         `);
-    const comments = result.recordset.map(c => {
+    let rows = result.recordset;
+
+    // تبادل المهام بين المديريات المستقلة: نفس منطق الفلترة المطبّق على المهام الفرعية
+    try {
+      const sharesExistCheck = await pool.request().input('TaskID', sql.Int, id)
+        .query(`SELECT TOP 1 1 AS found FROM dbo.TaskDepartmentShares WHERE TaskID = @TaskID`);
+      if (sharesExistCheck.recordset[0] && rows.length) {
+        const viewerCtx = await resolveActorContext(pool, userId);
+        const viewerGroup = viewerCtx?.departmentId != null
+          ? (await resolveIndependentDeptGroup(pool, viewerCtx.departmentId)).map(String)
+          : [];
+
+        const commentIds = rows.map(r => r.CommentID);
+        const sharesMap = {};
+        if (commentIds.length) {
+          const shareReq = pool.request();
+          const idPlaceholders = commentIds.map((cid, i) => { shareReq.input(`c${i}`, sql.Int, cid); return `@c${i}`; }).join(',');
+          const sharesResult = await shareReq.query(
+            `SELECT CommentID, SharedWithDepartmentID FROM dbo.CommentDepartmentShares WHERE CommentID IN (${idPlaceholders})`
+          );
+          for (const row of sharesResult.recordset) {
+            (sharesMap[row.CommentID] = sharesMap[row.CommentID] || []).push(String(row.SharedWithDepartmentID));
+          }
+        }
+
+        for (const row of rows) {
+          row.SharedDepartmentIds = (sharesMap[row.CommentID] || []).map(Number);
+        }
+
+        rows = rows.filter(row => {
+          if (row.CreatorDepartmentID != null && viewerGroup.includes(String(row.CreatorDepartmentID))) return true;
+          const sharedWith = sharesMap[row.CommentID];
+          return !!sharedWith && sharedWith.some(d => viewerGroup.includes(d));
+        });
+      }
+    } catch (_) { /* الجدول قد لا يكون موجوداً بعد — تجاهل دفاعياً وأعد كل العناصر */ }
+
+    const comments = rows.map(c => {
       if (c.Content) {
         try { c.Content = encryptionConfig.decrypt(c.Content); } catch (e) {}
       }
@@ -1982,6 +2095,9 @@ exports.getTasksWithNotifications = async (req, res) => {
         if (hasPersonalColN && personalUserIdN) {
             accessParts.push(`t.PersonalOwnerUserID = @PersonalUserID`);
         }
+
+        // تبادل المهام بين المديريات المستقلة: فتح القناة وحده لا يُظهر المهمة لأحد — الظهور في
+        // القائمة يعتمد فقط على الإسناد الفعلي لمهمة فرعية (مغطّى أصلاً عبر EXISTS أعلاه).
 
         const assigneeSelect = taskAssignedCol
             ? `t.${taskAssignedCol} as AssignedTo, assignee.${identityName} as AssignedToName,`
@@ -3157,5 +3273,153 @@ exports.getTaskAuditLog = async (req, res) => {
     } catch (err) {
         console.error('getTaskAuditLog error:', err);
         res.status(500).json({ message: err.message });
+    }
+};
+
+// GET /api/tasks/:id/shares — الجهات المستقلة المفتوحة للمشاركة على هذه المهمة
+exports.listTaskDepartmentShares = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { id } = req.params;
+    try {
+        const shares = await listTaskShares(pool, parseInt(id, 10));
+        res.status(200).json(shares);
+    } catch (err) {
+        console.error('LIST TASK SHARES ERROR:', err);
+        res.status(500).json({ message: 'Error listing task shares', detail: err.message });
+    }
+};
+
+// GET /api/tasks/:id/share-options — نفس القنوات المفتوحة + مديرية المهمة الأصلية كخيار دائم
+// (لنافذة مشاركة مهمة فرعية/تعليق تحديداً، وليس نافذة إدارة القنوات)
+exports.listTaskShareOptions = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { id } = req.params;
+    const { userId } = req.query;
+    try {
+        const options = await listItemShareOptions(pool, parseInt(id, 10), userId);
+        res.status(200).json(options);
+    } catch (err) {
+        console.error('LIST TASK SHARE OPTIONS ERROR:', err);
+        res.status(500).json({ message: 'Error listing task share options', detail: err.message });
+    }
+};
+
+// POST /api/tasks/:id/shares — فتح قناة مشاركة مع قسم مستقل آخر (مدير القسم المالك أو المفوَّض له)
+exports.openTaskDepartmentShare = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { id } = req.params;
+    const { userId, isAdmin, DepartmentID } = req.body || {};
+
+    if (!userId || !DepartmentID) {
+        return res.status(400).json({ message: 'userId and DepartmentID are required.' });
+    }
+
+    try {
+        const taskResult = await pool.request().input('TaskID', sql.Int, id)
+            .query('SELECT TaskID, DepartmentID FROM Tasks WHERE TaskID = @TaskID');
+        if (!taskResult.recordset.length) {
+            return res.status(404).json({ message: 'المهمة غير موجودة.' });
+        }
+        const task = taskResult.recordset[0];
+        if (task.DepartmentID == null) {
+            return res.status(400).json({ message: 'لا يمكن مشاركة مهمة شخصية مع جهة أخرى.' });
+        }
+
+        const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, task.DepartmentID);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل المالك للمهمة أو المفوَّض له فقط.' });
+        }
+
+        // قسم الهدف يُحفظ كما هو (يُفضَّل تمرير الجذر المستقل نفسه من الواجهة)
+        const targetDeptId = parseInt(DepartmentID, 10);
+        if (!Number.isInteger(targetDeptId)) {
+            return res.status(400).json({ message: 'DepartmentID غير صالح.' });
+        }
+        const targetGroup = await resolveIndependentDeptGroup(pool, task.DepartmentID);
+        if (targetGroup.map(String).includes(String(targetDeptId))) {
+            return res.status(400).json({ message: 'لا يمكن مشاركة المهمة مع نفس مديريتها المستقلة.' });
+        }
+
+        await openTaskShare(pool, parseInt(id, 10), targetDeptId, userId);
+        res.status(201).json({ message: 'تم فتح قناة المشاركة.' });
+    } catch (err) {
+        console.error('OPEN TASK SHARE ERROR:', err);
+        res.status(500).json({ message: 'Error opening task share', detail: err.message });
+    }
+};
+
+// DELETE /api/tasks/:id/shares/:departmentId — إغلاق قناة مشاركة (مدير القسم المالك أو المفوَّض له)
+exports.closeTaskDepartmentShare = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { id, departmentId } = req.params;
+    const { userId, isAdmin } = req.query;
+
+    if (!userId) {
+        return res.status(401).json({ message: 'userId is required.' });
+    }
+
+    try {
+        const taskResult = await pool.request().input('TaskID', sql.Int, id)
+            .query('SELECT TaskID, DepartmentID FROM Tasks WHERE TaskID = @TaskID');
+        if (!taskResult.recordset.length) {
+            return res.status(404).json({ message: 'المهمة غير موجودة.' });
+        }
+        const task = taskResult.recordset[0];
+        const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, task.DepartmentID);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل المالك للمهمة أو المفوَّض له فقط.' });
+        }
+
+        await closeTaskShare(pool, parseInt(id, 10), parseInt(departmentId, 10));
+        res.status(200).json({ message: 'تم إغلاق قناة المشاركة.' });
+    } catch (err) {
+        console.error('CLOSE TASK SHARE ERROR:', err);
+        res.status(500).json({ message: 'Error closing task share', detail: err.message });
+    }
+};
+
+// PATCH /api/tasks/:id/broadcast-level — مستوى بث التقويم الافتراضي للمهمة (يرثه كل عنصر مُعلَّم
+// للتقويم تحتها ما لم يُرفَع لمستوى مختلف صراحة). مدير القسم المستقل أو المفوَّض له فقط.
+exports.setTaskBroadcastLevel = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { id } = req.params;
+    const { userId, isAdmin, DepartmentID } = req.body || {};
+
+    if (!userId) {
+        return res.status(401).json({ message: 'userId is required.' });
+    }
+
+    try {
+        const taskResult = await pool.request().input('TaskID', sql.Int, id)
+            .query('SELECT TaskID, DepartmentID FROM Tasks WHERE TaskID = @TaskID');
+        if (!taskResult.recordset.length) {
+            return res.status(404).json({ message: 'المهمة غير موجودة.' });
+        }
+        const task = taskResult.recordset[0];
+        if (task.DepartmentID == null) {
+            return res.status(400).json({ message: 'لا ينطبق هذا على المهام الشخصية.' });
+        }
+        const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, task.DepartmentID);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل أو المفوَّض له فقط.' });
+        }
+
+        const deptId = DepartmentID == null ? null : parseInt(DepartmentID, 10);
+        if (deptId != null) {
+            const actorCtx = await resolveActorContext(pool, userId).catch(() => null);
+            const allowedChain = await resolveAllowedBroadcastChain(pool, task.DepartmentID, actorCtx?.vacancyId ?? null);
+            if (!allowedChain.some(d => d.DepartmentID === deptId)) {
+                return res.status(400).json({ message: 'هذا المستوى غير مسموح به لمستوى البث.' });
+            }
+        }
+        await pool.request()
+            .input('TaskID', sql.Int, id)
+            .input('DepartmentID', sql.Int, deptId)
+            .query('UPDATE Tasks SET CalendarBroadcastDepartmentID = @DepartmentID WHERE TaskID = @TaskID');
+
+        res.status(200).json({ message: 'تم تحديث مستوى بث المهمة في التقويم.', CalendarBroadcastDepartmentID: deptId });
+    } catch (err) {
+        console.error('SET TASK BROADCAST LEVEL ERROR:', err);
+        res.status(500).json({ message: 'Error setting task broadcast level', detail: err.message });
     }
 };

@@ -123,6 +123,12 @@ const {
   ensureSubtaskReminderColumns,
   ensureAnnouncementsTables,
   ensureVacancyCalendarBroadcastColumn,
+  ensureCrossDepartmentSharingTables,
+  ensureCalendarBroadcastLevelColumns,
+  ensureVacancySharingDelegationColumn,
+  ensureSystemSettingsTable,
+  ensureVacancyMaxBroadcastColumn,
+  ensureCommentCalendarDisplayDateColumn,
 } = require('./utils/dbMigrations');
 
 
@@ -304,6 +310,24 @@ const startServer = async () => {
       await ensureVacancyCalendarBroadcastColumn(pool);
     } catch (calBroadcastErr) {
       console.error('⚠️ Database migration (JobVacancies.ExcludeFromCalendarBroadcast) failed. Server continues running.', calBroadcastErr);
+    }
+
+    // --- جداول تبادل المهام بين المديريات المستقلة + مستوى بث التقويم + تفويض المنصب ---
+    try {
+      await ensureCrossDepartmentSharingTables(pool);
+      await ensureCalendarBroadcastLevelColumns(pool);
+      await ensureVacancySharingDelegationColumn(pool);
+    } catch (crossDeptErr) {
+      console.error('⚠️ Database migration (Cross-department sharing) failed. Server continues running.', crossDeptErr);
+    }
+
+    // --- جدول الإعدادات العامة (الحد الأعلى لمستوى بث التقويم) ---
+    try {
+      await ensureSystemSettingsTable(pool);
+      await ensureVacancyMaxBroadcastColumn(pool);
+      await ensureCommentCalendarDisplayDateColumn(pool);
+    } catch (settingsErr) {
+      console.error('⚠️ Database migration (SystemSettings) failed. Server continues running.', settingsErr);
     }
 
     app.listen(port, '0.0.0.0', () => {
