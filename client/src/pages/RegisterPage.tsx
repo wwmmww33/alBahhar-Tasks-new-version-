@@ -96,9 +96,9 @@ const RegisterPage = () => {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-100">
-      <div className="w-full max-w-lg p-8 space-y-6 bg-white rounded-lg shadow-md">
-        <h1 className="text-3xl font-bold text-center">إنشاء حساب جديد</h1>
+    <div className="flex items-center justify-center min-h-screen bg-gray-100 dark:bg-gray-900">
+      <div className="w-full max-w-lg p-8 space-y-6 bg-white dark:bg-gray-800 rounded-lg shadow-md">
+        <h1 className="text-3xl font-bold text-center dark:text-gray-100">إنشاء حساب جديد</h1>
         <form onSubmit={handleSubmit} className="space-y-4">
 
           <input
@@ -107,7 +107,7 @@ const RegisterPage = () => {
             value={userId}
             onChange={e => setUserId(e.target.value)}
             required
-            className="w-full p-2 border rounded"
+            className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
           />
 
           <input
@@ -116,7 +116,7 @@ const RegisterPage = () => {
             value={fullName}
             onChange={e => setFullName(e.target.value)}
             required
-            className="w-full p-2 border rounded"
+            className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
           />
 
           <input
@@ -125,12 +125,12 @@ const RegisterPage = () => {
             value={password}
             onChange={e => setPassword(e.target.value)}
             required
-            className="w-full p-2 border rounded"
+            className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
           />
 
           {/* اختيار المنصب مع بحث */}
           <div className="relative">
-            <label className="block text-sm text-gray-600 mb-1">
+            <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">
               المنصب الوظيفي <span className="text-gray-400">(اختياري)</span>
             </label>
 
@@ -142,7 +142,7 @@ const RegisterPage = () => {
               onChange={e => { setSearch(e.target.value); setShowDropdown(true); setVacancyId(''); }}
               onFocus={() => { setShowDropdown(true); setSearch(''); }}
               onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
-              className="w-full p-2 border rounded"
+              className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
               autoComplete="off"
             />
 
@@ -151,13 +151,13 @@ const RegisterPage = () => {
               <button
                 type="button"
                 onClick={() => { setVacancyId(''); setSearch(''); }}
-                className="absolute left-2 top-8 text-gray-400 hover:text-gray-600 text-lg"
+                className="absolute left-2 top-8 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-lg"
               >×</button>
             )}
 
             {/* القائمة المنسدلة */}
             {showDropdown && (
-              <div className="absolute z-50 w-full bg-white border border-gray-200 rounded shadow-lg max-h-60 overflow-y-auto mt-1">
+              <div className="absolute z-50 w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded shadow-lg max-h-60 overflow-y-auto mt-1">
                 {filtered.length === 0 ? (
                   <div className="p-3 text-sm text-gray-400 text-center">لا توجد نتائج</div>
                 ) : (
@@ -165,11 +165,11 @@ const RegisterPage = () => {
                     <div
                       key={v.VacancyID}
                       onMouseDown={() => { setVacancyId(v.VacancyID); setSearch(''); setShowDropdown(false); }}
-                      className={`p-2 cursor-pointer hover:bg-blue-50 text-sm border-b last:border-0 ${vacancyId === v.VacancyID ? 'bg-blue-100' : ''}`}
+                      className={`p-2 cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-900/20 text-sm border-b dark:border-gray-700 last:border-0 ${vacancyId === v.VacancyID ? 'bg-blue-100 dark:bg-blue-900/30' : ''}`}
                     >
-                      <div className="font-medium text-gray-900">{v.Name}</div>
+                      <div className="font-medium text-gray-900 dark:text-gray-100">{v.Name}</div>
                       {v.DepartmentID && (
-                        <div className="text-xs text-gray-500 mt-0.5">
+                        <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                           {getFullPath(v.DepartmentID, departments)}
                         </div>
                       )}
@@ -189,7 +189,7 @@ const RegisterPage = () => {
         </form>
 
         {message && (
-          <p className={`text-sm text-center p-2 rounded ${message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+          <p className={`text-sm text-center p-2 rounded ${message.type === 'success' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'}`}>
             {message.text}
           </p>
         )}

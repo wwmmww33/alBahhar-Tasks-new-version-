@@ -203,7 +203,7 @@ const RelatedTasksSection = ({ taskId, userId, isAdmin, isPersonal = false, orig
                             </span>
                           )}
                         </span>
-                        <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${STATUS_COLORS[t.Status] || 'bg-gray-100 text-gray-600'}`}>
+                        <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${STATUS_COLORS[t.Status] || 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'}`}>
                           {STATUS_LABELS[t.Status] || t.Status}
                         </span>
                         <a
@@ -264,7 +264,7 @@ const RelatedTasksSection = ({ taskId, userId, isAdmin, isPersonal = false, orig
                   >
                     ↗
                   </a>
-                  <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${STATUS_COLORS[t.Status] || 'bg-gray-100 text-gray-600'}`}>
+                  <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${STATUS_COLORS[t.Status] || 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'}`}>
                     {STATUS_LABELS[t.Status] || t.Status}
                   </span>
                   <button

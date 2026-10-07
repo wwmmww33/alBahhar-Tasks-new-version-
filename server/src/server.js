@@ -99,6 +99,7 @@ const ranksRoutes = require('./routes/ranksRoutes');
 const myNotificationsRoutes = require('./routes/myNotificationsRoutes');
 const directoryRoutes = require('./routes/directoryRoutes');
 const announcementsRoutes = require('./routes/announcementsRoutes');
+const proposalsRoutes = require('./routes/proposalsRoutes');
 const {
   ensureSubtasksCalendarFlag,
   ensureCommentsCalendarFlag,
@@ -129,6 +130,7 @@ const {
   ensureSystemSettingsTable,
   ensureVacancyMaxBroadcastColumn,
   ensureCommentCalendarDisplayDateColumn,
+  ensureSystemProposalsTable,
 } = require('./utils/dbMigrations');
 
 
@@ -151,6 +153,7 @@ app.use('/api/ranks', ranksRoutes);
 app.use('/api/my-notifications', myNotificationsRoutes);
 app.use('/api/directory', directoryRoutes);
 app.use('/api/announcements', announcementsRoutes);
+app.use('/api/proposals', proposalsRoutes);
 
 
 // --- 3. 404 لمسارات الـ API غير الموجودة ---
@@ -326,6 +329,7 @@ const startServer = async () => {
       await ensureSystemSettingsTable(pool);
       await ensureVacancyMaxBroadcastColumn(pool);
       await ensureCommentCalendarDisplayDateColumn(pool);
+      await ensureSystemProposalsTable(pool);
     } catch (settingsErr) {
       console.error('⚠️ Database migration (SystemSettings) failed. Server continues running.', settingsErr);
     }

@@ -1476,7 +1476,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                       merged_into: { label: 'مدمجة في مهمة أخرى',  color: 'bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800',          icon: '🔗' },
                       reopened:    { label: 'إعادة فتح المهمة',     color: 'bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800',  icon: '🔓' },
                     };
-                    const a = actionMap[entry.Action] || { label: entry.Action, color: 'bg-white border-gray-200 dark:bg-gray-800', icon: '📌' };
+                    const a = actionMap[entry.Action] || { label: entry.Action, color: 'bg-white border-gray-200 dark:bg-gray-800 dark:border-gray-700', icon: '📌' };
                     const dateStr = new Date(entry.CreatedAt).toLocaleString('ar-EG-u-nu-latn', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                     return (
                       <div key={entry.LogID} className={`flex items-start gap-3 border rounded-lg px-4 py-3 ${a.color}`}>
@@ -1487,7 +1487,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                             {entry.TaskID && entry.Action !== 'deleted' ? (
                               <Link to={`/task/${entry.TaskID}`} className="text-xs text-primary hover:underline">#{entry.TaskID} — {entry.TaskTitle || ''}</Link>
                             ) : (
-                              <span className="text-xs text-gray-500">#{entry.TaskID} — {entry.TaskTitle || 'مهمة محذوفة'}</span>
+                              <span className="text-xs text-gray-500 dark:text-gray-400">#{entry.TaskID} — {entry.TaskTitle || 'مهمة محذوفة'}</span>
                             )}
                           </div>
                           <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-content-secondary">
@@ -1930,7 +1930,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                 disabled={isLoadingCompleted || !completedHasMore}
                 className={`px-4 py-2 rounded-md text-sm font-medium ${
                   isLoadingCompleted || !completedHasMore
-                    ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
+                    ? 'bg-gray-300 text-gray-600 cursor-not-allowed dark:bg-gray-700 dark:text-gray-400'
                     : 'bg-green-500 text-white hover:bg-green-600'
                 }`}
               >
@@ -1947,14 +1947,14 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                 disabled={isSearchingCompleted || !searchTerm.trim()}
                 className={`px-4 py-2 rounded-md text-sm font-medium ${
                   isSearchingCompleted || !searchTerm.trim()
-                    ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
+                    ? 'bg-gray-300 text-gray-600 cursor-not-allowed dark:bg-gray-700 dark:text-gray-400'
                     : 'bg-blue-500 text-white hover:bg-blue-600'
                 }`}
               >
                 {isSearchingCompleted ? 'جاري البحث في قاعدة البيانات...' : 'بحث في المهام المكتملة من قاعدة البيانات'}
               </button>
               {!searchTerm.trim() && (
-                <span className="text-xs text-gray-500 text-center sm:text-right">
+                <span className="text-xs text-gray-500 dark:text-gray-400 text-center sm:text-right">
                   أدخل كلمة في مربع البحث بالأعلى ثم اضغط زر البحث هنا.
                 </span>
               )}

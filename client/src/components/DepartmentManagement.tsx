@@ -203,7 +203,7 @@ const DepartmentTreeSelect: React.FC<DepartmentTreeSelectProps> = ({ departments
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        className="w-full p-2 border rounded bg-white text-sm text-right flex items-center justify-between gap-2"
+        className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm text-right flex items-center justify-between gap-2"
       >
         <span className={value == null ? 'text-gray-400' : ''}>
           {value == null ? noneLabel : (nameById.get(value) || `#${value}`)}
@@ -211,9 +211,9 @@ const DepartmentTreeSelect: React.FC<DepartmentTreeSelectProps> = ({ departments
         <ChevronDown size={14} className="text-gray-400 shrink-0"/>
       </button>
       {open && (
-        <div className="absolute z-20 mt-1 w-full max-h-72 overflow-y-auto bg-white border rounded shadow-lg p-2" dir="rtl">
+        <div className="absolute z-20 mt-1 w-full max-h-72 overflow-y-auto bg-white dark:bg-gray-800 dark:border-gray-600 border rounded shadow-lg p-2" dir="rtl">
           <div
-            className={`py-1 px-1 rounded cursor-pointer text-sm mb-1 ${value == null ? 'bg-primary/10 text-primary font-semibold' : 'hover:bg-content/5 text-gray-600'}`}
+            className={`py-1 px-1 rounded cursor-pointer text-sm mb-1 ${value == null ? 'bg-primary/10 text-primary font-semibold' : 'hover:bg-content/5 text-gray-600 dark:text-gray-400'}`}
             onClick={() => { onChange(null); setOpen(false); }}
           >
             {noneLabel}
@@ -899,7 +899,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
         <div className="flex items-center justify-between p-2" style={{ paddingInlineStart: `${depth * 16 + 8}px` }}>
           <div className="flex items-center gap-2 flex-wrap">
             {hasChildren ? (
-              <button onClick={() => toggleExpand(node.DepartmentID)} className="text-gray-600 hover:text-gray-800">
+              <button onClick={() => toggleExpand(node.DepartmentID)} className="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200">
                 {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               </button>
             ) : (
@@ -907,16 +907,16 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
             )}
             <button
               onClick={() => setSelectedDepartmentId(node.DepartmentID)}
-              className={`${isActive ? 'text-gray-900' : 'text-gray-400 line-through'} hover:underline text-right`}
+              className={`${isActive ? 'text-gray-900 dark:text-gray-100' : 'text-gray-400 line-through'} hover:underline text-right`}
               title="عرض/إدارة مناصب هذا القسم"
             >
               {node.Name}
             </button>
-            <span className={`text-xs px-2 py-0.5 rounded ${isActive ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+            <span className={`text-xs px-2 py-0.5 rounded ${isActive ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'}`}>
               {isActive ? 'مفعّل' : 'موقّف'}
             </span>
             {isIndependent && (
-              <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold">
+              <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 font-semibold">
                 مستقل
               </span>
             )}
@@ -950,9 +950,9 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
   return (
     <div className="space-y-8">
       {isSystemAdmin && (
-        <div className="bg-white p-6 rounded-lg shadow">
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
           <h2 className="text-xl font-semibold mb-2">الحد الأعلى لمستوى بث التقويم</h2>
-          <p className="text-xs text-gray-500 mb-3">
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
             يحدد أعلى مستوى (أكثر عمومية) يمكن لأي مدير قسم اختياره عند ضبط مستوى بث مهمة في التقويم. اتركه فارغاً للسماح بالصعود حتى ما قبل جذر النظام مباشرة.
           </p>
           <div className="flex items-center gap-2 flex-wrap">
@@ -970,7 +970,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
               onClick={handleSaveMaxBroadcast}
               className={`px-4 py-2 rounded-md text-sm disabled:opacity-50 transition-colors ${
                 maxBroadcastSaved
-                  ? 'border border-green-500 text-green-600 bg-green-50'
+                  ? 'border border-green-500 text-green-600 bg-green-50 dark:bg-green-900/20 dark:text-green-400'
                   : 'bg-primary text-white hover:bg-primary-dark'
               }`}
             >
@@ -982,11 +982,11 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         {/* قائمة الأقسام الحالية على شكل شجرة */}
-        <div className="bg-white p-6 rounded-lg shadow">
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
           <h2 className="text-2xl font-semibold mb-4">الأقسام الحالية (شجرة)</h2>
-          <p className="text-xs text-gray-500 mb-3">انقر اسم القسم أو أيقونة الحقيبة لإدارة مناصبه.</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">انقر اسم القسم أو أيقونة الحقيبة لإدارة مناصبه.</p>
           {isManager && (
-            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3">
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-3 dark:text-amber-300 dark:bg-amber-900/20 dark:border-amber-800">
               تعرض الأقسام التابعة لقسمك فقط
             </p>
           )}
@@ -996,7 +996,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
         </div>
 
         {/* نموذج الإضافة أو التعديل */}
-        <div className="bg-white p-6 rounded-lg shadow">
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
           <h2 className="text-2xl font-semibold mb-4">{editingDepartment ? `تعديل قسم: ${editingDepartment.Name}` : 'إضافة قسم جديد'}</h2>
           <form onSubmit={editingDepartment ? handleUpdate : handleCreate} className="space-y-4">
             <input
@@ -1005,14 +1005,14 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
               value={editingDepartment ? editingDepartment.Name : newDepartmentName}
               onChange={(e) => editingDepartment ? setEditingDepartment({...editingDepartment, Name: e.target.value}) : setNewDepartmentName(e.target.value)}
               required
-              className="w-full p-2 border rounded"
+              className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
               ref={nameInputRef}
             />
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm text-gray-600 mb-1">القسم الأب</label>
+                <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">القسم الأب</label>
                 <select
-                  className="w-full p-2 border rounded"
+                  className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                   value={editingDepartment ? (normalizeParentId(editingDepartment) ?? '') : (newDepartmentParentId ?? '')}
                   onChange={(e) => {
                     const val = e.target.value === '' ? null : Number(e.target.value);
@@ -1067,20 +1067,20 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
             <button type="submit" className="w-full bg-green-500 text-white py-2 rounded-md hover:bg-green-600 flex items-center justify-center gap-2">
               {editingDepartment ? 'حفظ التغييرات' : <><Plus size={18}/> إضافة</>}
             </button>
-            {editingDepartment && <button type="button" onClick={() => setEditingDepartment(null)} className="w-full text-center text-sm mt-2 text-gray-500 hover:underline">إلغاء التعديل</button>}
+            {editingDepartment && <button type="button" onClick={() => setEditingDepartment(null)} className="w-full text-center text-sm mt-2 text-gray-500 dark:text-gray-400 hover:underline">إلغاء التعديل</button>}
           </form>
         </div>
       </div>
 
       {/* لوحة النقل قبل الحذف */}
       {transferMode && (
-        <div className="bg-white p-6 rounded-lg shadow border-2 border-red-300 space-y-4">
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow border-2 border-red-300 dark:border-red-700 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold text-red-700">نقل البيانات قبل الحذف</h2>
-            <button onClick={() => { setTransferMode(null); setTransferVacancies([]); setTransferTargetId(''); setTransferDeptIdForPanel(''); }} className="text-gray-500 hover:text-gray-700"><X size={18}/></button>
+            <h2 className="text-xl font-semibold text-red-700 dark:text-red-400">نقل البيانات قبل الحذف</h2>
+            <button onClick={() => { setTransferMode(null); setTransferVacancies([]); setTransferTargetId(''); setTransferDeptIdForPanel(''); }} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"><X size={18}/></button>
           </div>
 
-          <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-800">
+          <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded p-3 text-sm text-red-800 dark:text-red-200">
             {transferMode.kind === 'vacancy' ? `المنصب «${transferMode.sourceName}»` : `القسم «${transferMode.sourceName}»`}
             {' '}مرتبط بـ{' '}
             {[
@@ -1093,9 +1093,9 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
 
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">القسم الهدف</label>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">القسم الهدف</label>
               <select
-                className="w-full p-2 border rounded"
+                className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                 value={transferDeptIdForPanel}
                 onChange={(e) => {
                   const val = e.target.value === '' ? '' : Number(e.target.value);
@@ -1118,21 +1118,21 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
             </div>
 
             {transferDeptIdForPanel !== '' && transferVacancies.length === 0 && (
-              <p className="text-sm text-gray-500">لا توجد مناصب في هذا القسم.</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">لا توجد مناصب في هذا القسم.</p>
             )}
 
             {transferVacancies.length > 0 && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">المنصب الهدف</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">المنصب الهدف</label>
                 <input
                   type="text"
                   placeholder="ابحث في المناصب..."
                   value={transferSearch}
                   onChange={(e) => setTransferSearch(e.target.value)}
-                  className="w-full p-2 border rounded mb-2"
+                  className="w-full p-2 border rounded mb-2 bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                 />
-                <div className="max-h-52 overflow-y-auto border rounded bg-white">
-                  <ul className="divide-y">
+                <div className="max-h-52 overflow-y-auto border rounded bg-white dark:bg-gray-800 dark:border-gray-600">
+                  <ul className="divide-y dark:divide-gray-700">
                     {transferVacancies
                       .filter(v => {
                         if (transferMode.kind === 'vacancy' && v.VacancyID === transferMode.sourceId) return false;
@@ -1147,7 +1147,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                         >
                           <div className="flex items-center justify-between gap-2">
                             <span className="font-medium">{v.Name}</span>
-                            {v.CurrentUserFullName && <span className="text-xs text-gray-500">{v.CurrentUserFullName}</span>}
+                            {v.CurrentUserFullName && <span className="text-xs text-gray-500 dark:text-gray-400">{v.CurrentUserFullName}</span>}
                             {transferTargetId === v.VacancyID && <Check size={16} className="text-primary shrink-0"/>}
                           </div>
                         </li>
@@ -1168,7 +1168,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
             </button>
             <button
               onClick={() => { setTransferMode(null); setTransferVacancies([]); setTransferTargetId(''); setTransferDeptIdForPanel(''); }}
-              className="text-gray-600 hover:text-gray-800 px-4 py-2 border rounded"
+              className="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 px-4 py-2 border rounded dark:border-gray-600"
             >
               إلغاء
             </button>
@@ -1178,7 +1178,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
 
       {/* لوحة إدارة المناصب للقسم المحدد */}
       {selectedDepartment && (
-        <div className="bg-white p-6 rounded-lg shadow border-2 border-primary/30">
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow border-2 border-primary/30">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-2xl font-semibold flex items-center gap-2">
               <Briefcase size={22} /> مناصب قسم: <span className="text-primary">{selectedDepartment.Name}</span>
@@ -1186,14 +1186,14 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => { setShowImportPanel(p => !p); setImportResult(null); }}
-                className="text-sm text-emerald-600 hover:text-emerald-800 border border-emerald-300 rounded px-3 py-1 flex items-center gap-1"
+                className="text-sm text-emerald-600 hover:text-emerald-800 dark:text-emerald-400 dark:hover:text-emerald-300 border border-emerald-300 dark:border-emerald-700 rounded px-3 py-1 flex items-center gap-1"
                 title="استيراد أقسام من ملف إكسل"
               >
                 <FileSpreadsheet size={15}/> استيراد إكسل
               </button>
               <button
                 onClick={() => setSelectedDepartmentId(null)}
-                className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 flex items-center gap-1"
               >
                 <X size={16}/> إغلاق
               </button>
@@ -1202,14 +1202,14 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
 
           {/* لوحة استيراد إكسل */}
           {showImportPanel && (
-            <div className="mb-5 p-4 border-2 border-emerald-200 rounded-lg bg-emerald-50 space-y-3">
-              <h3 className="font-semibold text-emerald-800 flex items-center gap-2">
+            <div className="mb-5 p-4 border-2 border-emerald-200 dark:border-emerald-700 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 space-y-3">
+              <h3 className="font-semibold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
                 <FileSpreadsheet size={18}/> استيراد أقسام من ملف إكسل
               </h3>
-              <p className="text-xs text-gray-600">
+              <p className="text-xs text-gray-600 dark:text-gray-400">
                 الأعمدة المتوقعة في الملف: <strong>PositionID · Parent_PositionID · Department_Ar · Type · Position_Ar · Postion_Rnk</strong>
               </p>
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-gray-500 dark:text-gray-400">
                 الأقسام التي أبوها غير موجود في الملف ستُلحق مباشرةً بـ «{selectedDepartment.Name}».
               </p>
 
@@ -1222,17 +1222,17 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
               />
 
               {importLoading ? (
-                <p className="text-sm text-emerald-700 flex items-center gap-2">
+                <p className="text-sm text-emerald-700 dark:text-emerald-400 flex items-center gap-2">
                   <span className="animate-spin">⏳</span> جارٍ المعالجة...
                 </p>
               ) : importResult ? (
-                <div className="bg-white border border-emerald-300 rounded p-3 text-sm text-emerald-800 space-y-1">
+                <div className="bg-white dark:bg-gray-800 border border-emerald-300 dark:border-emerald-700 rounded p-3 text-sm text-emerald-800 dark:text-emerald-300 space-y-1">
                   <p className="font-semibold">✅ تم الاستيراد بنجاح</p>
                   <p>الأقسام المضافة: <strong>{importResult.deptCount}</strong></p>
                   <p>المناصب المضافة: <strong>{importResult.vacCount}</strong></p>
                   <button
                     onClick={() => { setImportResult(null); }}
-                    className="mt-2 text-xs text-emerald-600 hover:underline"
+                    className="mt-2 text-xs text-emerald-600 dark:text-emerald-400 hover:underline"
                   >
                     استيراد ملف آخر
                   </button>
@@ -1256,13 +1256,13 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                 placeholder="اسم المنصب الجديد (مثال: رئيس قسم الأرشفة)"
                 value={newVacancyName}
                 onChange={(e) => setNewVacancyName(e.target.value)}
-                className="flex-1 p-2 border rounded"
+                className="flex-1 p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
               />
               {distinctRanks.length > 0 ? (
                 <select
                   value={newVacancyRank}
                   onChange={(e) => setNewVacancyRank(e.target.value)}
-                  className="p-2 border rounded bg-white min-w-[130px]"
+                  className="p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 min-w-[130px]"
                 >
                   <option value="">-- الرتبة --</option>
                   {distinctRanks.map(r => <option key={r} value={r}>{r}</option>)}
@@ -1273,7 +1273,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                   placeholder="الرتبة (اختياري)"
                   value={newVacancyRank}
                   onChange={(e) => setNewVacancyRank(e.target.value)}
-                  className="p-2 border rounded w-36"
+                  className="p-2 border rounded w-36 bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                 />
               )}
               <button type="submit" className="bg-primary text-white px-4 py-2 rounded-md hover:bg-primary-dark flex items-center gap-2">
@@ -1284,9 +1284,9 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
 
           {/* قائمة المناصب */}
           {vacanciesLoading ? (
-            <p className="text-gray-500 text-center py-4">جارٍ تحميل المناصب...</p>
+            <p className="text-gray-500 dark:text-gray-400 text-center py-4">جارٍ تحميل المناصب...</p>
           ) : vacancies.length === 0 ? (
-            <p className="text-gray-500 text-center py-4">لا توجد مناصب مضافة في هذا القسم بعد.</p>
+            <p className="text-gray-500 dark:text-gray-400 text-center py-4">لا توجد مناصب مضافة في هذا القسم بعد.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-right">
@@ -1316,7 +1316,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                 type="text"
                                 value={editingVacancy!.Name}
                                 onChange={(e) => setEditingVacancy({ ...editingVacancy!, Name: e.target.value })}
-                                className="w-full p-1 border rounded"
+                                className="w-full p-1 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                               />
                             ) : (
                               <span className={isActive ? '' : 'line-through text-gray-400'}>{v.Name}</span>
@@ -1328,7 +1328,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                 <select
                                   value={editingVacancyRank}
                                   onChange={(e) => setEditingVacancyRank(e.target.value)}
-                                  className="p-1 border rounded bg-white text-sm w-28"
+                                  className="p-1 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm w-28"
                                 >
                                   <option value="">-- بدون --</option>
                                   {distinctRanks.map(r => <option key={r} value={r}>{r}</option>)}
@@ -1339,12 +1339,12 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                   value={editingVacancyRank}
                                   onChange={(e) => setEditingVacancyRank(e.target.value)}
                                   placeholder="الرتبة"
-                                  className="p-1 border rounded text-sm w-24"
+                                  className="p-1 border rounded text-sm w-24 bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                                 />
                               )
                             ) : (
                               <span className="text-sm text-content-secondary">
-                                {ranksMap.get(v.VacancyID) || v.RankName || <span className="text-gray-300">—</span>}
+                                {ranksMap.get(v.VacancyID) || v.RankName || <span className="text-gray-300 dark:text-gray-600">—</span>}
                               </span>
                             )}
                           </td>
@@ -1359,7 +1359,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                 <span className="text-sm">مفعّل</span>
                               </label>
                             ) : (
-                              <span className={`text-xs px-2 py-0.5 rounded ${isActive ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                              <span className={`text-xs px-2 py-0.5 rounded ${isActive ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'}`}>
                                 {isActive ? 'مفعّل' : 'موقّف'}
                               </span>
                             )}
@@ -1376,8 +1376,8 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                               onClick={() => handleToggleCalendarBroadcast(v)}
                               className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${
                                 v.ExcludeFromCalendarBroadcast
-                                  ? 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-                                  : 'bg-green-100 text-green-700 hover:bg-green-200'
+                                  ? 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
+                                  : 'bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 dark:hover:bg-green-900/50'
                               }`}
                               title={v.ExcludeFromCalendarBroadcast
                                 ? 'بث أحداث التقويم الجماعية موقوف لهذا المنصب — اضغط للتفعيل'
@@ -1392,8 +1392,8 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                               onClick={() => handleToggleSharingDelegation(v)}
                               className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${
                                 v.CanManageSharingAndBroadcast
-                                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:hover:bg-blue-900/50'
+                                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
                               }`}
                               title={v.CanManageSharingAndBroadcast
                                 ? 'يملك هذا المنصب صلاحية إدارة المشاركة بين المديريات ومستوى بث التقويم — اضغط لإلغائها'
@@ -1409,8 +1409,8 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                 onClick={() => openVacancyBroadcastModal(v)}
                                 className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${
                                   v.MaxBroadcastDepartmentID != null
-                                    ? 'bg-purple-100 text-purple-700 hover:bg-purple-200'
-                                    : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                                    ? 'bg-purple-100 text-purple-700 hover:bg-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:hover:bg-purple-900/50'
+                                    : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
                                 }`}
                                 title="تحديد حد أعلى لمستوى البث خاص بهذا المنصب (يتجاوز الحد العام الافتراضي)"
                               >
@@ -1424,7 +1424,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                             {isEditingThis ? (
                               <>
                                 <button onClick={handleSaveVacancyEdit} className="text-green-600 hover:text-green-800" title="حفظ"><Check size={16}/></button>
-                                <button onClick={() => { setEditingVacancy(null); setEditingVacancyRank(''); }} className="text-gray-500 hover:text-gray-700" title="إلغاء"><X size={16}/></button>
+                                <button onClick={() => { setEditingVacancy(null); setEditingVacancyRank(''); }} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200" title="إلغاء"><X size={16}/></button>
                               </>
                             ) : (
                               <>
@@ -1444,10 +1444,10 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                             <td colSpan={4} className="p-3">
                               <div className="space-y-2">
                                 <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="text-sm text-gray-700 font-semibold">
+                                  <span className="text-sm text-gray-700 dark:text-gray-300 font-semibold">
                                     إسناد موظف إلى: «{v.Name}»
                                   </span>
-                                  <span className="text-xs text-gray-500">
+                                  <span className="text-xs text-gray-500 dark:text-gray-400">
                                     (يمكنك اختيار أي موظف بغض النظر عن قسمه الحالي)
                                   </span>
                                 </div>
@@ -1457,20 +1457,20 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                   placeholder="ابحث بالاسم أو المعرّف أو القسم..."
                                   value={candidateSearch}
                                   onChange={(e) => setCandidateSearch(e.target.value)}
-                                  className="w-full p-2 border rounded"
+                                  className="w-full p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
                                 />
 
-                                <div className="max-h-64 overflow-y-auto border rounded bg-white">
+                                <div className="max-h-64 overflow-y-auto border rounded bg-white dark:bg-gray-800 dark:border-gray-600">
                                   {candidatesLoading ? (
-                                    <p className="text-center text-gray-500 py-4 text-sm">جارٍ تحميل الموظفين...</p>
+                                    <p className="text-center text-gray-500 dark:text-gray-400 py-4 text-sm">جارٍ تحميل الموظفين...</p>
                                   ) : filteredCandidates.length === 0 ? (
-                                    <p className="text-center text-gray-500 py-4 text-sm">
+                                    <p className="text-center text-gray-500 dark:text-gray-400 py-4 text-sm">
                                       {candidateUsers.length === 0
                                         ? 'لا توجد بيانات موظفين لعرضها.'
                                         : 'لا توجد نتائج مطابقة لبحثك.'}
                                     </p>
                                   ) : (
-                                    <ul className="divide-y">
+                                    <ul className="divide-y dark:divide-gray-700">
                                       {filteredCandidates.map(u => {
                                         const isSelected = selectedUserIdToAssign === u.UserID;
                                         return (
@@ -1481,20 +1481,20 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                           >
                                             <div className="flex items-center justify-between gap-2">
                                               <div className="flex-1 min-w-0">
-                                                <div className="font-medium text-gray-900 truncate">
+                                                <div className="font-medium text-gray-900 dark:text-gray-100 truncate">
                                                   {u.FullName || u.UserID}
                                                 </div>
-                                                <div className="text-xs text-gray-500 flex items-center gap-2 flex-wrap">
+                                                <div className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-2 flex-wrap">
                                                   <span>المعرّف: {u.UserID}</span>
                                                   {u.CurrentVacancyName ? (
-                                                    <span className="text-amber-700 bg-amber-100 px-2 py-0.5 rounded">
+                                                    <span className="text-amber-700 bg-amber-100 dark:text-amber-300 dark:bg-amber-900/30 px-2 py-0.5 rounded">
                                                       يحمل حالياً: {u.CurrentVacancyName}
                                                       {u.CurrentDepartmentName ? ` — ${u.CurrentDepartmentName}` : ''}
                                                     </span>
                                                   ) : u.CurrentDepartmentName ? (
                                                     <span>القسم: {u.CurrentDepartmentName}</span>
                                                   ) : (
-                                                    <span className="text-green-700 bg-green-100 px-2 py-0.5 rounded">بدون منصب حالي</span>
+                                                    <span className="text-green-700 bg-green-100 dark:text-green-300 dark:bg-green-900/30 px-2 py-0.5 rounded">بدون منصب حالي</span>
                                                   )}
                                                 </div>
                                               </div>
@@ -1508,7 +1508,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                 </div>
 
                                 <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="text-xs text-gray-600">
+                                  <span className="text-xs text-gray-600 dark:text-gray-400">
                                     {selectedUserIdToAssign
                                       ? `المحدَّد: ${candidateUsers.find(c => c.UserID === selectedUserIdToAssign)?.FullName || selectedUserIdToAssign}`
                                       : 'لم يتم اختيار أي موظف بعد.'}
@@ -1523,13 +1523,13 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                                   </button>
                                   <button
                                     onClick={() => { setAssignOpenFor(null); setSelectedUserIdToAssign(''); setCandidateSearch(''); }}
-                                    className="text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                                    className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 flex items-center gap-1"
                                   >
                                     <X size={16}/> إلغاء
                                   </button>
                                 </div>
 
-                                <p className="text-xs text-gray-500">
+                                <p className="text-xs text-gray-500 dark:text-gray-400">
                                   ملاحظة: إسناد موظف يحمل منصباً آخر سيُغلِق إسناده السابق تلقائياً.
                                 </p>
                               </div>
@@ -1548,16 +1548,16 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
 
       {vacancyBroadcastModalFor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={e => e.target === e.currentTarget && setVacancyBroadcastModalFor(null)}>
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm flex flex-col gap-4 p-5" dir="rtl">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-sm flex flex-col gap-4 p-5" dir="rtl">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-primary">
                 حد أعلى لمستوى البث — {vacancyBroadcastModalFor.Name}
               </h3>
-              <button onClick={() => setVacancyBroadcastModalFor(null)} className="text-gray-400 hover:text-gray-600">
+              <button onClick={() => setVacancyBroadcastModalFor(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
                 <X size={18} />
               </button>
             </div>
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-gray-500 dark:text-gray-400">
               إن تُرك دون تحديد، يتبع هذا المنصب الحد الأعلى العام الافتراضي (أعلاه). حدِّد قسماً ليتجاوز به هذا المنصب تحديداً.
             </p>
             <DepartmentTreeSelect

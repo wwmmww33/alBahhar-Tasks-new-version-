@@ -294,7 +294,7 @@ const DelegationManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
   return (
     <div className="space-y-6">
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 px-4 py-3 rounded">
           {error}
         </div>
       )}
@@ -437,8 +437,8 @@ const DelegationManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                         )}
                         <span className={`text-xs px-2 py-1 rounded ${
                           delegation.IsActive && !isExpired(delegation.EndDate)
-                            ? 'bg-green-100 text-green-800'
-                            : 'bg-red-100 text-red-800'
+                            ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
+                            : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'
                         }`}>
                           {delegation.IsActive && !isExpired(delegation.EndDate) ? 'نشط' : 'غير نشط'}
                         </span>
@@ -494,7 +494,7 @@ const DelegationManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
           </div>
 
           {vacantError && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{vacantError}</div>
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 px-4 py-2 rounded text-sm">{vacantError}</div>
           )}
 
           {/* نموذج إنشاء تكليف لمنصب شاغر */}
@@ -588,7 +588,7 @@ const DelegationManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                   ) : vacantDelegations.map(vd => (
                     <tr key={vd.DelegationID} className="border-b border-content/10 hover:bg-content/5">
                       <td className="p-3">
-                        <span className={`text-xs px-2 py-1 rounded ${vd.IsActive && !isExpired(vd.EndDate) ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                        <span className={`text-xs px-2 py-1 rounded ${vd.IsActive && !isExpired(vd.EndDate) ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'}`}>
                           {vd.IsActive && !isExpired(vd.EndDate) ? 'نشط' : 'غير نشط'}
                         </span>
                       </td>

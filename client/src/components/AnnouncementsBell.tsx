@@ -85,7 +85,7 @@ const AnnouncementsBell = ({ userId }: Props) => {
     <div className="relative">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="relative p-2 text-gray-600 hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"
+        className="relative p-2 text-gray-600 dark:text-gray-300 hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"
         title="تحديثات النظام"
       >
         <Megaphone size={20} />

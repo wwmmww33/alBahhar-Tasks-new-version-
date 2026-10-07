@@ -183,14 +183,14 @@ const UnifiedTimeline = ({
     if (!id) return '';
     return safeUsers.find(u => resolveUserActorId(u) === id || u.UserID === id)?.FullName || id;
   };
+  // تاريخ اليوم بتوقيت افتراضي 00:00 (لا الوقت الحالي) — هذا هو الافتراضي المطلوب لحقل الاستحقاق
+  // عند إضافة مهمة فرعية جديدة.
   const getTodayString = () => {
     const d = new Date();
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
-    const h = String(d.getHours()).padStart(2, '0');
-    const min = String(d.getMinutes()).padStart(2, '0');
-    return `${y}-${m}-${day}T${h}:${min}`;
+    return `${y}-${m}-${day}T00:00`;
   };
   const formatToDateTimeLocal = (d: Date) => {
     const y = d.getFullYear();

@@ -89,7 +89,7 @@ const ShareItemModal = ({ kind, itemId, taskId, userId, isAdmin, currentSharedDe
           <p className="text-sm text-gray-400">لا توجد قنوات مشاركة مفتوحة على هذه المهمة بعد. يفتحها مدير القسم أولاً.</p>
         ) : (
           <div className="space-y-2">
-            <p className="text-xs text-gray-500">اختر الجهات التي ترى هذا العنصر:</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">اختر الجهات التي ترى هذا العنصر:</p>
             {channels.map(c => (
               <label key={c.SharedWithDepartmentID} className="flex items-center gap-2 text-sm cursor-pointer">
                 <input

@@ -1,15 +1,16 @@
 // src/pages/SystemManagement.tsx
 import { useState } from 'react';
-import { Building, Users, UserPlus, UserCheck, Megaphone, BookUser } from 'lucide-react';
+import { Building, Users, UserPlus, UserCheck, Megaphone, BookUser, Lightbulb } from 'lucide-react';
 import DepartmentManagement from '../components/DepartmentManagement';
 import UserManagement from '../components/UserManagement';
 import RegistrationRequests from '../components/RegistrationRequests';
 import DelegationManagement from '../components/DelegationManagement';
 import AnnouncementsManagement from '../components/AnnouncementsManagement';
 import DirectoryManagement from '../components/DirectoryManagement';
+import ProposalsManagement from '../components/ProposalsManagement';
 import type { CurrentUser } from '../types';
 
-type AdminTab = 'departments' | 'users' | 'requests' | 'delegations' | 'announcements' | 'directory';
+type AdminTab = 'departments' | 'users' | 'requests' | 'delegations' | 'announcements' | 'directory' | 'proposals';
 
 const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
@@ -57,7 +58,7 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
       <div className="flex items-center gap-4 mb-8">
         <h1 className="text-4xl font-bold text-content">إدارة النظام</h1>
         {!isSystemAdmin && (
-          <span className="text-sm bg-blue-100 text-blue-700 px-3 py-1 rounded-full font-medium">
+          <span className="text-sm bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 px-3 py-1 rounded-full font-medium">
             مدير قسم — صلاحيات محدودة
           </span>
         )}
@@ -124,6 +125,12 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
             <span>دليل الهاتف والموظفين</span>
           </button>
         )}
+        {isSystemAdmin && (
+          <button onClick={() => setActiveTab('proposals')} className={getTabClassName('proposals')}>
+            <Lightbulb size={20} />
+            <span>مقترحات تطوير النظام</span>
+          </button>
+        )}
       </div>
 
       {/* محتوى التبويب النشط */}
@@ -134,6 +141,7 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
         {activeTab === 'delegations' && (isSystemAdmin || isDeptManager) && <DelegationManagement currentUser={currentUser} />}
         {activeTab === 'announcements' && isSystemAdmin && <AnnouncementsManagement currentUser={currentUser} />}
         {activeTab === 'directory' && isSystemAdmin && <DirectoryManagement currentUser={currentUser} />}
+        {activeTab === 'proposals' && isSystemAdmin && <ProposalsManagement currentUser={currentUser} />}
       </div>
     </div>
   );

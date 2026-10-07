@@ -138,7 +138,7 @@ const MoveToTaskModal = ({ itemLabel, currentTaskId, currentTaskTitle, userId, i
                 <p className="text-xs text-primary font-medium">المهمة الوجهة:</p>
                 <p className="font-semibold text-gray-800 dark:text-gray-100 mt-0.5">#{selected.TaskID} — {selected.Title}</p>
               </div>
-              <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-600 shrink-0">
+              <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0">
                 <X size={16} />
               </button>
             </div>

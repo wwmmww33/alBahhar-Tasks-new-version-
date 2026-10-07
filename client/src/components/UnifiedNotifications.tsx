@@ -321,7 +321,7 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
       {/* زر الإشعارات مع المؤشرات الملونة */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="relative p-2 text-gray-600 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+        className="relative p-2 text-gray-600 dark:text-gray-300 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors"
         title="الإشعارات"
       >
         <Bell size={20} />
@@ -350,19 +350,19 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
 
       {/* قائمة الإشعارات */}
       {isOpen && (
-        <div className="absolute left-0 mt-2 w-96 bg-white rounded-lg shadow-lg border border-gray-200 z-50 max-h-96 overflow-hidden">
+        <div className="absolute left-0 mt-2 w-96 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-50 max-h-96 overflow-hidden">
           {/* رأس القائمة */}
-          <div className="p-3 border-b border-gray-200 flex justify-between items-center">
+          <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
             <div className="flex items-center gap-2">
-              <h3 className="font-semibold text-gray-800">الإشعارات</h3>
+              <h3 className="font-semibold text-gray-800 dark:text-gray-100">الإشعارات</h3>
               <div className="flex gap-1">
                 {commentUnreadCount > 0 && (
-                  <span className="bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full">
+                  <span className="bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300 text-xs px-2 py-1 rounded-full">
                     {commentUnreadCount} تعليق
                   </span>
                 )}
                 {assignmentUnreadCount > 0 && (
-                  <span className="bg-red-100 text-red-800 text-xs px-2 py-1 rounded-full">
+                  <span className="bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300 text-xs px-2 py-1 rounded-full">
                     {assignmentUnreadCount} مهمة
                   </span>
                 )}
@@ -372,7 +372,7 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
               <button
                 onClick={handleManualRefresh}
                 disabled={isRefreshing}
-                className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1 disabled:opacity-50"
+                className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 flex items-center gap-1 disabled:opacity-50"
                 title="تحديث"
               >
                 <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
@@ -380,7 +380,7 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
               {commentUnreadCount > 0 && (
                 <button
                   onClick={markAllCommentsAsRead}
-                  className="text-sm text-green-600 hover:text-green-800 flex items-center gap-1"
+                  className="text-sm text-green-600 dark:text-green-400 hover:text-green-800 dark:hover:text-green-300 flex items-center gap-1"
                   title="تحديد تعليقات كمقروءة"
                 >
                   <CheckCheck size={14} />
@@ -392,13 +392,13 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
           {/* محتوى الإشعارات */}
           <div className="max-h-80 overflow-y-auto">
             {loading ? (
-              <div className="p-4 text-center text-gray-500">
+              <div className="p-4 text-center text-gray-500 dark:text-gray-400">
                 <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-green-600 mx-auto"></div>
                 <p className="mt-2">جاري التحميل...</p>
               </div>
             ) : allNotifications.length === 0 ? (
-              <div className="p-4 text-center text-gray-500">
-                <Bell size={32} className="mx-auto mb-2 text-gray-300" />
+              <div className="p-4 text-center text-gray-500 dark:text-gray-400">
+                <Bell size={32} className="mx-auto mb-2 text-gray-300 dark:text-gray-600" />
                 <p>لا توجد إشعارات</p>
               </div>
             ) : (
@@ -406,28 +406,28 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
                 <div
                   key={`${notification.type}-${notification.NotificationID}`}
                   onClick={() => handleNotificationClick(notification, notification.type)}
-                  className={`p-3 border-b border-gray-100 cursor-pointer hover:bg-gray-50 transition-colors ${
-                    !notification.IsRead ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''
+                  className={`p-3 border-b border-gray-100 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors ${
+                    !notification.IsRead ? 'bg-blue-50 dark:bg-blue-900/20 border-l-4 border-l-blue-500' : ''
                   }`}
                 >
                   <div className="flex items-start gap-3">
                     <div className="flex-shrink-0">
                       {notification.type === 'comment' ? (
-                        <MessageCircle 
-                          size={16} 
-                          className={notification.IsRead ? 'text-gray-400' : 'text-green-500'} 
+                        <MessageCircle
+                          size={16}
+                          className={notification.IsRead ? 'text-gray-400' : 'text-green-500'}
                         />
                       ) : (
-                        <UserPlus 
-                          size={16} 
-                          className={notification.IsRead ? 'text-gray-400' : 'text-red-500'} 
+                        <UserPlus
+                          size={16}
+                          className={notification.IsRead ? 'text-gray-400' : 'text-red-500'}
                         />
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between mb-1">
-                        <p className="text-sm font-medium text-gray-800 truncate">
-                          {notification.type === 'comment' 
+                        <p className="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">
+                          {notification.type === 'comment'
                             ? (notification as CommentNotification).CommentedByUsername
                             : (notification as AssignmentNotification).AssignedByName
                           }
@@ -438,12 +438,12 @@ const UnifiedNotifications: React.FC<UnifiedNotificationsProps> = ({
                           }`}></div>
                         )}
                       </div>
-                      <p className="text-sm text-gray-600 mb-1">
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-1">
                         {notification.type === 'comment' ? 'علق على: ' : 'أسند إليك مهمة: '}
                         <span className="font-medium">{notification.TaskTitle}</span>
                       </p>
                       {notification.type === 'comment' && (
-                        <p className="text-xs text-gray-500 line-clamp-2">
+                        <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
                           {(notification as CommentNotification).CommentContent}
                         </p>
                       )}

@@ -154,7 +154,7 @@ const MergeTaskModal = ({ targetTaskId, targetTaskTitle, userId, isAdmin, deptId
               </div>
               <button
                 onClick={() => { setSelected(null); setConfirmed(false); }}
-                className="text-gray-400 hover:text-gray-600 shrink-0"
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 shrink-0"
               >
                 <X size={16} />
               </button>

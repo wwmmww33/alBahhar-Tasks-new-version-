@@ -916,6 +916,39 @@ module.exports = {
     }
   },
 
+  // مقترحات تطوير النظام: يمكن لأي مستخدم تقديم مقترح، ويراجعها المدير العام من تبويب
+  // "إدارة النظام" (الحالة: قيد الانتظار/قيد الدراسة/مقبول/مرفوض/تم التنفيذ + ملاحظات المدير).
+  ensureSystemProposalsTable: async function ensureSystemProposalsTable(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'SystemProposals'
+      `);
+      if (check.recordset[0].cnt > 0) {
+        console.log('ℹ️ SystemProposals table already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        CREATE TABLE dbo.SystemProposals (
+          ProposalID      INT IDENTITY(1,1) PRIMARY KEY,
+          Title           NVARCHAR(300) NOT NULL,
+          Description     NVARCHAR(MAX) NOT NULL,
+          CreatedByUserID NVARCHAR(50) NOT NULL,
+          CreatedByName   NVARCHAR(200) NULL,
+          Status          NVARCHAR(30) NOT NULL CONSTRAINT DF_SystemProposals_Status DEFAULT('pending'),
+          AdminNotes      NVARCHAR(MAX) NULL,
+          CreatedAt       DATETIME NOT NULL CONSTRAINT DF_SystemProposals_CreatedAt DEFAULT(GETDATE()),
+          UpdatedAt       DATETIME NULL
+        );
+      `);
+      console.log('✅ Created SystemProposals table.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring SystemProposals table:', err);
+      throw err;
+    }
+  },
+
   // حقل مستقل تماماً عن CreatedAt لتاريخ ظهور التعليق في التقويم. CreatedAt يبقى دائماً لحظة
   // الإدراج الفعلية (لا يُعدَّل بعد الإنشاء)، بينما CalendarDisplayDate هو ما يحدد اليوم الذي
   // يظهر فيه التعليق على التقويم — يُحدَّد عبر نافذة اختيار تاريخ/وقت عند تفعيل "إظهار في التقويم".

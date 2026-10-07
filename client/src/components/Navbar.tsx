@@ -5,6 +5,7 @@ import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { useTheme } from '../contexts/ThemeProvider';
 import UnifiedNotifications from './UnifiedNotifications';
 import AnnouncementsBell from './AnnouncementsBell';
+import SuggestProposalButton from './SuggestProposalButton';
 import type { CurrentUser } from '../types';
 import { getActiveAccount, getActiveUserId, clearActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
@@ -112,6 +113,8 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
         />
 
         <AnnouncementsBell userId={String(currentUser.UserID)} />
+
+        <SuggestProposalButton currentUser={currentUser} />
 
         <button onClick={handleToggleMode} title="Toggle Dark/Light Mode" className="p-2 rounded-full text-content-secondary hover:bg-content/10 hover:text-content transition-colors">
           {mode === 'light' ? <Moon size={20} /> : <Sun size={20} />}
