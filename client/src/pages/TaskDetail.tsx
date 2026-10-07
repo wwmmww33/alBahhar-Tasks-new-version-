@@ -926,6 +926,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         isSubmittingComment={isSubmittingComment}
         onCommentsUpdate={fetchAllDetails}
         shareDepartmentNamesById={shareDepartmentNamesById}
+        canManagePublicBroadcast={canManageSharing}
       />
       
       {/* Merge Task Modal */}

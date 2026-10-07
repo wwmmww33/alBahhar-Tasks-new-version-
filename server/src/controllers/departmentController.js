@@ -7,6 +7,9 @@ const {
     getVacancyMaxBroadcastDepartmentId,
     setVacancyMaxBroadcastDepartmentId,
     isTrueSystemAdmin,
+    getPublicCalendarSettings,
+    setPublicCalendarEnabled,
+    setPublicCalendarTitle,
 } = require('../utils/departmentSharing');
 const { resolveActorContext } = require('../utils/vacancyResolver');
 
@@ -529,6 +532,33 @@ exports.setMaxBroadcastLevel = async (req, res) => {
     } catch (err) {
         console.error('SET MAX BROADCAST LEVEL ERROR:', err);
         res.status(500).json({ message: 'Error setting max broadcast level', detail: err.message });
+    }
+};
+
+// PUT /api/departments/public-calendar-settings  { userId, enabled?, title? }  — المدير العام فقط.
+// يضبط إظهار/إخفاء "التقويم العام" في صفحة الدخول وعنوانه المعروض.
+exports.setPublicCalendarSettings = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { userId, enabled, title } = req.body || {};
+    if (!userId) {
+        return res.status(401).json({ message: 'userId is required.' });
+    }
+    try {
+        const allowed = await isTrueSystemAdmin(pool, userId);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة للمدير العام للنظام فقط.' });
+        }
+        if (typeof enabled === 'boolean') {
+            await setPublicCalendarEnabled(pool, enabled, userId);
+        }
+        if (typeof title === 'string') {
+            await setPublicCalendarTitle(pool, title, userId);
+        }
+        const settings = await getPublicCalendarSettings(pool);
+        res.status(200).json({ message: 'تم تحديث إعدادات التقويم العام.', ...settings });
+    } catch (err) {
+        console.error('SET PUBLIC CALENDAR SETTINGS ERROR:', err);
+        res.status(500).json({ message: 'Error setting public calendar settings', detail: err.message });
     }
 };
 

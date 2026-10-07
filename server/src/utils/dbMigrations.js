@@ -976,4 +976,34 @@ module.exports = {
       throw err;
     }
   },
+
+  // "بث مفتوح": علم مستقل تماماً عن مستوى البث الداخلي (CalendarBroadcastDepartmentID) — يُحدِّده
+  // مدير القسم المستقل أو المفوَّض له فقط، ويعني ظهور العنصر على التقويم العام في صفحة الدخول
+  // لأي زائر غير مسجّل، دون كشف هوية المُسنَد إليه أو منشئ العنصر (التقويم العام يعرض العنوان/
+  // المحتوى والتوقيت فقط). مطفأ افتراضياً لكل العناصر الحالية والجديدة.
+  ensurePublicBroadcastColumns: async function ensurePublicBroadcastColumns(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT
+          COL_LENGTH('dbo.Subtasks','IsPublicBroadcast') AS SubtaskLen,
+          COL_LENGTH('dbo.Comments','IsPublicBroadcast') AS CommentLen
+      `);
+      const row = check.recordset[0] || {};
+      if (row.SubtaskLen && row.CommentLen) {
+        console.log('ℹ️ IsPublicBroadcast columns already exist.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        IF COL_LENGTH('dbo.Subtasks','IsPublicBroadcast') IS NULL
+          ALTER TABLE dbo.Subtasks ADD IsPublicBroadcast BIT NOT NULL CONSTRAINT DF_Subtasks_IsPublicBroadcast DEFAULT(0);
+        IF COL_LENGTH('dbo.Comments','IsPublicBroadcast') IS NULL
+          ALTER TABLE dbo.Comments ADD IsPublicBroadcast BIT NOT NULL CONSTRAINT DF_Comments_IsPublicBroadcast DEFAULT(0);
+      `);
+      console.log('✅ Added IsPublicBroadcast columns to Subtasks/Comments.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring IsPublicBroadcast columns:', err);
+      throw err;
+    }
+  },
 };

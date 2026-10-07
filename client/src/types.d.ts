@@ -23,6 +23,7 @@ export type Subtask = {
   ReminderMinutes?: number | null;
   Notes?: string | null;
   SharedDepartmentIds?: number[];
+  IsPublicBroadcast?: boolean;
 };
 
 export type Task = {

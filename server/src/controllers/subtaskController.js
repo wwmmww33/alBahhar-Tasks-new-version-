@@ -1159,3 +1159,46 @@ exports.setSubtaskBroadcastLevel = async (req, res) => {
     res.status(500).json({ message: 'Error setting subtask broadcast level', detail: error.message });
   }
 };
+
+// PATCH /api/subtasks/:subtaskId/public-broadcast — بث مفتوح: يُظهر هذه المهمة الفرعية على التقويم
+// العام في صفحة الدخول لأي زائر غير مسجّل (بلا كشف اسم المُسنَد إليه). مستقل تماماً عن مستوى البث
+// الداخلي (CalendarBroadcastDepartmentID). نفس صلاحية مدير القسم المستقل أو المفوَّض له.
+exports.setSubtaskPublicBroadcast = async (req, res) => {
+  const pool = req.app.locals.db;
+  const { subtaskId } = req.params;
+  const { userId, isAdmin, IsPublicBroadcast } = req.body || {};
+
+  if (!subtaskId || !userId) {
+    return res.status(400).json({ message: 'subtaskId and userId are required.' });
+  }
+  if (typeof IsPublicBroadcast !== 'boolean') {
+    return res.status(400).json({ message: 'IsPublicBroadcast must be a boolean.' });
+  }
+
+  try {
+    const check = await pool.request().input('SubtaskID', sql.Int, subtaskId).query(`
+      SELECT s.SubtaskID, s.TaskID, t.DepartmentID AS TaskDepartmentID
+      FROM Subtasks s
+      INNER JOIN Tasks t ON t.TaskID = s.TaskID
+      WHERE s.SubtaskID = @SubtaskID
+    `);
+    if (!check.recordset.length) {
+      return res.status(404).json({ message: 'Subtask not found.' });
+    }
+    const subtask = check.recordset[0];
+    const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, subtask.TaskDepartmentID);
+    if (!allowed) {
+      return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل أو المفوَّض له فقط.' });
+    }
+
+    await pool.request()
+      .input('SubtaskID', sql.Int, subtaskId)
+      .input('Value', sql.Bit, IsPublicBroadcast ? 1 : 0)
+      .query('UPDATE Subtasks SET IsPublicBroadcast = @Value WHERE SubtaskID = @SubtaskID');
+
+    res.status(200).json({ message: 'تم تحديث البث المفتوح للمهمة الفرعية.', IsPublicBroadcast });
+  } catch (error) {
+    console.error('SET SUBTASK PUBLIC BROADCAST ERROR:', error);
+    res.status(500).json({ message: 'Error setting subtask public broadcast', detail: error.message });
+  }
+};

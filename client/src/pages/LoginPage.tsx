@@ -5,6 +5,7 @@ import type { CurrentUser } from '../types';
 import { setActiveAccount, clearActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId, resolveDelegateActorId, resolveDelegatorActorId } from '../utils/actorIdentity';
 import DelegationChoiceModal from '../components/DelegationChoiceModal';
+import PublicCalendarPreview from '../components/PublicCalendarPreview';
 
 type LoginPageProps = {
   onLoginSuccess: (userData: CurrentUser) => void; 
@@ -20,6 +21,7 @@ const LoginPage = ({ onLoginSuccess }: LoginPageProps) => {
   const [showChoice, setShowChoice] = useState(false);
   const [pendingUser, setPendingUser] = useState<CurrentUser | null>(null);
   const [activeDelegators, setActiveDelegators] = useState<any[]>([]);
+  const [calendarVisible, setCalendarVisible] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,8 +115,16 @@ const LoginPage = ({ onLoginSuccess }: LoginPageProps) => {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-100 dark:bg-gray-900">
-      <div className="w-full max-w-md p-8 space-y-6 bg-white dark:bg-gray-800 rounded-lg shadow-md">
+    <div className={`flex flex-col lg:flex-row items-center justify-center gap-6 min-h-screen bg-gray-100 dark:bg-gray-900 p-4 ${calendarVisible ? 'lg:items-start lg:pt-8' : ''}`}>
+      {/* body=dir rtl → أول عنصر في flex-row يظهر في أقصى اليمين. التقويم يجب أن يظهر أول (يمين)
+          والدخول ثانياً (يسار) لمطابقة الطلب: الدخول ربع يسار، والتقويم ثلاثة أرباع يمين. عند
+          تفعيل التقويم: الدخول يثبت أعلى الشاشة (sticky) فلا يتأثر بسكرول الصفحة الكامل عند
+          طول التقويم، والمساحة أسفله تبقى متاحة لعناصر أخرى مستقبلاً. */}
+      <PublicCalendarPreview
+        onAvailabilityChange={setCalendarVisible}
+        className={calendarVisible ? 'w-full lg:w-3/4 order-2 lg:order-1' : 'w-full max-w-md'}
+      />
+      <div className={`w-full max-w-md p-8 space-y-6 bg-white dark:bg-gray-800 rounded-lg shadow-md ${calendarVisible ? 'lg:max-w-none lg:w-1/4 order-1 lg:order-2 lg:self-start lg:sticky lg:top-8' : ''}`}>
         <h1 className="text-3xl font-bold text-center text-blue-600 dark:text-blue-400">بحار</h1>
         <h2 className="text-xl font-semibold text-center text-gray-700 dark:text-gray-200">تسجيل الدخول</h2>
         <form onSubmit={handleSubmit} className="space-y-6">
@@ -149,7 +159,7 @@ const LoginPage = ({ onLoginSuccess }: LoginPageProps) => {
             <p className="text-sm text-gray-600 dark:text-gray-400">ليس لديك حساب؟ <Link to="/register" className="font-semibold text-blue-600 hover:underline dark:text-blue-400">أنشئ حساباً جديداً</Link></p>
         </div>
       </div>
-      <DelegationChoiceModal 
+      <DelegationChoiceModal
         isOpen={showChoice}
         userName={pendingUser?.FullName}
         options={activeDelegators}

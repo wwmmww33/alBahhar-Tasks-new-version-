@@ -302,6 +302,46 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
     }
   };
 
+  // ---- التقويم العام في صفحة الدخول (المدير العام للنظام فقط) ----
+  const [publicCalendarEnabled, setPublicCalendarEnabled] = useState(false);
+  const [publicCalendarTitle, setPublicCalendarTitle] = useState('');
+  const [savingPublicCalendar, setSavingPublicCalendar] = useState(false);
+  const [publicCalendarSaved, setPublicCalendarSaved] = useState(false);
+
+  useEffect(() => {
+    if (!isSystemAdmin) return;
+    fetch('/api/public/calendar')
+      .then(r => r.ok ? r.json() : { enabled: false, title: '' })
+      .then(data => { setPublicCalendarEnabled(!!data.enabled); setPublicCalendarTitle(data.title || ''); })
+      .catch(() => {});
+  }, [isSystemAdmin]);
+
+  const handleSavePublicCalendar = async () => {
+    setSavingPublicCalendar(true);
+    setPublicCalendarSaved(false);
+    try {
+      const res = await fetch('/api/departments/public-calendar-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser?.UserID, enabled: publicCalendarEnabled, title: publicCalendarTitle }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPublicCalendarTitle(data.title || '');
+        setPublicCalendarSaved(true);
+        setTimeout(() => setPublicCalendarSaved(false), 2500);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.message || 'تعذّر حفظ إعدادات التقويم العام');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('حدث خطأ أثناء الحفظ');
+    } finally {
+      setSavingPublicCalendar(false);
+    }
+  };
+
   // ---- حد أعلى لمستوى البث خاص بمنصب معيّن (المدير العام للنظام فقط) ----
   const [vacancyBroadcastModalFor, setVacancyBroadcastModalFor] = useState<Vacancy | null>(null);
   const [vacancyBroadcastSelection, setVacancyBroadcastSelection] = useState<number | null>(null);
@@ -975,6 +1015,48 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
               }`}
             >
               {savingMaxBroadcast ? 'جارٍ الحفظ...' : maxBroadcastSaved ? '✓ تم الحفظ' : 'حفظ'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isSystemAdmin && (
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+          <h2 className="text-xl font-semibold mb-2">التقويم العام في صفحة الدخول</h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+            يعرض الأحداث التي حدَّدها مديرو الأقسام كـ"بث مفتوح" لأي زائر لصفحة الدخول دون الحاجة لتسجيل الدخول، بلا كشف اسم المُسنَد إليه.
+          </p>
+          <div className="space-y-3">
+            <label className="flex items-center gap-2 cursor-pointer w-fit">
+              <input
+                type="checkbox"
+                checked={publicCalendarEnabled}
+                onChange={(e) => { setPublicCalendarEnabled(e.target.checked); setPublicCalendarSaved(false); }}
+                className="w-4 h-4"
+              />
+              <span className="text-sm">إظهار التقويم العام في صفحة الدخول</span>
+            </label>
+            <div>
+              <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">عنوان التقويم العام</label>
+              <input
+                type="text"
+                value={publicCalendarTitle}
+                onChange={(e) => { setPublicCalendarTitle(e.target.value); setPublicCalendarSaved(false); }}
+                placeholder="التقويم العام"
+                className="w-full max-w-sm p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+              />
+            </div>
+            <button
+              type="button"
+              disabled={savingPublicCalendar}
+              onClick={handleSavePublicCalendar}
+              className={`px-4 py-2 rounded-md text-sm disabled:opacity-50 transition-colors ${
+                publicCalendarSaved
+                  ? 'border border-green-500 text-green-600 bg-green-50 dark:bg-green-900/20 dark:text-green-400'
+                  : 'bg-primary text-white hover:bg-primary-dark'
+              }`}
+            >
+              {savingPublicCalendar ? 'جارٍ الحفظ...' : publicCalendarSaved ? '✓ تم الحفظ' : 'حفظ'}
             </button>
           </div>
         </div>

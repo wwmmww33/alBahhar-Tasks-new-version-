@@ -282,6 +282,73 @@ async function setItemDepartmentShares(pool, { kind, itemId, taskId, departmentI
   }
 }
 
+// تفعيل/إيقاف "التقويم العام" في صفحة الدخول — إعداد عام واحد يضبطه المدير العام للنظام فقط
+// (SystemSettings). عند الإيقاف، لا يُعرض التقويم العام لأي زائر حتى لو وُجدت عناصر عليها "بث مفتوح".
+async function getPublicCalendarEnabled(pool) {
+  try {
+    const r = await pool.request().query(
+      `SELECT SettingValue FROM dbo.SystemSettings WHERE SettingKey = 'PublicCalendarEnabled'`
+    );
+    return r.recordset[0]?.SettingValue === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+async function setPublicCalendarEnabled(pool, enabled, actorUserId) {
+  const value = enabled ? '1' : '0';
+  await pool.request()
+    .input('Value', sql.NVarChar, value)
+    .input('UserID', sql.NVarChar, String(actorUserId || ''))
+    .query(`
+      MERGE dbo.SystemSettings AS target
+      USING (SELECT 'PublicCalendarEnabled' AS K) AS src
+      ON target.SettingKey = src.K
+      WHEN MATCHED THEN UPDATE SET SettingValue = @Value, UpdatedAt = GETDATE(), UpdatedByUserID = @UserID
+      WHEN NOT MATCHED THEN INSERT (SettingKey, SettingValue, UpdatedAt, UpdatedByUserID)
+        VALUES ('PublicCalendarEnabled', @Value, GETDATE(), @UserID);
+    `);
+}
+
+const DEFAULT_PUBLIC_CALENDAR_TITLE = 'التقويم العام';
+
+// عنوان التقويم العام المعروض في صفحة الدخول — نص حر يضبطه المدير العام للنظام فقط، بنفس إعداد
+// التفعيل/الإيقاف أعلاه.
+async function getPublicCalendarTitle(pool) {
+  try {
+    const r = await pool.request().query(
+      `SELECT SettingValue FROM dbo.SystemSettings WHERE SettingKey = 'PublicCalendarTitle'`
+    );
+    const v = r.recordset[0]?.SettingValue;
+    return (v && v.trim()) ? v : DEFAULT_PUBLIC_CALENDAR_TITLE;
+  } catch (_) {
+    return DEFAULT_PUBLIC_CALENDAR_TITLE;
+  }
+}
+
+async function setPublicCalendarTitle(pool, title, actorUserId) {
+  const value = (title && String(title).trim()) ? String(title).trim().slice(0, 200) : DEFAULT_PUBLIC_CALENDAR_TITLE;
+  await pool.request()
+    .input('Value', sql.NVarChar, value)
+    .input('UserID', sql.NVarChar, String(actorUserId || ''))
+    .query(`
+      MERGE dbo.SystemSettings AS target
+      USING (SELECT 'PublicCalendarTitle' AS K) AS src
+      ON target.SettingKey = src.K
+      WHEN MATCHED THEN UPDATE SET SettingValue = @Value, UpdatedAt = GETDATE(), UpdatedByUserID = @UserID
+      WHEN NOT MATCHED THEN INSERT (SettingKey, SettingValue, UpdatedAt, UpdatedByUserID)
+        VALUES ('PublicCalendarTitle', @Value, GETDATE(), @UserID);
+    `);
+}
+
+async function getPublicCalendarSettings(pool) {
+  const [enabled, title] = await Promise.all([
+    getPublicCalendarEnabled(pool),
+    getPublicCalendarTitle(pool),
+  ]);
+  return { enabled, title };
+}
+
 // يتحقق هل صاحب الطلب مدير عام حقيقي للنظام (Role=1) — بعض إعدادات البث (الحد العام والحد الخاص
 // بمنصب) حساسة ومخصصة للمدير العام فقط، وليس مديري الأقسام أو المفوَّضين. يتحقق من قاعدة البيانات
 // دوماً (لا يعتمد على قيمة isAdmin القادمة من العميل وحدها).
@@ -332,4 +399,9 @@ module.exports = {
   setVacancyMaxBroadcastDepartmentId,
   resolveAllowedBroadcastChain,
   isTrueSystemAdmin,
+  getPublicCalendarEnabled,
+  setPublicCalendarEnabled,
+  getPublicCalendarTitle,
+  setPublicCalendarTitle,
+  getPublicCalendarSettings,
 };

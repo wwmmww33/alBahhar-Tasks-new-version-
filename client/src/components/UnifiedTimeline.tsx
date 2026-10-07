@@ -1,5 +1,5 @@
 // src/components/UnifiedTimeline.tsx
-import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy, ArrowRightLeft, Share2, X } from 'lucide-react';
+import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy, ArrowRightLeft, Share2, X, Globe } from 'lucide-react';
 import React, { useState, useMemo, useCallback, useRef } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
@@ -60,6 +60,7 @@ type Comment = {
   ActedByName?: string;
   ShowInCalendar?: boolean;
   SharedDepartmentIds?: number[];
+  IsPublicBroadcast?: boolean;
 };
 
 type TimelineItem = {
@@ -82,6 +83,7 @@ type UnifiedTimelineProps = {
   isSubmittingComment: boolean;
   onCommentsUpdate: () => void;
   shareDepartmentNamesById?: Record<number, string>;
+  canManagePublicBroadcast?: boolean;
 };
 
 const UnifiedTimeline = ({
@@ -95,7 +97,8 @@ const UnifiedTimeline = ({
   onCommentSubmit,
   isSubmittingComment,
   onCommentsUpdate,
-  shareDepartmentNamesById = {}
+  shareDepartmentNamesById = {},
+  canManagePublicBroadcast = false
 }: UnifiedTimelineProps) => {
   const { refreshTasks, refreshNotifications } = useNotification();
   const safeUsers = Array.isArray(users) ? users : [];
@@ -815,6 +818,46 @@ const UnifiedTimeline = ({
     }
   };
 
+  // بث مفتوح: يُظهر العنصر على التقويم العام في صفحة الدخول لأي زائر غير مسجّل (بلا كشف هوية
+  // المُسنَد إليه أو صاحب التعليق) — متاح فقط لمدير القسم المستقل أو المفوَّض له (canManagePublicBroadcast)
+  const handleToggleSubtaskPublicBroadcast = async (subtaskId: number, next: boolean) => {
+    try {
+      const resp = await fetch(`/api/subtasks/${subtaskId}/public-broadcast`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: actingUserId, isAdmin: currentUser.IsAdmin, IsPublicBroadcast: next }),
+      });
+      if (resp.ok) {
+        onSubtaskUpdate();
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        alert(data.message || 'فشل تحديث البث المفتوح للمهمة الفرعية.');
+      }
+    } catch (err) {
+      console.error('Network error while toggling subtask public broadcast:', err);
+      alert('تعذر الاتصال بالخادم.');
+    }
+  };
+
+  const handleToggleCommentPublicBroadcast = async (commentId: number, next: boolean) => {
+    try {
+      const resp = await fetch(`/api/comments/${commentId}/public-broadcast`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: actingUserId, isAdmin: currentUser.IsAdmin, IsPublicBroadcast: next }),
+      });
+      if (resp.ok) {
+        onCommentsUpdate();
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        alert(data.message || 'فشل تحديث البث المفتوح للتعليق.');
+      }
+    } catch (err) {
+      console.error('Network error while toggling comment public broadcast:', err);
+      alert('تعذر الاتصال بالخادم.');
+    }
+  };
+
   const saveComment = async (commentId: number, content: string) => {
     try {
       const resp = await fetch(`/api/comments/${commentId}`, {
@@ -995,6 +1038,17 @@ const UnifiedTimeline = ({
                     title="مشاركة مع جهة مستقلة أخرى"
                   >
                     <Share2 size={16} />
+                  </button>
+                )}
+                {canManagePublicBroadcast && (
+                  <button
+                    onClick={() => handleToggleSubtaskPublicBroadcast(subtask.SubtaskID, !subtask.IsPublicBroadcast)}
+                    className={subtask.IsPublicBroadcast ? 'text-emerald-500' : 'text-content-secondary hover:text-emerald-500'}
+                    title={subtask.IsPublicBroadcast
+                      ? 'بث مفتوح: تظهر هذه المهمة في التقويم العام لصفحة الدخول — اضغط لإلغائه'
+                      : 'إظهار هذه المهمة في التقويم العام لصفحة الدخول (بث مفتوح، بلا ذكر المُسنَد إليه)'}
+                  >
+                    <Globe size={16} />
                   </button>
                 )}
                 {canDelete && (
@@ -1393,6 +1447,17 @@ const UnifiedTimeline = ({
                     title="مشاركة مع جهة مستقلة أخرى"
                   >
                     <Share2 size={14} />
+                  </button>
+                )}
+                {canManagePublicBroadcast && (
+                  <button
+                    onClick={() => handleToggleCommentPublicBroadcast(comment.CommentID, !comment.IsPublicBroadcast)}
+                    className={comment.IsPublicBroadcast ? 'text-emerald-500' : 'text-content-secondary hover:text-emerald-500'}
+                    title={comment.IsPublicBroadcast
+                      ? 'بث مفتوح: يظهر هذا التعليق في التقويم العام لصفحة الدخول — اضغط لإلغائه'
+                      : 'إظهار هذا التعليق في التقويم العام لصفحة الدخول (بث مفتوح، بلا ذكر صاحب التعليق)'}
+                  >
+                    <Globe size={14} />
                   </button>
                 )}
                 {canManage && (

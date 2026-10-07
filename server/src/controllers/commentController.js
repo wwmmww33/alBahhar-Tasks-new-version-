@@ -752,3 +752,47 @@ exports.setCommentBroadcastLevel = async (req, res) => {
         res.status(500).json({ message: 'Error setting comment broadcast level', detail: error.message });
     }
 };
+
+// PATCH /api/comments/:commentId/public-broadcast — بث مفتوح: يُظهر هذا التعليق على التقويم العام
+// في صفحة الدخول لأي زائر غير مسجّل (بلا كشف هوية صاحب التعليق). مستقل تماماً عن مستوى البث الداخلي.
+exports.setCommentPublicBroadcast = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { commentId } = req.params;
+    const { userId, isAdmin, IsPublicBroadcast } = req.body || {};
+
+    if (!commentId || !userId) {
+        return res.status(400).json({ message: 'commentId and userId are required.' });
+    }
+    if (typeof IsPublicBroadcast !== 'boolean') {
+        return res.status(400).json({ message: 'IsPublicBroadcast must be a boolean.' });
+    }
+
+    try {
+        const existingResult = await pool.request()
+            .input('CommentID', sql.Int, commentId)
+            .query(`
+                SELECT c.CommentID, c.TaskID, t.DepartmentID AS TaskDepartmentID
+                FROM Comments c
+                INNER JOIN Tasks t ON t.TaskID = c.TaskID
+                WHERE c.CommentID = @CommentID
+            `);
+        if (!existingResult.recordset.length) {
+            return res.status(404).json({ message: 'Comment not found.' });
+        }
+        const existing = existingResult.recordset[0];
+        const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, existing.TaskDepartmentID);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل أو المفوَّض له فقط.' });
+        }
+
+        await pool.request()
+            .input('CommentID', sql.Int, commentId)
+            .input('Value', sql.Bit, IsPublicBroadcast ? 1 : 0)
+            .query('UPDATE Comments SET IsPublicBroadcast = @Value WHERE CommentID = @CommentID');
+
+        res.status(200).json({ message: 'تم تحديث البث المفتوح للتعليق.', IsPublicBroadcast });
+    } catch (error) {
+        console.error('SET COMMENT PUBLIC BROADCAST ERROR:', error);
+        res.status(500).json({ message: 'Error setting comment public broadcast', detail: error.message });
+    }
+};
