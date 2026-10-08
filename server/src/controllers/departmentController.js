@@ -22,7 +22,8 @@ const resolveDeptColumns = async (pool) => {
     const parentCol = names.has('ParentID') ? 'ParentID' : (names.has('ParentDepartmentID') ? 'ParentDepartmentID' : null);
     const activeCol = names.has('IsActive') ? 'IsActive' : (names.has('Active') ? 'Active' : null);
     const hasTypeCol = names.has('Type');
-    _deptColsCache = { parentCol, activeCol, hasTypeCol };
+    const hasIsIndependentCol = names.has('IsIndependent');
+    _deptColsCache = { parentCol, activeCol, hasTypeCol, hasIsIndependentCol };
     return _deptColsCache;
 };
 
@@ -41,18 +42,22 @@ exports.createDepartment = async (req, res) => {
         const parent = req.body.ParentID ?? req.body.ParentDepartmentID ?? null;
         const activeVal = req.body.IsActive ?? req.body.Active;
         const active = typeof activeVal === 'boolean' ? activeVal : (typeof activeVal === 'number' ? activeVal !== 0 : null);
+        // Type وصفي بحت (مثال: "مديرية"، "قسم") — لا علاقة له بالاستقلالية بعد الآن، راجع IsIndependent.
         const typeVal = req.body.Type != null ? String(req.body.Type) : null;
+        const isIndependentVal = req.body.IsIndependent === true || req.body.IsIndependent === 1;
 
         const reqq = pool.request().input('Name', sql.NVarChar, Name);
         if (cols.parentCol) reqq.input('Parent', sql.Int, parent);
         if (cols.activeCol) reqq.input('Active', sql.Bit, active === null ? true : active);
         if (cols.hasTypeCol) reqq.input('Type', sql.NVarChar, typeVal);
+        if (cols.hasIsIndependentCol) reqq.input('IsIndependent', sql.Bit, isIndependentVal);
 
         let query = 'INSERT INTO Departments (Name';
         let values = 'VALUES (@Name';
         if (cols.parentCol) { query += `, ${cols.parentCol}`; values += ', @Parent'; }
         if (cols.activeCol) { query += `, ${cols.activeCol}`; values += ', @Active'; }
         if (cols.hasTypeCol) { query += `, Type`; values += ', @Type'; }
+        if (cols.hasIsIndependentCol) { query += `, IsIndependent`; values += ', @IsIndependent'; }
         query += `) OUTPUT INSERTED.* ${values})`;
 
         const result = await reqq.query(query);
@@ -68,17 +73,24 @@ exports.updateDepartment = async (req, res) => {
         const parent = req.body.ParentID ?? req.body.ParentDepartmentID ?? null;
         const activeVal = req.body.IsActive ?? req.body.Active;
         const active = typeof activeVal === 'boolean' ? activeVal : (typeof activeVal === 'number' ? activeVal !== 0 : null);
+        // لا نلمس Type إلا إذا أُرسل صراحةً في الطلب — تفادياً لمحو تسمية وصفية (مثل تلك المستورَدة
+        // من إكسل) عند أي حفظ لا يتعلق بها أصلاً (كتبديل علامة "مستقل" وحدها عبر IsIndependent).
+        const hasTypeInBody = Object.prototype.hasOwnProperty.call(req.body, 'Type');
         const typeVal = req.body.Type != null ? String(req.body.Type) : null;
+        const hasIsIndependentInBody = Object.prototype.hasOwnProperty.call(req.body, 'IsIndependent');
+        const isIndependentVal = req.body.IsIndependent === true || req.body.IsIndependent === 1;
 
         const reqq = pool.request().input('DepartmentID', sql.Int, id).input('Name', sql.NVarChar, Name);
         if (cols.parentCol) reqq.input('Parent', sql.Int, parent);
         if (cols.activeCol) reqq.input('Active', sql.Bit, active === null ? true : active);
-        if (cols.hasTypeCol) reqq.input('Type', sql.NVarChar, typeVal);
+        if (cols.hasTypeCol && hasTypeInBody) reqq.input('Type', sql.NVarChar, typeVal);
+        if (cols.hasIsIndependentCol && hasIsIndependentInBody) reqq.input('IsIndependent', sql.Bit, isIndependentVal);
 
         let setParts = ['Name = @Name'];
         if (cols.parentCol) setParts.push(`${cols.parentCol} = @Parent`);
         if (cols.activeCol) setParts.push(`${cols.activeCol} = @Active`);
-        if (cols.hasTypeCol) setParts.push('Type = @Type');
+        if (cols.hasTypeCol && hasTypeInBody) setParts.push('Type = @Type');
+        if (cols.hasIsIndependentCol && hasIsIndependentInBody) setParts.push('IsIndependent = @IsIndependent');
         const query = `UPDATE Departments SET ${setParts.join(', ')} WHERE DepartmentID = @DepartmentID`;
         await reqq.query(query);
         // مسح الكاش لإعادة قراءة الأعمدة عند الحاجة
@@ -255,13 +267,14 @@ exports.importDepartmentsFromExcel = async (req, res) => {
     const parentDeptId = parseInt(req.params.id, 10);
     if (!Number.isInteger(parentDeptId)) return res.status(400).json({ message: 'id must be integer' });
 
-    const { rows } = req.body || {};
+    const { rows, columnMap } = req.body || {};
     if (!Array.isArray(rows) || rows.length === 0)
         return res.status(400).json({ message: 'rows array is required and must not be empty' });
 
     try {
 
-        // ---- 2. تطبيع أسماء الأعمدة (تجاهل فروق المسافات والحالة) ----
+        // ---- 2. تحديد أعمدة الملف: يختارها المستخدم من الواجهة (مطابقة صريحة لكل حقل) — لا
+        // تخمين من الخادم. يبقى findCol احتياطياً فقط لطلبات قديمة بلا columnMap (توافقية).
         function findCol(row, ...candidates) {
             const keys = Object.keys(row);
             for (const c of candidates) {
@@ -271,15 +284,20 @@ exports.importDepartmentsFromExcel = async (req, res) => {
             return null;
         }
         const sample = rows[0];
-        const COL_POS_ID     = findCol(sample, 'PositionID',        'Position_ID',  'ID');
-        const COL_PARENT_ID  = findCol(sample, 'Parent_PositionID', 'ParentID',     'Parent_ID');
-        const COL_DEPT_AR    = findCol(sample, 'Department_Ar',     'DepartmentAr', 'الاسم', 'Name');
-        const COL_TYPE       = findCol(sample, 'Type',              'النوع');
-        const COL_POS_AR     = findCol(sample, 'Position_Ar',       'PositionAr',   'المسمى');
-        const COL_RANK       = findCol(sample, 'Postion_Rnk',       'Position_Rnk', 'Rank', 'الرتبة');
+        const sampleKeys = new Set(Object.keys(sample));
+        // عمود مُرسَل من المستخدم لكنه غير موجود فعلياً في هذه الصفوف (ملف مختلف خلسة) يُعامَل
+        // كغياب العمود دفاعياً، بدل قراءة undefined بصمت.
+        const fromMap = (key) => (columnMap && columnMap[key] && sampleKeys.has(columnMap[key])) ? columnMap[key] : null;
+
+        const COL_POS_ID     = columnMap ? fromMap('posId')    : findCol(sample, 'PositionID',        'Position_ID',  'ID');
+        const COL_PARENT_ID  = columnMap ? fromMap('parentId') : findCol(sample, 'Parent_PositionID', 'ParentID',     'Parent_ID');
+        const COL_DEPT_AR    = columnMap ? fromMap('deptName') : findCol(sample, 'Department_Ar',     'DepartmentAr', 'الاسم', 'Name');
+        const COL_TYPE       = columnMap ? fromMap('type')     : findCol(sample, 'Type',              'النوع');
+        const COL_POS_AR     = columnMap ? fromMap('posName')  : findCol(sample, 'Position_Ar',       'PositionAr',   'المسمى');
+        const COL_RANK       = columnMap ? fromMap('rank')     : findCol(sample, 'Postion_Rnk',       'Position_Rnk', 'Rank', 'الرتبة');
 
         if (!COL_POS_ID || !COL_DEPT_AR) {
-            return res.status(400).json({ message: 'لم يتم العثور على أعمدة PositionID و Department_Ar في الملف.' });
+            return res.status(400).json({ message: 'يجب تحديد عمودي "معرف المنصب" و"اسم القسم" من ملف الإكسل.' });
         }
 
         // ---- 3. بناء خريطة PositionID في الإكسل ----
@@ -490,7 +508,7 @@ exports.getAncestorChain = async (req, res) => {
             } catch (_) { /* تجاهل دفاعياً */ }
         }
         const chain = await resolveAllowedBroadcastChain(pool, departmentId, vacancyId);
-        res.status(200).json(chain.map(({ DepartmentID, Name, Type }) => ({ DepartmentID, Name, Type })));
+        res.status(200).json(chain.map(({ DepartmentID, Name, Type, IsIndependent }) => ({ DepartmentID, Name, Type, IsIndependent: !!IsIndependent })));
     } catch (err) {
         console.error('GET ANCESTOR CHAIN ERROR:', err);
         res.status(500).json({ message: 'Error fetching ancestor chain', detail: err.message });

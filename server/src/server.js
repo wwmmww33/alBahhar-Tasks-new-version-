@@ -127,12 +127,14 @@ const {
   ensureVacancyCalendarBroadcastColumn,
   ensureCrossDepartmentSharingTables,
   ensureCalendarBroadcastLevelColumns,
+  ensureDepartmentIsIndependentColumn,
   ensureVacancySharingDelegationColumn,
   ensureSystemSettingsTable,
   ensureVacancyMaxBroadcastColumn,
   ensureCommentCalendarDisplayDateColumn,
   ensureSystemProposalsTable,
   ensurePublicBroadcastColumns,
+  ensureCommentCalendarEndDateColumn,
 } = require('./utils/dbMigrations');
 
 
@@ -322,6 +324,7 @@ const startServer = async () => {
     try {
       await ensureCrossDepartmentSharingTables(pool);
       await ensureCalendarBroadcastLevelColumns(pool);
+      await ensureDepartmentIsIndependentColumn(pool);
       await ensureVacancySharingDelegationColumn(pool);
     } catch (crossDeptErr) {
       console.error('⚠️ Database migration (Cross-department sharing) failed. Server continues running.', crossDeptErr);
@@ -334,6 +337,7 @@ const startServer = async () => {
       await ensureCommentCalendarDisplayDateColumn(pool);
       await ensureSystemProposalsTable(pool);
       await ensurePublicBroadcastColumns(pool);
+      await ensureCommentCalendarEndDateColumn(pool);
     } catch (settingsErr) {
       console.error('⚠️ Database migration (SystemSettings) failed. Server continues running.', settingsErr);
     }

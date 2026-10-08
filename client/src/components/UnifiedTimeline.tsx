@@ -1,6 +1,6 @@
 // src/components/UnifiedTimeline.tsx
 import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy, ArrowRightLeft, Share2, X, Globe } from 'lucide-react';
-import React, { useState, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
@@ -56,6 +56,8 @@ type Comment = {
   UserName?: string;
   CreatedAt: string;
   CalendarDisplayDate?: string | null;
+  CalendarEndDate?: string | null;
+  CalendarBroadcastDepartmentID?: number | null;
   ActedBy?: string;
   ActedByName?: string;
   ShowInCalendar?: boolean;
@@ -79,7 +81,7 @@ type UnifiedTimelineProps = {
   currentUser: CurrentUser;
   task: any;
   onSubtaskUpdate: () => void;
-  onCommentSubmit: (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean }) => Promise<void>;
+  onCommentSubmit: (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean; calendarEndDate?: string | null; calendarBroadcastDepartmentId?: number | null }) => Promise<void>;
   isSubmittingComment: boolean;
   onCommentsUpdate: () => void;
   shareDepartmentNamesById?: Record<number, string>;
@@ -226,15 +228,24 @@ const UnifiedTimeline = ({
   const [newSubtaskEndDate, setNewSubtaskEndDate] = useState('');
   const [assignTo, setAssignTo] = useState('');
   const [showInCalendar, setShowInCalendar] = useState(false);
+  const [newSubtaskBroadcastDeptId, setNewSubtaskBroadcastDeptId] = useState<number | null>(null);
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [reminderMinutes, setReminderMinutes] = useState(15);
   const [newComment, setNewComment] = useState('');
   const [showCommentPreview, setShowCommentPreview] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showCommentInCalendar, setShowCommentInCalendar] = useState(false);
+  const [commentBroadcastDeptId, setCommentBroadcastDeptId] = useState<number | null>(null);
+  const [subtaskBroadcastModal, setSubtaskBroadcastModal] = useState<{ subtask: Subtask } | null>(null);
+  const [subtaskBroadcastDeptId, setSubtaskBroadcastDeptId] = useState<number | null>(null);
   const [commentCalendarDisplayDate, setCommentCalendarDisplayDate] = useState<string | null>(null);
+  const [commentCalendarEndDate, setCommentCalendarEndDate] = useState<string | null>(null);
   const [calendarDateModal, setCalendarDateModal] = useState<{ kind: 'new' } | { kind: 'existing'; commentId: number } | null>(null);
   const [calendarDateModalValue, setCalendarDateModalValue] = useState(getCurrentDateTime());
+  // تاريخ نهاية اختياري — يجعل التعليق يظهر كحدث ممتد (بداية/نهاية) في التقويم بلا حاجة لإسناده
+  // لأي شخص (التعليقات أصلاً بلا مُسنَد إليه)، بنفس فكرة بداية/نهاية المهمة الفرعية.
+  const [calendarDateModalExtend, setCalendarDateModalExtend] = useState(false);
+  const [calendarEndDateModalValue, setCalendarEndDateModalValue] = useState(getCurrentDateTime());
   const [showSubtaskForm, setShowSubtaskForm] = useState(false);
   const [showCommentForm, setShowCommentForm] = useState(false);
 
@@ -376,6 +387,106 @@ const UnifiedTimeline = ({
     : null;
   const actedByValue = _isDelegationMode ? _delegateUserId : actingUserId;
 
+  // بث العنصر (مهمة فرعية/تعليق) داخل التقويم لا يتجاوز مستوى بث المهمة نفسها (المضبوط من مدير
+  // القسم عبر TaskSharingModal) — يختار منشئ العنصر مستوى "تضييق" اختياري من قسم المهمة نفسه
+  // وحتى مستوى بث المهمة شاملاً، دون تجاوزه أبداً. التصعيد لمستوى أعلى من مستوى المهمة يبقى حصراً
+  // لمدير القسم عبر مستوى بث المهمة نفسه (TaskSharingModal)، وليس هنا.
+  type BroadcastChainEntry = { DepartmentID: number; Name: string; Type?: number | string | null; IsIndependent?: boolean };
+  const [broadcastChain, setBroadcastChain] = useState<BroadcastChainEntry[]>([]);
+  useEffect(() => {
+    if (task?.DepartmentID == null) { setBroadcastChain([]); return; }
+    let cancelled = false;
+    fetch(`/api/departments/${task.DepartmentID}/ancestor-chain?userId=${encodeURIComponent(actingUserId)}`)
+      .then(r => r.ok ? r.json() : [])
+      .then(data => { if (!cancelled) setBroadcastChain(Array.isArray(data) ? data : []); })
+      .catch(() => { if (!cancelled) setBroadcastChain([]); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?.DepartmentID]);
+
+  const taskBroadcastDeptId: number | null = task?.CalendarBroadcastDepartmentID ?? null;
+  const taskLevelIdx = useMemo(() => {
+    if (broadcastChain.length === 0 || taskBroadcastDeptId == null) return 0;
+    const idx = broadcastChain.findIndex(d => d.DepartmentID === taskBroadcastDeptId);
+    return idx === -1 ? 0 : idx;
+  }, [broadcastChain, taskBroadcastDeptId]);
+  // خيارات "التضييق" المتاحة لمنشئ العنصر العادي: من قسم المهمة نفسه وحتى مستوى بث المهمة الحالي
+  // شاملاً — لا تتجاوزه أبداً. عنصر واحد فقط = لا يوجد نطاق بث على هذه المهمة أصلاً (لا داعي لعرض الاختيار).
+  const narrowingOptions = useMemo(() => broadcastChain.slice(0, taskLevelIdx + 1), [broadcastChain, taskLevelIdx]);
+  const hasBroadcastChoice = narrowingOptions.length > 1;
+
+  // أقرب قسم مستقل (IsIndependent) صعوداً من قسم المهمة — المرجع المعتاد الذي يُقارَن به مستوى
+  // بث أي عنصر (مهمة فرعية/تعليق) لتنبيه المستخدم إن كان العنصر لا يُبَثّ على هذا المستوى.
+  const independentDeptEntry = useMemo(
+    () => broadcastChain.find(d => !!d.IsIndependent) ?? null,
+    [broadcastChain]
+  );
+  // الافتراضي عند تفعيل "إظهار في التقويم" هو مستوى القسم المستقل نفسه — وليس مستوى بث المهمة
+  // الذي قد يكون المدير رفعه لمستوى أعلى (أوسع) من القسم المستقل عمداً لعناصر أخرى. إن لم يكن
+  // القسم المستقل ضمن النطاق المسموح لهذا العنصر (نادراً — حين يكون مستوى بث المهمة نفسه أضيق
+  // من القسم المستقل) نسقط احتياطياً لأوسع مستوى مسموح (مستوى المهمة).
+  const defaultBroadcastDeptId: number | null = useMemo(() => {
+    if (narrowingOptions.length === 0) return null;
+    if (independentDeptEntry && narrowingOptions.some(d => d.DepartmentID === independentDeptEntry.DepartmentID)) {
+      return independentDeptEntry.DepartmentID;
+    }
+    return narrowingOptions[narrowingOptions.length - 1].DepartmentID;
+  }, [narrowingOptions, independentDeptEntry]);
+  const broadcastNoteFor = (deptId: number | null) => {
+    const effectiveId = deptId ?? defaultBroadcastDeptId;
+    const entry = narrowingOptions.find(d => d.DepartmentID === effectiveId);
+    return entry ? `سيظهر هذا العنصر في التقويم على مستوى: ${entry.Name}` : '';
+  };
+  const renderBroadcastPicker = (
+    value: number | null,
+    onChange: (deptId: number) => void,
+  ) => (
+    <div className="flex flex-col gap-1 mt-1.5">
+      <select
+        value={value ?? defaultBroadcastDeptId ?? ''}
+        onChange={(e) => onChange(parseInt(e.target.value, 10))}
+        className="text-xs p-1.5 border rounded-md bg-bkg border-content/20 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+      >
+        {narrowingOptions.map((d, idx) => {
+          const isTaskLevel = idx === narrowingOptions.length - 1;
+          const isDefault = d.DepartmentID === defaultBroadcastDeptId;
+          const suffix = isDefault && isTaskLevel ? ' (مستوى المهمة/الافتراضي)'
+            : isDefault ? ' (الافتراضي)'
+            : isTaskLevel ? ' (مستوى المهمة)'
+            : '';
+          return (
+            <option key={d.DepartmentID} value={d.DepartmentID}>
+              {d.Name}{suffix}
+            </option>
+          );
+        })}
+      </select>
+      <span className="text-[11px] text-content-secondary">{broadcastNoteFor(value)}</span>
+    </div>
+  );
+
+  const resolveEffectiveBroadcastDeptId = (itemBroadcastId?: number | null): number | null => {
+    if (itemBroadcastId != null) return itemBroadcastId;
+    return taskBroadcastDeptId ?? task?.DepartmentID ?? null;
+  };
+  // شارة تنبيه تظهر على المهمة الفرعية/التعليق نفسه (لا فقط عند فتح نافذة الاختيار) حين يكون
+  // مستوى بثها الفعلي مختلفاً عن مستوى القسم المستقل — حتى يكون من يراها على علم بذلك فوراً.
+  const renderBroadcastLevelBadge = (itemBroadcastId: number | null | undefined, showInCalendar: boolean | undefined) => {
+    if (!showInCalendar || !independentDeptEntry) return null;
+    const effectiveId = resolveEffectiveBroadcastDeptId(itemBroadcastId);
+    if (effectiveId == null || effectiveId === independentDeptEntry.DepartmentID) return null;
+    const entry = broadcastChain.find(d => d.DepartmentID === effectiveId);
+    const label = entry?.Name || `#${effectiveId}`;
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 whitespace-nowrap"
+        title={`هذا العنصر لا يُبَثّ على مستوى القسم المستقل (${independentDeptEntry.Name}) — مستوى بثه الفعلي: ${label}`}
+      >
+        🌐 بث: {label}
+      </span>
+    );
+  };
+
   const actorIdCandidates = useMemo(() => {
     const ids = new Set<string>();
     const add = (value: unknown) => {
@@ -478,6 +589,7 @@ const UnifiedTimeline = ({
                         TaskID: taskId, Title: newSubtaskTitle, CreatedBy: actingUserId, ActedBy: actedByValue,
                         DueDate: newSubtaskDueDate || null, EndDate: newSubtaskEndDate || null, AssignedTo: userId,
                         ShowInCalendar: showInCalendar,
+                        CalendarBroadcastDepartmentID: showInCalendar ? (newSubtaskBroadcastDeptId ?? defaultBroadcastDeptId) : null,
                         ReminderEnabled: reminderEnabled,
                         ReminderMinutes: reminderEnabled ? reminderMinutes : null,
                         UserID: actingUserId, isAdmin: currentUser.IsAdmin
@@ -499,6 +611,7 @@ const UnifiedTimeline = ({
         }
 
         setNewSubtaskTitle(''); setNewSubtaskDueDate(getTodayString()); setNewSubtaskEndDate(''); setAssignTo(''); setShowInCalendar(false);
+        setNewSubtaskBroadcastDeptId(null);
         setReminderEnabled(false); setReminderMinutes(15);
         setNewSubtaskBulkUsers([]);
 
@@ -527,6 +640,7 @@ const UnifiedTimeline = ({
         EndDate: newSubtaskEndDate || null,
         AssignedTo: assignTo || actingUserId,
         ShowInCalendar: showInCalendar,
+        CalendarBroadcastDepartmentID: showInCalendar ? (newSubtaskBroadcastDeptId ?? defaultBroadcastDeptId) : null,
         ReminderEnabled: reminderEnabled,
         ReminderMinutes: reminderEnabled ? reminderMinutes : null,
         UserID: actingUserId,
@@ -538,6 +652,7 @@ const UnifiedTimeline = ({
     setNewSubtaskEndDate('');
     setAssignTo('');
     setShowInCalendar(false);
+    setNewSubtaskBroadcastDeptId(null);
     setReminderEnabled(false);
     setReminderMinutes(15);
     onSubtaskUpdate();
@@ -560,6 +675,7 @@ const UnifiedTimeline = ({
     const assignedId = subtaskAssignedId(subtask);
     setAssignTo(assignedId || '');
     setShowInCalendar(!!(subtask as any).ShowInCalendar);
+    setNewSubtaskBroadcastDeptId((subtask as any).CalendarBroadcastDepartmentID ?? null);
     setReminderEnabled(!!subtask.ReminderEnabled);
     setReminderMinutes(subtask.ReminderMinutes ?? 15);
     setShowSubtaskForm(true);
@@ -690,13 +806,18 @@ const UnifiedTimeline = ({
   };
 
   // تبديل إظهار المهمة الفرعية الحالية في التقويم
-  const handleToggleCalendar = async (subtask: Subtask, nextShow: boolean) => {
+  const handleToggleCalendar = async (subtask: Subtask, nextShow: boolean, broadcastDeptId: number | null = null) => {
     try {
       const url = `/api/subtasks/${subtask.SubtaskID}/calendar`;
       const resp = await fetch(url, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ShowInCalendar: nextShow, UserID: actingUserId, isAdmin: currentUser.IsAdmin })
+        body: JSON.stringify({
+          ShowInCalendar: nextShow,
+          CalendarBroadcastDepartmentID: nextShow ? broadcastDeptId : null,
+          UserID: actingUserId,
+          isAdmin: currentUser.IsAdmin,
+        })
       });
       if (resp.ok) {
         window.dispatchEvent(new CustomEvent('calendar:subtask:updated', { detail: { SubtaskID: subtask.SubtaskID, ShowInCalendar: nextShow } }));
@@ -765,6 +886,8 @@ const UnifiedTimeline = ({
     const commentData = {
       content: newComment,
       calendarDisplayDate: hadCalendar ? commentCalendarDisplayDate : null,
+      calendarEndDate: hadCalendar ? commentCalendarEndDate : null,
+      calendarBroadcastDepartmentId: hadCalendar ? (commentBroadcastDeptId ?? defaultBroadcastDeptId) : null,
       showInCalendar: hadCalendar
     };
 
@@ -772,28 +895,33 @@ const UnifiedTimeline = ({
     setNewComment('');
     setShowCommentInCalendar(false);
     setCommentCalendarDisplayDate(null);
+    setCommentCalendarEndDate(null);
+    setCommentBroadcastDeptId(null);
     if (hadCalendar) {
       window.dispatchEvent(new CustomEvent('calendar:comment:created', { detail: { ShowInCalendar: true } }));
     }
   };
 
   // يُستدعى عند تأكيد التاريخ/الوقت من نافذة اختيار "تاريخ ظهور التعليق في التقويم" —
-  // سواء كانت المهمة تفعيل الإظهار لتعليق جديد قيد الكتابة أو لتعليق موجود مسبقاً.
+  // سواء كانت المهمة تفعيل الإظهار لتعليق جديد قيد الكتابة أو لتعليق موجود مسبقاً. إن فُعِّل خيار
+  // "حدث ممتد" تُرسَل نهاية أيضاً، فيظهر التعليق كحدث له بداية ونهاية دون إسناده لأي شخص.
   const handleConfirmCalendarDate = async () => {
     if (!calendarDateModal) return;
+    const endDate = calendarDateModalExtend ? calendarEndDateModalValue : null;
     if (calendarDateModal.kind === 'new') {
       setShowCommentInCalendar(true);
       setCommentCalendarDisplayDate(calendarDateModalValue);
+      setCommentCalendarEndDate(endDate);
       setCalendarDateModal(null);
     } else {
-      await handleToggleCommentCalendar(calendarDateModal.commentId, true, calendarDateModalValue);
+      await handleToggleCommentCalendar(calendarDateModal.commentId, true, calendarDateModalValue, endDate, commentBroadcastDeptId);
       setCalendarDateModal(null);
     }
   };
 
-  // تبديل إظهار تعليق موجود مسبقاً في التقويم. عند التفعيل يُرسَل تاريخ العرض المحدَّد من
-  // نافذة الاختيار؛ عند الإلغاء لا حاجة لتاريخ.
-  const handleToggleCommentCalendar = async (commentId: number, next: boolean, calendarDisplayDate: string | null) => {
+  // تبديل إظهار تعليق موجود مسبقاً في التقويم. عند التفعيل يُرسَل تاريخ العرض (ونهاية الامتداد
+  // الاختيارية) ومستوى البث المحدَّدين من نافذة الاختيار؛ عند الإلغاء لا حاجة لأي منها.
+  const handleToggleCommentCalendar = async (commentId: number, next: boolean, calendarDisplayDate: string | null, calendarEndDate: string | null = null, broadcastDeptId: number | null = null) => {
     try {
       const resp = await fetch(`/api/comments/${commentId}`, {
         method: 'PUT',
@@ -802,6 +930,8 @@ const UnifiedTimeline = ({
           UserID: actingUserId,
           ShowInCalendar: next,
           CalendarDisplayDate: calendarDisplayDate,
+          CalendarEndDate: calendarEndDate,
+          CalendarBroadcastDepartmentID: next ? (broadcastDeptId ?? defaultBroadcastDeptId) : null,
           isAdmin: currentUser.IsAdmin,
         }),
       });
@@ -1215,14 +1345,27 @@ const UnifiedTimeline = ({
                     </span>
                   )}
                 </div>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={!!(subtask as any).ShowInCalendar}
-                    onChange={(e) => handleToggleCalendar(subtask, e.target.checked)}
-                  />
-                  <span>إظهار في التقويم</span>
-                </label>
+                {/* إظهار المهمة الفرعية في التقويم: صلاحية منشئها فقط، بالإضافة إلى مدير القسم
+                    المستقل (أو المفوَّض له) — وليس أي متعاون آخر في المهمة. */}
+                {(isSubtaskCreatorActor(subtask) || canManagePublicBroadcast) && (
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={!!(subtask as any).ShowInCalendar}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        if (checked && hasBroadcastChoice) {
+                          setSubtaskBroadcastDeptId((subtask as any).CalendarBroadcastDepartmentID ?? defaultBroadcastDeptId);
+                          setSubtaskBroadcastModal({ subtask });
+                        } else {
+                          handleToggleCalendar(subtask, checked);
+                        }
+                      }}
+                    />
+                    <span>إظهار في التقويم</span>
+                    {renderBroadcastLevelBadge((subtask as any).CalendarBroadcastDepartmentID, !!(subtask as any).ShowInCalendar)}
+                  </label>
+                )}
                 {editingReminderSubtaskId === subtask.SubtaskID ? (
                   <span
                     className="flex items-center gap-1.5"
@@ -1387,15 +1530,36 @@ const UnifiedTimeline = ({
                   dangerouslySetInnerHTML={{ __html: renderMarkdown(comment.Content || '') }}
                 />
                 {!!comment.ShowInCalendar && comment.CalendarDisplayDate && (() => {
-                  const d = new Date(comment.CalendarDisplayDate);
-                  const y = d.getFullYear();
-                  const m = d.getMonth() + 1;
-                  const day = d.getDate();
-                  const h = String(d.getHours()).padStart(2, '0');
-                  const min = String(d.getMinutes()).padStart(2, '0');
+                  const fmt = (dateStr: string) => {
+                    const d = new Date(dateStr);
+                    const h = String(d.getHours()).padStart(2, '0');
+                    const min = String(d.getMinutes()).padStart(2, '0');
+                    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${h}:${min}`;
+                  };
                   return (
-                    <p className="text-xs text-purple-600 dark:text-purple-400 mb-2">
-                      📅 {y}/{m}/{day} {h}:{min}
+                    <p className="text-xs text-purple-600 dark:text-purple-400 mb-2 flex items-center gap-1.5 flex-wrap">
+                      <span>
+                        📅 {fmt(comment.CalendarDisplayDate)}
+                        {comment.CalendarEndDate && <> ← {fmt(comment.CalendarEndDate)}</>}
+                      </span>
+                      {renderBroadcastLevelBadge((comment as any).CalendarBroadcastDepartmentID, !!comment.ShowInCalendar)}
+                      {(isCommentOwner(comment) || canManagePublicBroadcast) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCalendarDateModalValue(formatToDateTimeLocal(new Date(comment.CalendarDisplayDate!)));
+                            setCalendarDateModalExtend(!!comment.CalendarEndDate);
+                            setCalendarEndDateModalValue(
+                              comment.CalendarEndDate ? formatToDateTimeLocal(new Date(comment.CalendarEndDate)) : getCurrentDateTime()
+                            );
+                            setCommentBroadcastDeptId((comment as any).CalendarBroadcastDepartmentID ?? defaultBroadcastDeptId);
+                            setCalendarDateModal({ kind: 'existing', commentId: comment.CommentID });
+                          }}
+                          className="text-primary hover:underline"
+                        >
+                          تعديل
+                        </button>
+                      )}
                     </p>
                   );
                 })()}
@@ -1410,7 +1574,9 @@ const UnifiedTimeline = ({
                   </span>
                   {renderShareBadge(comment.SharedDepartmentIds)}
                 </p>
-                {canManage && (
+                {/* إظهار التعليق في التقويم: صلاحية صاحب التعليق فقط، بالإضافة إلى مدير القسم
+                    المستقل (أو المفوَّض له) — وليس أي متعاون آخر في المهمة. */}
+                {(isCommentOwner(comment) || canManagePublicBroadcast) && (
                   <label className="flex items-center gap-2 text-xs text-content-secondary">
                     <input
                       type="checkbox"
@@ -1420,6 +1586,11 @@ const UnifiedTimeline = ({
                           setCalendarDateModalValue(
                             comment.CalendarDisplayDate ? formatToDateTimeLocal(new Date(comment.CalendarDisplayDate)) : getCurrentDateTime()
                           );
+                          setCalendarDateModalExtend(!!comment.CalendarEndDate);
+                          setCalendarEndDateModalValue(
+                            comment.CalendarEndDate ? formatToDateTimeLocal(new Date(comment.CalendarEndDate)) : getCurrentDateTime()
+                          );
+                          setCommentBroadcastDeptId((comment as any).CalendarBroadcastDepartmentID ?? defaultBroadcastDeptId);
                           setCalendarDateModal({ kind: 'existing', commentId: comment.CommentID });
                         } else {
                           handleToggleCommentCalendar(comment.CommentID, false, null);
@@ -1653,6 +1824,11 @@ const UnifiedTimeline = ({
                 />
                 إظهار في التقويم
               </label>
+              {showInCalendar && hasBroadcastChoice && (
+                <div className="w-full">
+                  {renderBroadcastPicker(newSubtaskBroadcastDeptId, setNewSubtaskBroadcastDeptId)}
+                </div>
+              )}
               <label className="flex items-center gap-1.5 text-sm cursor-pointer whitespace-nowrap">
                 <input
                   type="checkbox"
@@ -1787,10 +1963,15 @@ const UnifiedTimeline = ({
                   onChange={(e) => {
                     if (e.target.checked) {
                       setCalendarDateModalValue(getCurrentDateTime());
+                      setCalendarDateModalExtend(false);
+                      setCalendarEndDateModalValue(getCurrentDateTime());
+                      setCommentBroadcastDeptId(prev => prev ?? defaultBroadcastDeptId);
                       setCalendarDateModal({ kind: 'new' });
                     } else {
                       setShowCommentInCalendar(false);
                       setCommentCalendarDisplayDate(null);
+                      setCommentCalendarEndDate(null);
+                      setCommentBroadcastDeptId(null);
                     }
                   }}
                   className="rounded"
@@ -1800,11 +1981,18 @@ const UnifiedTimeline = ({
                 </label>
               </div>
               {showCommentInCalendar && commentCalendarDisplayDate && (
-                <p className="text-xs text-content-secondary mt-1 flex items-center gap-2">
+                <p className="text-xs text-content-secondary mt-1 flex items-center gap-2 flex-wrap">
                   📅 سيظهر في التقويم بتاريخ: {formatDateTimeDisplay(commentCalendarDisplayDate)}
+                  {commentCalendarEndDate && <> ← {formatDateTimeDisplay(commentCalendarEndDate)}</>}
+                  {hasBroadcastChoice && <>· {broadcastNoteFor(commentBroadcastDeptId)}</>}
                   <button
                     type="button"
-                    onClick={() => { setCalendarDateModalValue(commentCalendarDisplayDate); setCalendarDateModal({ kind: 'new' }); }}
+                    onClick={() => {
+                      setCalendarDateModalValue(commentCalendarDisplayDate);
+                      setCalendarDateModalExtend(!!commentCalendarEndDate);
+                      setCalendarEndDateModalValue(commentCalendarEndDate || getCurrentDateTime());
+                      setCalendarDateModal({ kind: 'new' });
+                    }}
                     className="text-primary hover:underline"
                   >
                     تعديل
@@ -1891,6 +2079,40 @@ const UnifiedTimeline = ({
           onSaved={() => { setSharingComment(null); onCommentsUpdate(); }}
         />
       )}
+      {subtaskBroadcastModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={e => e.target === e.currentTarget && setSubtaskBroadcastModal(null)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-sm flex flex-col gap-4 p-5" dir="rtl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-primary flex items-center gap-2">
+                <Globe size={18} /> مستوى بث المهمة الفرعية في التقويم
+              </h3>
+              <button onClick={() => setSubtaskBroadcastModal(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                <X size={18} />
+              </button>
+            </div>
+            {renderBroadcastPicker(subtaskBroadcastDeptId, setSubtaskBroadcastDeptId)}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  await handleToggleCalendar(
+                    subtaskBroadcastModal.subtask,
+                    true,
+                    subtaskBroadcastDeptId ?? defaultBroadcastDeptId
+                  );
+                  setSubtaskBroadcastModal(null);
+                }}
+                className="flex-1 bg-primary text-white py-2 rounded-md hover:bg-primary-dark"
+              >
+                حفظ
+              </button>
+              <button type="button" onClick={() => setSubtaskBroadcastModal(null)} className="flex-1 border border-content/20 py-2 rounded-md text-gray-600 dark:text-gray-300 hover:bg-content/5">
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {calendarDateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={e => e.target === e.currentTarget && setCalendarDateModal(null)}>
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-sm flex flex-col gap-4 p-5" dir="rtl">
@@ -1911,8 +2133,43 @@ const UnifiedTimeline = ({
               />
               {renderTimeSelects(calendarDateModalValue, setCalendarDateModalValue)}
             </div>
+
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={calendarDateModalExtend}
+                onChange={(e) => {
+                  setCalendarDateModalExtend(e.target.checked);
+                  if (e.target.checked && calendarEndDateModalValue <= calendarDateModalValue) {
+                    setCalendarEndDateModalValue(calendarDateModalValue);
+                  }
+                }}
+                className="rounded"
+              />
+              <span>حدث ممتد (له تاريخ نهاية) — بلا إسناده لأي شخص</span>
+            </label>
+            {calendarDateModalExtend && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="date"
+                  value={calendarEndDateModalValue.split('T')[0]}
+                  min={calendarDateModalValue.split('T')[0]}
+                  onChange={(e) => setCalendarEndDateModalValue(e.target.value + 'T' + (calendarEndDateModalValue.split('T')[1] || '00:00'))}
+                  className="flex-1 min-w-[140px] p-2 border rounded-md bg-bkg border-content/20 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                />
+                {renderTimeSelects(calendarEndDateModalValue, setCalendarEndDateModalValue)}
+              </div>
+            )}
+
+            {hasBroadcastChoice && renderBroadcastPicker(commentBroadcastDeptId, setCommentBroadcastDeptId)}
+
             <div className="flex gap-2">
-              <button type="button" onClick={handleConfirmCalendarDate} className="flex-1 bg-primary text-white py-2 rounded-md hover:bg-primary-dark">
+              <button
+                type="button"
+                onClick={handleConfirmCalendarDate}
+                disabled={calendarDateModalExtend && calendarEndDateModalValue < calendarDateModalValue}
+                className="flex-1 bg-primary text-white py-2 rounded-md hover:bg-primary-dark disabled:opacity-50"
+              >
                 حفظ
               </button>
               <button type="button" onClick={() => setCalendarDateModal(null)} className="flex-1 border border-content/20 py-2 rounded-md text-gray-600 dark:text-gray-300 hover:bg-content/5">

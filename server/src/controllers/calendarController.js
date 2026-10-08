@@ -78,15 +78,26 @@ async function fetchEscalatedBroadcastComments(pool, {
     const colProbe = await pool.request().query(`
       SELECT COL_LENGTH('dbo.Comments','CalendarBroadcastDepartmentID') AS CommentLen,
              COL_LENGTH('dbo.Tasks','CalendarBroadcastDepartmentID') AS TaskLen,
-             COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS CalDisplayDateLen
+             COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS CalDisplayDateLen,
+             COL_LENGTH('dbo.Comments','CalendarEndDate') AS CalEndDateLen
     `);
     if (!colProbe.recordset[0]?.CommentLen || !colProbe.recordset[0]?.TaskLen) return [];
     const commentDateExpr = colProbe.recordset[0]?.CalDisplayDateLen
       ? 'COALESCE(c.CalendarDisplayDate, c.CreatedAt)'
       : 'c.CreatedAt';
+    const hasCommentEndDate = !!colProbe.recordset[0]?.CalEndDateLen;
+    const commentEndDateSelect = hasCommentEndDate ? 'c.CalendarEndDate' : 'CAST(NULL AS DATETIME)';
+    // راجع commentDateRangeWhere في getCalendarComments — نفس منطق مراعاة الامتداد عبر CalendarEndDate.
+    const commentDateRangeWhere = hasCommentEndDate
+      ? `CAST(${commentDateExpr} AS DATE) < @EndDate
+            AND (
+              (CAST(c.CalendarEndDate AS DATE) IS NOT NULL AND CAST(c.CalendarEndDate AS DATE) >= @StartDate)
+              OR (CAST(c.CalendarEndDate AS DATE) IS NULL AND CAST(${commentDateExpr} AS DATE) >= @StartDate)
+            )`
+      : `CAST(${commentDateExpr} AS DATE) >= @StartDate AND CAST(${commentDateExpr} AS DATE) < @EndDate`;
 
     const dateFilter = useRange
-      ? `AND CAST(${commentDateExpr} AS DATE) >= @StartDate AND CAST(${commentDateExpr} AS DATE) < @EndDate`
+      ? `AND ${commentDateRangeWhere}`
       : `AND CAST(${commentDateExpr} AS DATE) >= CAST(GETDATE() AS DATE)`;
 
     const request = pool.request().input('IncludeAllComments', sql.Bit, includeAllFlag ? 1 : 0);
@@ -95,6 +106,7 @@ async function fetchEscalatedBroadcastComments(pool, {
     const result = await request.query(`
       SELECT
         c.CommentID, c.TaskID, c.${commentActorCol} as UserID, c.Content, ${commentDateExpr} AS CreatedAt,
+        ${commentEndDateSelect} AS CalendarEndDate,
         t.Title as TaskTitle, t.PersonalOwnerUserID,
         COALESCE(c.CalendarBroadcastDepartmentID, t.CalendarBroadcastDepartmentID) AS EffectiveBroadcastRoot
       FROM Comments c
@@ -150,14 +162,19 @@ async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
     SELECT
       CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
       CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+      CASE WHEN COL_LENGTH('dbo.Departments', 'IsIndependent') IS NOT NULL THEN 1 ELSE 0 END AS HasIsIndependent,
       CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDepartmentType
   `);
   const s = schema.recordset[0] || {};
   const parentCol = s.HasParentDepartmentID ? 'ParentDepartmentID' : (s.HasParentID ? 'ParentID' : null);
   if (!parentCol) return [normalizedBaseDepartmentId];
 
+  const isIndependentExpr = s.HasIsIndependent
+    ? 'd.IsIndependent = 1'
+    : (s.HasDepartmentType ? `(TRY_CAST(d.[Type] AS INT) = 1 OR LTRIM(RTRIM(CAST(d.[Type] AS NVARCHAR(50)))) = N'1')` : '1=0');
+
   let rootDepartmentId = normalizedBaseDepartmentId;
-  if (s.HasDepartmentType) {
+  if (s.HasIsIndependent || s.HasDepartmentType) {
     // نقيّد الصعود بـ 3 مستويات لمنع الوصول إلى جذر مشترك يخترق عزل الجهات المستقلة
     const root = await pool.request()
       .input('DepartmentID', sql.NVarChar, normalizedBaseDepartmentId)
@@ -175,7 +192,7 @@ async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
         SELECT TOP 1 u.DepartmentID
         FROM UpTree u
         INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
-        WHERE TRY_CAST(d.[Type] AS INT) = 1 OR LTRIM(RTRIM(CAST(d.[Type] AS NVARCHAR(50)))) = N'1'
+        WHERE ${isIndependentExpr}
         ORDER BY u.Depth ASC
         OPTION (MAXRECURSION 10)
       `);
@@ -185,11 +202,13 @@ async function resolveDirectorateScopeByDepartment(pool, baseDepartmentId) {
   }
   if (!rootDepartmentId || !/^\d+$/.test(String(rootDepartmentId))) return [normalizedBaseDepartmentId];
 
-  // When Type info exists, stop expanding into sub-departments that are themselves Type=1
-  // (they are independent groups and must not bleed into each other's scope)
-  const typeStopClause = s.HasDepartmentType
-    ? `AND (TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)`
-    : '';
+  // عند توفر معلومة الاستقلالية، نوقف التوسّع داخل أقسام فرعية مستقلة بذاتها (مجموعات مستقلة
+  // أخرى يجب ألا يتسرّب نطاقها لبعضها)
+  const typeStopClause = s.HasIsIndependent
+    ? `AND (d.IsIndependent IS NULL OR d.IsIndependent = 0)`
+    : (s.HasDepartmentType
+      ? `AND (TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)`
+      : '');
 
   const tree = await pool.request()
       .input('RootDepartmentID', sql.NVarChar, rootDepartmentId)
@@ -1009,10 +1028,24 @@ exports.getCalendarComments = async (req, res) => {
     // تاريخ ظهور التعليق في التقويم مستقل عن تاريخ إنشائه الفعلي (CreatedAt) — راجع
     // Comments.CalendarDisplayDate. نستخدمه هنا للفلترة/الترتيب، مع COALESCE احتياطي لـ CreatedAt
     // دفاعياً (تعليق لم يُهاجَر بعد أو العمود غير متوفر على قاعدة بيانات قديمة لم تُحدَّث).
-    const commentCalDateProbe = await pool.request().query(`SELECT COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS Len`);
+    const commentCalDateProbe = await pool.request().query(`
+      SELECT COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS Len,
+             COL_LENGTH('dbo.Comments','CalendarEndDate') AS EndLen
+    `);
     const commentDateExpr = commentCalDateProbe.recordset[0]?.Len
       ? 'COALESCE(c.CalendarDisplayDate, c.CreatedAt)'
       : 'c.CreatedAt';
+    const hasCommentEndDate = !!commentCalDateProbe.recordset[0]?.EndLen;
+    const commentEndDateSelect = hasCommentEndDate ? 'c.CalendarEndDate' : 'CAST(NULL AS DATETIME)';
+    // تعليق "ممتد" (له CalendarEndDate) يجب أن يظهر في النطاق المطلوب حتى لو بدأ قبله وانتهى
+    // خلاله أو بعده — نفس منطق dateRangeWhere الخاص بالمهام الفرعية (s.DueDate/s.EndDate) أعلاه.
+    const commentDateRangeWhere = hasCommentEndDate
+      ? `CAST(${commentDateExpr} AS DATE) < @EndDate
+            AND (
+              (CAST(c.CalendarEndDate AS DATE) IS NOT NULL AND CAST(c.CalendarEndDate AS DATE) >= @StartDate)
+              OR (CAST(c.CalendarEndDate AS DATE) IS NULL AND CAST(${commentDateExpr} AS DATE) >= @StartDate)
+            )`
+      : `CAST(${commentDateExpr} AS DATE) >= @StartDate AND CAST(${commentDateExpr} AS DATE) < @EndDate`;
 
     let items = [];
 
@@ -1045,7 +1078,7 @@ exports.getCalendarComments = async (req, res) => {
       }
 
       const dateFilter = useRange
-        ? `AND CAST(${commentDateExpr} AS DATE) >= @StartDate AND CAST(${commentDateExpr} AS DATE) < @EndDate`
+        ? `AND ${commentDateRangeWhere}`
         : `AND CAST(${commentDateExpr} AS DATE) >= CAST(GETDATE() AS DATE)`;
 
       const result = await request.query(`
@@ -1055,6 +1088,7 @@ exports.getCalendarComments = async (req, res) => {
           c.${commentActorCol} as UserID,
           c.Content,
           ${commentDateExpr} AS CreatedAt,
+          ${commentEndDateSelect} AS CalendarEndDate,
           t.Title as TaskTitle,
           t.PersonalOwnerUserID
         FROM Comments c
@@ -1082,7 +1116,7 @@ exports.getCalendarComments = async (req, res) => {
       }
 
       const dateFilter = useRange
-        ? `AND CAST(${commentDateExpr} AS DATE) >= @StartDate AND CAST(${commentDateExpr} AS DATE) < @EndDate`
+        ? `AND ${commentDateRangeWhere}`
         : `AND CAST(${commentDateExpr} AS DATE) >= CAST(GETDATE() AS DATE)`;
 
       const actorClause = actorId ? `c.${commentActorCol} = @ActorID` : '1=0';
@@ -1093,6 +1127,7 @@ exports.getCalendarComments = async (req, res) => {
           c.${commentActorCol} as UserID,
           c.Content,
           ${commentDateExpr} AS CreatedAt,
+          ${commentEndDateSelect} AS CalendarEndDate,
           t.Title as TaskTitle,
           t.PersonalOwnerUserID
         FROM Comments c

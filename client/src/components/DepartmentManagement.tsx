@@ -12,6 +12,7 @@ type Department = {
   IsActive?: boolean | number;
   Active?: boolean | number;
   Type?: number | string | null;
+  IsIndependent?: boolean | number | null;
 };
 
 type TreeNode = Department & { children: TreeNode[] };
@@ -57,7 +58,7 @@ type TransferMode = {
   usage: UsageInfo;
 };
 
-// يصعد في تسلسل الأقسام من startId حتى يجد قسماً مستقلاً (Type=1)
+// يصعد في تسلسل الأقسام من startId حتى يجد قسماً مستقلاً (IsIndependent)
 // إن لم يجد يعود إلى startId نفسه
 function findIndependentRoot(startId: number, allDepts: Department[]): number {
   const map = new Map(allDepts.map(d => [d.DepartmentID, d]));
@@ -65,7 +66,7 @@ function findIndependentRoot(startId: number, allDepts: Department[]): number {
   const visited = new Set<number>();
   while (cur && !visited.has(cur.DepartmentID)) {
     visited.add(cur.DepartmentID);
-    if (String(cur.Type ?? '').trim() === '1') return cur.DepartmentID;
+    if (!!cur.IsIndependent) return cur.DepartmentID;
     const pid = cur.ParentID ?? cur.ParentDepartmentID ?? null;
     if (!pid) break;
     cur = map.get(pid);
@@ -381,6 +382,39 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
   const [importLoading, setImportLoading] = useState(false);
   const [importResult, setImportResult] = useState<{ deptCount: number; vacCount: number } | null>(null);
   const importFileRef = React.useRef<HTMLInputElement>(null);
+  // خطوة الاستيراد: اختيار الملف ← مطابقة الأعمدة (المستخدم يحدد عمود الإكسل المناسب لكل حقل
+  // مطلوب) ← النتيجة. لا نخمّن الأعمدة تلقائياً بعد الآن إلا كاقتراح أولي قابل للتغيير.
+  const [importStep, setImportStep] = useState<'pick' | 'map' | 'result'>('pick');
+  const [importHeaders, setImportHeaders] = useState<string[]>([]);
+  const [importRows, setImportRows] = useState<Record<string, string>[]>([]);
+  type ImportFieldKey = 'posId' | 'parentId' | 'deptName' | 'type' | 'posName' | 'rank';
+  const [importMapping, setImportMapping] = useState<Record<ImportFieldKey, string>>({
+    posId: '', parentId: '', deptName: '', type: '', posName: '', rank: '',
+  });
+  const IMPORT_FIELDS: { key: ImportFieldKey; label: string; required: boolean }[] = [
+    { key: 'posId',    label: 'معرف المنصب',     required: true },
+    { key: 'parentId', label: 'معرف المنصب الأب', required: false },
+    { key: 'deptName', label: 'اسم القسم',        required: true },
+    { key: 'type',     label: 'نوع القسم',        required: false },
+    { key: 'posName',  label: 'اسم المنصب',       required: false },
+    { key: 'rank',     label: 'رتبة المنصب',      required: false },
+  ];
+  // تخمين أولي لمطابقة كل حقل مطلوب بعمود من رؤوس الملف الفعلية، بحثاً عن أقرب تسمية معروفة —
+  // مجرد اقتراح يمكن للمستخدم تغييره بالكامل من القوائم المنسدلة.
+  const guessImportMapping = (headers: string[]): Record<ImportFieldKey, string> => {
+    const findHeader = (...candidates: string[]): string => {
+      const found = headers.find(h => candidates.some(c => h.trim().toLowerCase() === c.trim().toLowerCase()));
+      return found || '';
+    };
+    return {
+      posId: findHeader('PositionID', 'Position_ID', 'ID', 'معرف المنصب'),
+      parentId: findHeader('Parent_PositionID', 'ParentID', 'Parent_ID', 'معرف المنصب الأب'),
+      deptName: findHeader('Department_Ar', 'DepartmentAr', 'الاسم', 'Name', 'اسم القسم'),
+      type: findHeader('Type', 'النوع', 'نوع القسم'),
+      posName: findHeader('Position_Ar', 'PositionAr', 'المسمى', 'اسم المنصب'),
+      rank: findHeader('Postion_Rnk', 'Position_Rnk', 'Rank', 'الرتبة', 'رتبة المنصب'),
+    };
+  };
 
   // حساب نطاق مدير القسم (Role=2):
   // يصعد من قسم المستخدم حتى يجد القسم المستقل (Type=1) ثم يأخذ كامل شجرته
@@ -498,7 +532,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
         ParentDepartmentID: newDepartmentParentId ?? null,
         IsActive: newDepartmentActive,
         Active: newDepartmentActive,
-        Type: newDepartmentIndependent ? 1 : null,
+        IsIndependent: newDepartmentIndependent,
       }),
     });
     setNewDepartmentName('');
@@ -522,7 +556,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
         ParentDepartmentID: parentId ?? null,
         IsActive: isActive,
         Active: isActive,
-        Type: normalizeIndependent(editingDepartment) ? 1 : null,
+        IsIndependent: normalizeIndependent(editingDepartment),
       }),
     });
     setEditingDepartment(null);
@@ -559,11 +593,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
     }
   };
 
-  const normalizeIndependent = (dep: Department): boolean => {
-    const v = dep.Type;
-    if (v === null || v === undefined) return false;
-    return String(v).trim() === '1';
-  };
+  const normalizeIndependent = (dep: Department): boolean => !!dep.IsIndependent;
 
   const normalizeParentId = (dep: Department): number | null => {
     const pid = dep.ParentID ?? dep.ParentDepartmentID;
@@ -888,14 +918,12 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
     }
   };
 
+  // الخطوة ١: قراءة الملف محلياً فقط لاستخراج رؤوس الأعمدة الفعلية — لا يُرسَل شيء للخادم بعد.
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || selectedDepartmentId == null) return;
     e.target.value = '';
-    setImportLoading(true);
-    setImportResult(null);
     try {
-      // قراءة وتحليل ملف الإكسل في المتصفح مباشرة
       const arrayBuffer = await file.arrayBuffer();
       const wb = XLSX.read(arrayBuffer, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
@@ -906,11 +934,32 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
         return;
       }
 
-      // إرسال البيانات كـ JSON (صغير الحجم مقارنةً بالملف)
+      const headers = Object.keys(rows[0]);
+      setImportHeaders(headers);
+      setImportRows(rows);
+      setImportMapping(guessImportMapping(headers));
+      setImportStep('map');
+    } catch (err) {
+      console.error(err);
+      alert('حدث خطأ أثناء قراءة الملف. تأكد من أنه ملف إكسل صالح.');
+    }
+  };
+
+  // الخطوة ٢: بعد اختيار المستخدم العمود المناسب لكل حقل مطلوب، نُرسل الصفوف الخام + خريطة
+  // المطابقة إلى الخادم، الذي يقرأ القيم من الأعمدة المحددة مباشرةً (بلا أي تخمين من جهته).
+  const handleConfirmImportMapping = async () => {
+    if (selectedDepartmentId == null) return;
+    if (!importMapping.posId || !importMapping.deptName) {
+      alert('يجب تحديد عمودي "معرف المنصب" و"اسم القسم" على الأقل.');
+      return;
+    }
+    setImportLoading(true);
+    setImportResult(null);
+    try {
       const res = await fetch(`/api/departments/${selectedDepartmentId}/import-excel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows }),
+        body: JSON.stringify({ rows: importRows, columnMap: importMapping }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -918,14 +967,23 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
         return;
       }
       setImportResult({ deptCount: data.deptCount, vacCount: data.vacCount });
+      setImportStep('result');
       fetchDepartments();
       fetchVacancies(selectedDepartmentId);
     } catch (err) {
       console.error(err);
-      alert('حدث خطأ أثناء قراءة الملف أو إرساله.');
+      alert('حدث خطأ أثناء إرسال البيانات.');
     } finally {
       setImportLoading(false);
     }
+  };
+
+  const resetImportFlow = () => {
+    setImportStep('pick');
+    setImportHeaders([]);
+    setImportRows([]);
+    setImportMapping({ posId: '', parentId: '', deptName: '', type: '', posName: '', rank: '' });
+    setImportResult(null);
   };
 
   const renderNode = (node: TreeNode, depth: number = 0) => {
@@ -1135,7 +1193,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
                       onChange={(e) => {
                         const val = e.target.checked;
                         if (editingDepartment) {
-                          setEditingDepartment({ ...editingDepartment, Type: val ? 1 : null });
+                          setEditingDepartment({ ...editingDepartment, IsIndependent: val });
                         } else {
                           setNewDepartmentIndependent(val);
                         }
@@ -1267,7 +1325,7 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
             </h2>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => { setShowImportPanel(p => !p); setImportResult(null); }}
+                onClick={() => { setShowImportPanel(p => !p); resetImportFlow(); }}
                 className="text-sm text-emerald-600 hover:text-emerald-800 dark:text-emerald-400 dark:hover:text-emerald-300 border border-emerald-300 dark:border-emerald-700 rounded px-3 py-1 flex items-center gap-1"
                 title="استيراد أقسام من ملف إكسل"
               >
@@ -1288,44 +1346,132 @@ const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) =>
               <h3 className="font-semibold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
                 <FileSpreadsheet size={18}/> استيراد أقسام من ملف إكسل
               </h3>
-              <p className="text-xs text-gray-600 dark:text-gray-400">
-                الأعمدة المتوقعة في الملف: <strong>PositionID · Parent_PositionID · Department_Ar · Type · Position_Ar · Postion_Rnk</strong>
-              </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                الأقسام التي أبوها غير موجود في الملف ستُلحق مباشرةً بـ «{selectedDepartment.Name}».
-              </p>
 
-              <input
-                ref={importFileRef}
-                type="file"
-                accept=".xlsx,.xls"
-                className="hidden"
-                onChange={handleImportExcel}
-              />
+              {importStep === 'pick' && (
+                <>
+                  <p className="text-xs text-gray-600 dark:text-gray-400">
+                    اختر ملف إكسل، ثم ستُعرض عليك أعمدته لتحديد العمود المناسب لكل حقل مطلوب
+                    (رؤوس الأعمدة في ملفك قد تكون بأي اسم — لست مُلزَماً بأسماء محدَّدة).
+                  </p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    الأقسام التي أبوها غير موجود في الملف ستُلحق مباشرةً بـ «{selectedDepartment.Name}».
+                  </p>
 
-              {importLoading ? (
-                <p className="text-sm text-emerald-700 dark:text-emerald-400 flex items-center gap-2">
-                  <span className="animate-spin">⏳</span> جارٍ المعالجة...
-                </p>
-              ) : importResult ? (
+                  {/* مثال لشكل ملف الإكسل المتوقع */}
+                  <div className="bg-white dark:bg-gray-800 border border-emerald-200 dark:border-emerald-700 rounded p-2 overflow-x-auto">
+                    <p className="text-[11px] text-gray-500 dark:text-gray-400 mb-1.5">مثال لشكل ملف الإكسل (أسماء الأعمدة هنا للتوضيح فقط — يمكن أن تكون رؤوس أعمدة ملفك بأي اسم آخر):</p>
+                    <table className="text-xs border-collapse w-full">
+                      <thead>
+                        <tr className="bg-emerald-100 dark:bg-emerald-900/40">
+                          {['معرف المنصب', 'معرف المنصب الأب', 'اسم القسم', 'نوع القسم', 'اسم المنصب', 'رتبة المنصب'].map(h => (
+                            <th key={h} className="border border-emerald-200 dark:border-emerald-700 px-2 py-1 font-semibold whitespace-nowrap">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">1</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1"></td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">الإدارة العامة</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">مديرية</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1"></td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1"></td>
+                        </tr>
+                        <tr>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">2</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">1</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">قسم الأرشفة</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">قسم</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">رئيس قسم الأرشفة</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">عقيد</td>
+                        </tr>
+                        <tr>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">3</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">2</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">شعبة الفهرسة</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">قسم</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">مسؤول الفهرسة</td>
+                          <td className="border border-emerald-100 dark:border-emerald-800 px-2 py-1">مقدم</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <input
+                    ref={importFileRef}
+                    type="file"
+                    accept=".xlsx,.xls"
+                    className="hidden"
+                    onChange={handleImportExcel}
+                  />
+                  <button
+                    onClick={() => importFileRef.current?.click()}
+                    className="bg-emerald-600 text-white px-4 py-2 rounded hover:bg-emerald-700 flex items-center gap-2 text-sm"
+                  >
+                    <Upload size={15}/> اختر ملف إكسل
+                  </button>
+                </>
+              )}
+
+              {importStep === 'map' && (
+                <>
+                  <p className="text-xs text-gray-600 dark:text-gray-400">
+                    حدِّد عمود الملف المناسب لكل حقل. الحقلان المميّزان (*) مطلوبان؛ اترك الباقي
+                    "-- لا يوجد --" إن لم يكن متوفراً في ملفك.
+                  </p>
+                  <div className="bg-white dark:bg-gray-800 border border-emerald-200 dark:border-emerald-700 rounded p-3 space-y-2">
+                    {IMPORT_FIELDS.map(field => (
+                      <div key={field.key} className="flex items-center gap-2">
+                        <label className="text-sm w-36 shrink-0 text-gray-700 dark:text-gray-300">
+                          {field.label}{field.required && <span className="text-red-500"> *</span>}
+                        </label>
+                        <select
+                          value={importMapping[field.key]}
+                          onChange={(e) => setImportMapping(prev => ({ ...prev, [field.key]: e.target.value }))}
+                          className="flex-1 p-1.5 border rounded text-sm bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100"
+                        >
+                          <option value="">-- لا يوجد --</option>
+                          {importHeaders.map(h => (
+                            <option key={h} value={h}>{h}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                    عدد الصفوف في الملف: <strong>{importRows.length}</strong>
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleConfirmImportMapping}
+                      disabled={importLoading || !importMapping.posId || !importMapping.deptName}
+                      className="bg-emerald-600 text-white px-4 py-2 rounded hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-2 text-sm"
+                    >
+                      {importLoading ? <><span className="animate-spin">⏳</span> جارٍ الاستيراد...</> : 'تأكيد الاستيراد'}
+                    </button>
+                    <button
+                      onClick={resetImportFlow}
+                      disabled={importLoading}
+                      className="text-sm text-gray-600 dark:text-gray-300 hover:underline px-2"
+                    >
+                      رجوع
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {importStep === 'result' && importResult && (
                 <div className="bg-white dark:bg-gray-800 border border-emerald-300 dark:border-emerald-700 rounded p-3 text-sm text-emerald-800 dark:text-emerald-300 space-y-1">
                   <p className="font-semibold">✅ تم الاستيراد بنجاح</p>
                   <p>الأقسام المضافة: <strong>{importResult.deptCount}</strong></p>
                   <p>المناصب المضافة: <strong>{importResult.vacCount}</strong></p>
                   <button
-                    onClick={() => { setImportResult(null); }}
+                    onClick={resetImportFlow}
                     className="mt-2 text-xs text-emerald-600 dark:text-emerald-400 hover:underline"
                   >
                     استيراد ملف آخر
                   </button>
                 </div>
-              ) : (
-                <button
-                  onClick={() => importFileRef.current?.click()}
-                  className="bg-emerald-600 text-white px-4 py-2 rounded hover:bg-emerald-700 flex items-center gap-2 text-sm"
-                >
-                  <Upload size={15}/> اختر ملف إكسل
-                </button>
               )}
             </div>
           )}

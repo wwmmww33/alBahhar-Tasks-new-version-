@@ -15,14 +15,16 @@ type PersonalItem = {
   Title?: string;
   DueDate?: string;
 };
-type CommentItem = { CommentID: number; Content: string; TaskTitle: string; CreatedAt: string };
+type CommentItem = { CommentID: number; Content: string; TaskTitle: string; CreatedAt: string; CalendarEndDate?: string | null };
 
 export type CalendarPdfParams = {
   monthLabel: string;
   dateRange: { key: string; date: Date }[];
   displayItems: DisplayItem[];
   personalByDay: Record<string, PersonalItem[]>;
-  commentsByDay: Record<string, CommentItem[]>;
+  // قائمة التعليقات المسطّحة (غير مُقسَّمة على الأيام) — يبني هذا الملف تقسيمها وامتدادها
+  // (CalendarEndDate) داخلياً بنفس أسلوب displayItems/EndDate الخاص بالمهام الفرعية.
+  comments: CommentItem[];
   viewMode?: 'month' | 'week' | 'day' | 'year';
   viewLayout?: 'grid' | 'list';
   filteredListRange?: { key: string; date: Date; label: string }[];
@@ -52,13 +54,17 @@ function fmtTime(dateStr?: string | null): string {
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')} `;
 }
 
-// يدمج المهام الفرعية (بداية امتداد + مفردة) والمهام الشخصية والتعليقات في قائمة واحدة مرتبة
-// زمنياً من الأقدم للأحدث، بدل عرضها في أقسام منفصلة غير مرتبة بالنسبة لبعضها.
+type SpanEntry = { item: DisplayItem; isStart: boolean };
+type CommentSpanEntry = { item: CommentItem; isStart: boolean };
+
+// يدمج المهام الفرعية (بداية امتداد + مفردة) والمهام الشخصية والتعليقات (بداية امتداد + مفردة)
+// في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث، بدل عرضها في أقسام منفصلة غير مرتبة ببعضها.
 function buildMergedDayHTML(
   startSpans: SpanEntry[],
   singles: DisplayItem[],
   personal: PersonalItem[],
-  comments: CommentItem[],
+  commentStartSpans: CommentSpanEntry[],
+  commentSingles: CommentItem[],
   startClass: string,
   otherClass: string,
 ): string {
@@ -88,7 +94,14 @@ function buildMergedDayHTML(
       html: `<div class="${otherClass}" style="color:#059669;">${fmtTime(ev.DueDate)}${id}★ ${esc(String(lbl))}</div>`,
     });
   }
-  for (const cm of comments) {
+  for (const { item } of commentStartSpans) {
+    const c = spanColor(item.CommentID);
+    entries.push({
+      time: new Date(item.CreatedAt).getTime(),
+      html: `<div class="${startClass}" style="color:${c};">${fmtTime(item.CreatedAt)}${item.CommentID}◀ ${esc(item.Content)} (ضمن: ${esc(item.TaskTitle)})</div>`,
+    });
+  }
+  for (const cm of commentSingles) {
     entries.push({
       time: new Date(cm.CreatedAt).getTime(),
       html: `<div class="${otherClass}" style="color:#7c3aed;">${fmtTime(cm.CreatedAt)}${cm.CommentID}💬 ${esc(cm.Content)} (ضمن: ${esc(cm.TaskTitle)})</div>`,
@@ -109,7 +122,6 @@ function buildSingleByDay(displayItems: DisplayItem[]) {
   return map;
 }
 
-type SpanEntry = { item: DisplayItem; isStart: boolean };
 function buildSpanByDay(displayItems: DisplayItem[], dateRange: { key: string; date: Date }[]) {
   const map: Record<string, SpanEntry[]> = {};
   if (!dateRange.length) return map;
@@ -129,15 +141,59 @@ function buildSpanByDay(displayItems: DisplayItem[], dateRange: { key: string; d
   return map;
 }
 
-type VBar = { item: DisplayItem; startKey: string; endKey: string; lane: number };
-function buildVerticalBars(displayItems: DisplayItem[], days: { key: string }[]): VBar[] {
+// نفس buildSingleByDay/buildSpanByDay أعلاه لكن للتعليقات — تعليق له CalendarEndDate (ينتهي في
+// يوم مختلف عن CreatedAt) يُعامَل كامتداد تماماً كالمهمة الفرعية ذات EndDate.
+function buildCommentSingleByDay(comments: CommentItem[]) {
+  const map: Record<string, CommentItem[]> = {};
+  for (const c of comments) {
+    const start = norm(new Date(c.CreatedAt));
+    const end = c.CalendarEndDate ? norm(new Date(c.CalendarEndDate)) : null;
+    if (end && end.getTime() !== start.getTime()) continue; // ممتد فعلياً — يُعالَج في buildCommentSpanByDay
+    const key = toYMD(start);
+    (map[key] = map[key] || []).push(c);
+  }
+  return map;
+}
+
+function buildCommentSpanByDay(comments: CommentItem[], dateRange: { key: string; date: Date }[]) {
+  const map: Record<string, CommentSpanEntry[]> = {};
+  if (!dateRange.length) return map;
+  const rangeStart = norm(dateRange[0].date);
+  const rangeEnd   = norm(dateRange[dateRange.length - 1].date);
+  for (const c of comments) {
+    if (!c.CalendarEndDate) continue;
+    const dueD = norm(new Date(c.CreatedAt));
+    const endD = norm(new Date(c.CalendarEndDate));
+    if (endD.getTime() === dueD.getTime()) continue;
+    const cur  = new Date(Math.max(dueD.getTime(), rangeStart.getTime()));
+    const stop = new Date(Math.min(endD.getTime(), rangeEnd.getTime()));
+    while (cur <= stop) {
+      const key = toYMD(cur);
+      (map[key] = map[key] || []).push({ item: c, isStart: cur.getTime() === dueD.getTime() });
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+  return map;
+}
+
+// شريط رأسي موحَّد (مهام فرعية + تعليقات معاً في مسار ممرّات واحد مشترك) لعرض القائمة.
+type VBar = { kind: 'subtask' | 'comment'; id: number; title: string; startKey: string; endKey: string; lane: number };
+function buildVerticalBars(displayItems: DisplayItem[], comments: CommentItem[], days: { key: string }[]): VBar[] {
   if (!days.length) return [];
   const rangeStartKey = days[0].key;
   const rangeEndKey   = days[days.length - 1].key;
   const bars: VBar[] = [];
-  for (const item of displayItems.filter(it => !!it.EndDate)) {
-    const dueD   = norm(new Date(item.DueDate));
-    const endD   = norm(new Date(item.EndDate!));
+
+  type Cand = { kind: 'subtask' | 'comment'; id: number; title: string; due: string; end: string };
+  const candidates: Cand[] = [
+    ...displayItems.filter(it => !!it.EndDate).map(it => ({ kind: 'subtask' as const, id: it.SubtaskID, title: it.SubtaskTitle, due: it.DueDate, end: it.EndDate! })),
+    ...comments.filter(c => !!c.CalendarEndDate).map(c => ({ kind: 'comment' as const, id: c.CommentID, title: c.Content, due: c.CreatedAt, end: c.CalendarEndDate! })),
+  ];
+
+  for (const cand of candidates) {
+    const dueD = norm(new Date(cand.due));
+    const endD = norm(new Date(cand.end));
+    if (endD.getTime() === dueD.getTime()) continue;
     const dueKey = toYMD(dueD);
     const endKey = toYMD(endD);
     if (dueKey > rangeEndKey || endKey < rangeStartKey) continue;
@@ -145,7 +201,7 @@ function buildVerticalBars(displayItems: DisplayItem[], days: { key: string }[])
     const endKeyC  = endKey > rangeEndKey   ? rangeEndKey   : endKey;
     let lane = 0;
     while (bars.some(b => b.lane === lane && !(b.endKey < startKey || b.startKey > endKeyC))) lane++;
-    bars.push({ item, startKey, endKey: endKeyC, lane });
+    bars.push({ kind: cand.kind, id: cand.id, title: cand.title, startKey, endKey: endKeyC, lane });
   }
   return bars;
 }
@@ -157,6 +213,13 @@ function buildPriorSpans(displayItems: DisplayItem[], rangeStart: Date) {
   });
 }
 
+function buildCommentPriorSpans(comments: CommentItem[], rangeStart: Date) {
+  return comments.filter(c => {
+    if (!c.CalendarEndDate) return false;
+    return norm(new Date(c.CreatedAt)) < rangeStart && norm(new Date(c.CalendarEndDate)) >= rangeStart;
+  });
+}
+
 // ─── grid month renderer ──────────────────────────────────────────────────────
 
 function renderMonthGrid(
@@ -164,7 +227,8 @@ function renderMonthGrid(
   singleByDay: Record<string, DisplayItem[]>,
   spanByDay: Record<string, SpanEntry[]>,
   personalByDay: Record<string, PersonalItem[]>,
-  commentsByDay: Record<string, CommentItem[]>,
+  commentSingleByDay: Record<string, CommentItem[]>,
+  commentSpanByDay: Record<string, CommentSpanEntry[]>,
   today: string,
 ): string {
   if (!days.length) return '';
@@ -190,14 +254,21 @@ function renderMonthGrid(
       const spans      = spanByDay[key] || [];
       const singles    = singleByDay[key] || [];
       const personal   = personalByDay[key] || [];
-      const comments   = commentsByDay[key] || [];
+      const commentSpans   = commentSpanByDay[key] || [];
+      const commentSingles = commentSingleByDay[key] || [];
       const contSpans  = spans.filter(s=>!s.isStart).sort((a,b)=>new Date(a.item.DueDate).getTime()-new Date(b.item.DueDate).getTime());
       const startSpans = spans.filter(s=>s.isStart).sort((a,b)=>new Date(a.item.DueDate).getTime()-new Date(b.item.DueDate).getTime());
       const sorted     = [...singles].sort((a,b)=>new Date(a.DueDate).getTime()-new Date(b.DueDate).getTime());
+      const commentContSpans  = commentSpans.filter(s=>!s.isStart).sort((a,b)=>new Date(a.item.CreatedAt).getTime()-new Date(b.item.CreatedAt).getTime());
+      const commentStartSpans = commentSpans.filter(s=>s.isStart).sort((a,b)=>new Date(a.item.CreatedAt).getTime()-new Date(b.item.CreatedAt).getTime());
 
-      const contHTML   = contSpans.length ? `<div class="span-cont">${contSpans.map(({item})=>`<span style="color:${spanColor(item.SubtaskID)};">${item.SubtaskID}</span>`).join('<span class="sep">|</span>')}</div>` : '';
+      const contBadges = [
+        ...contSpans.map(({item})=>`<span style="color:${spanColor(item.SubtaskID)};">${item.SubtaskID}</span>`),
+        ...commentContSpans.map(({item})=>`<span style="color:${spanColor(item.CommentID)};">${item.CommentID}</span>`),
+      ];
+      const contHTML = contBadges.length ? `<div class="span-cont">${contBadges.join('<span class="sep">|</span>')}</div>` : '';
       // نُدمج بداية الامتدادات والمهام المفردة والشخصية والتعليقات في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث
-      const mergedHTML = buildMergedDayHTML(startSpans, sorted, personal, comments, 'span-start', 'item-row');
+      const mergedHTML = buildMergedDayHTML(startSpans, sorted, personal, commentStartSpans, commentSingles, 'span-start', 'item-row');
 
       let cls = 'day-cell'; if (wk) cls+=' wk'; if (isToday) cls+=' today';
       return `<div class="${cls}">
@@ -216,15 +287,17 @@ function renderMonthGrid(
 function renderListHTML(
   listDays: { key: string; date: Date; label: string }[],
   displayItems: DisplayItem[],
+  comments: CommentItem[],
   singleByDay: Record<string, DisplayItem[]>,
   spanByDay: Record<string, SpanEntry[]>,
   personalByDay: Record<string, PersonalItem[]>,
-  commentsByDay: Record<string, CommentItem[]>,
+  commentSingleByDay: Record<string, CommentItem[]>,
+  commentSpanByDay: Record<string, CommentSpanEntry[]>,
   today: string,
 ): string {
   if (!listDays.length) return '<div class="no-events">لا توجد أحداث للعرض.</div>';
 
-  const vBars  = buildVerticalBars(displayItems, listDays);
+  const vBars  = buildVerticalBars(displayItems, comments, listDays);
   const maxLane = vBars.length > 0 ? Math.max(...vBars.map(b => b.lane)) : -1;
   // width of bars column: 9px per lane + 3px gap between lanes
   const barsColW = maxLane >= 0 ? (maxLane + 1) * 9 + maxLane * 3 + 4 : 0;
@@ -236,11 +309,14 @@ function renderListHTML(
     const spans    = spanByDay[d.key] || [];
     const singles  = singleByDay[d.key] || [];
     const personal = personalByDay[d.key] || [];
-    const comments = commentsByDay[d.key] || [];
+    const commentSpans   = commentSpanByDay[d.key] || [];
+    const commentSingles = commentSingleByDay[d.key] || [];
 
     const contSpans  = spans.filter(s=>!s.isStart).sort((a,b)=>new Date(a.item.DueDate).getTime()-new Date(b.item.DueDate).getTime());
     const startSpans = spans.filter(s=>s.isStart).sort((a,b)=>new Date(a.item.DueDate).getTime()-new Date(b.item.DueDate).getTime());
     const sorted     = [...singles].sort((a,b)=>new Date(a.DueDate).getTime()-new Date(b.DueDate).getTime());
+    const commentContSpans  = commentSpans.filter(s=>!s.isStart).sort((a,b)=>new Date(a.item.CreatedAt).getTime()-new Date(b.item.CreatedAt).getTime());
+    const commentStartSpans = commentSpans.filter(s=>s.isStart).sort((a,b)=>new Date(a.item.CreatedAt).getTime()-new Date(b.item.CreatedAt).getTime());
 
     // month separator
     const monthKey = d.date.toLocaleDateString('ar-EG-u-nu-latn', { month:'long', year:'numeric' });
@@ -258,7 +334,7 @@ function renderListHTML(
       const laneHTML = Array.from({ length: maxLane + 1 }, (_, lane) => {
         const bar = dayBars.find(b => b.lane === lane);
         if (!bar) return `<div style="width:9px;flex-shrink:0;"></div>`;
-        const c       = spanColor(bar.item.SubtaskID);
+        const c       = spanColor(bar.id);
         const isStart = bar.startKey === d.key;
         const isEnd   = bar.endKey   === d.key;
         const radius  = isStart && isEnd ? '4px' : isStart ? '4px 4px 0 0' : isEnd ? '0 0 4px 4px' : '0';
@@ -266,7 +342,7 @@ function renderListHTML(
         const botSp   = isEnd   ? `<div style="height:5px;flex-shrink:0;"></div>` : '';
         return `<div style="width:9px;flex-shrink:0;display:flex;flex-direction:column;">
           ${topSp}
-          <div title="${esc(bar.item.SubtaskTitle)}" style="flex:1;background:${c};border-radius:${radius};min-height:4px;"></div>
+          <div title="${esc(bar.title)}" style="flex:1;background:${c};border-radius:${radius};min-height:4px;"></div>
           ${botSp}
         </div>`;
       }).join('');
@@ -274,8 +350,12 @@ function renderListHTML(
     }
 
     // events content — نُدمج جميع الأنواع في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث
-    const contHTML   = contSpans.length ? `<div class="list-cont">${contSpans.map(({item})=>`<span style="color:${spanColor(item.SubtaskID)};">${item.SubtaskID}</span>`).join('<span class="sep">|</span>')}</div>` : '';
-    const mergedHTML = buildMergedDayHTML(startSpans, sorted, personal, comments, 'list-item', 'list-item');
+    const contBadges = [
+      ...contSpans.map(({item})=>`<span style="color:${spanColor(item.SubtaskID)};">${item.SubtaskID}</span>`),
+      ...commentContSpans.map(({item})=>`<span style="color:${spanColor(item.CommentID)};">${item.CommentID}</span>`),
+    ];
+    const contHTML   = contBadges.length ? `<div class="list-cont">${contBadges.join('<span class="sep">|</span>')}</div>` : '';
+    const mergedHTML = buildMergedDayHTML(startSpans, sorted, personal, commentStartSpans, commentSingles, 'list-item', 'list-item');
     const eventsHTML = contHTML + mergedHTML;
     const hasEvents  = !!eventsHTML;
 
@@ -296,7 +376,7 @@ function renderListHTML(
 
 export function exportCalendarToPdf(p: CalendarPdfParams): void {
   const {
-    monthLabel, dateRange, displayItems, personalByDay, commentsByDay,
+    monthLabel, dateRange, displayItems, personalByDay, comments,
     viewMode = 'month', viewLayout = 'grid',
     filteredListRange, deptName,
   } = p;
@@ -306,22 +386,30 @@ export function exportCalendarToPdf(p: CalendarPdfParams): void {
   const printed     = new Date().toLocaleString('ar-EG-u-nu-latn');
   const singleByDay = buildSingleByDay(displayItems);
   const spanByDay   = buildSpanByDay(displayItems, dateRange);
+  const commentSingleByDay = buildCommentSingleByDay(comments);
+  const commentSpanByDay   = buildCommentSpanByDay(comments, dateRange);
   const rangeStart  = norm(dateRange[0].date);
   const priorSpans  = buildPriorSpans(displayItems, rangeStart);
+  const priorCommentSpans = buildCommentPriorSpans(comments, rangeStart);
 
   const modeLabel   = viewMode === 'year' ? 'سنوي' : viewMode === 'month' ? 'شهري' : viewMode === 'week' ? 'أسبوعي' : 'يومي';
   const layoutLabel = viewLayout === 'grid' ? 'شبكة مربعات' : 'قائمة';
 
-  const priorSectionHTML = priorSpans.length ? `
+  type PriorRow = { id: number; date: string; label: string };
+  const priorRows: PriorRow[] = [
+    ...priorSpans.map(it => ({ id: it.SubtaskID, date: it.DueDate, label: `${esc(it.SubtaskTitle)}${it.AssignedToName ? ` (${esc(it.AssignedToName)})` : ''}` })),
+    ...priorCommentSpans.map(c => ({ id: c.CommentID, date: c.CreatedAt, label: esc(c.Content) })),
+  ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  const priorSectionHTML = priorRows.length ? `
     <div class="prior-section">
-      <div class="prior-title">مهام بدأت قبل هذه الفترة وتمتد خلالها</div>
-      ${priorSpans.map(it => {
-        const c=spanColor(it.SubtaskID);
-        const person=it.AssignedToName?` (${esc(it.AssignedToName)})`:'';
+      <div class="prior-title">أحداث بدأت قبل هذه الفترة وتمتد خلالها</div>
+      ${priorRows.map(row => {
+        const c = spanColor(row.id);
         return `<div class="prior-row">
-          <span class="prior-id" style="color:${c};">#${it.SubtaskID}</span>
-          <span class="prior-date">${fmtDate(it.DueDate)}</span>
-          <span class="prior-name">${esc(it.SubtaskTitle)}${person}</span>
+          <span class="prior-id" style="color:${c};">#${row.id}</span>
+          <span class="prior-date">${fmtDate(row.date)}</span>
+          <span class="prior-name">${row.label}</span>
         </div>`;
       }).join('')}
     </div>` : '';
@@ -334,7 +422,7 @@ export function exportCalendarToPdf(p: CalendarPdfParams): void {
       key: d.key, date: d.date,
       label: d.date.toLocaleDateString('ar-EG-u-nu-latn', { weekday:'long', day:'numeric', month:'long' }),
     })));
-    contentHTML = renderListHTML(listDays, displayItems, singleByDay, spanByDay, personalByDay, commentsByDay, today);
+    contentHTML = renderListHTML(listDays, displayItems, comments, singleByDay, spanByDay, personalByDay, commentSingleByDay, commentSpanByDay, today);
 
   } else if (viewMode === 'year') {
     const year = dateRange[0].date.getFullYear();
@@ -342,15 +430,16 @@ export function exportCalendarToPdf(p: CalendarPdfParams): void {
       const monthDays = dateRange.filter(d => d.date.getMonth() === m);
       if (!monthDays.length) continue;
       const monthSpanByDay = buildSpanByDay(displayItems, monthDays);
+      const monthCommentSpanByDay = buildCommentSpanByDay(comments, monthDays);
       const monthName = new Date(year, m, 1).toLocaleDateString('ar-EG-u-nu-latn', { month: 'long' });
       contentHTML += `<div class="month-section">
         <div class="month-header">${monthName}</div>
-        ${renderMonthGrid(monthDays, singleByDay, monthSpanByDay, personalByDay, commentsByDay, today)}
+        ${renderMonthGrid(monthDays, singleByDay, monthSpanByDay, personalByDay, commentSingleByDay, monthCommentSpanByDay, today)}
       </div>`;
     }
 
   } else {
-    contentHTML = renderMonthGrid(dateRange, singleByDay, spanByDay, personalByDay, commentsByDay, today);
+    contentHTML = renderMonthGrid(dateRange, singleByDay, spanByDay, personalByDay, commentSingleByDay, commentSpanByDay, today);
   }
 
   // ── page ──────────────────────────────────────────────────────────────────────

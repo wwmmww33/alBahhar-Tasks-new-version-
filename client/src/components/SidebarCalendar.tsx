@@ -36,9 +36,11 @@ type CalendarCommentItem = {
   TaskTitle: string;
   Content: string;
   CreatedAt: string;
+  CalendarEndDate?: string | null;
   CommentedByName?: string;
   PersonalOwnerUserID?: string | null;
 };
+type CalendarCommentItemWithSpan = CalendarCommentItem & { _spanPos: SpanPos };
 
 type SidebarCalendarProps = {
   currentUser: CurrentUser;
@@ -48,7 +50,7 @@ const SPAN_COLORS = [
   '#3b82f6', '#22c55e', '#a855f7', '#f97316',
   '#ec4899', '#14b8a6', '#ef4444', '#eab308',
 ];
-const getSpanColor = (subtaskId: number) => SPAN_COLORS[subtaskId % SPAN_COLORS.length];
+const getSpanColor = (id: number) => SPAN_COLORS[id % SPAN_COLORS.length];
 
 const formatEventTime = (dateStr: string): string => {
   if (!dateStr) return '';
@@ -64,10 +66,12 @@ const formatEndDateTooltip = (dateStr: string): string => {
   const d = new Date(dateStr);
   const weekday = d.toLocaleDateString('ar-EG-u-nu-latn', { weekday: 'long' });
   const month = d.toLocaleDateString('ar-EG-u-nu-latn', { month: 'long' });
-  return `نهاية المهمة: ${weekday} ${d.getDate()} ${month} ${d.getFullYear()}م`;
+  return `نهاية: ${weekday} ${d.getDate()} ${month} ${d.getFullYear()}م`;
 };
 
-type HoverInfo = { subtaskId: number; endDate: string; x: number; y: number };
+// مفتاح موحَّد لأي حدث قابل للامتداد (مهمة فرعية أو تعليق) — يمنع تضارب المعرِّفات العددية بين
+// الاثنين عند استخدامهما كمفاتيح لنفس الخريطة (lane/hover).
+type HoverInfo = { key: string; endDate: string; x: number; y: number };
 
 const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   // calendarUserId: always the user's own UserID for department-scope resolution (matches CalendarPage)
@@ -81,14 +85,14 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
   const [loading, setLoading] = useState(true);
   const [viewFilter, setViewFilter] = useState<'both' | 'shared' | 'vacancy' | 'personal'>('both');
   const [hoverInfo, setHoverInfo] = useState<HoverInfo | null>(null);
-  const handleSpanHover = (subtaskId: number, endDate: string | null | undefined) => (e: ReactMouseEvent) => {
+  const handleSpanHover = (key: string, endDate: string | null | undefined) => (e: ReactMouseEvent) => {
     if (!endDate) return;
-    setHoverInfo({ subtaskId, endDate, x: e.clientX, y: e.clientY });
+    setHoverInfo({ key, endDate, x: e.clientX, y: e.clientY });
   };
   const clearSpanHover = () => setHoverInfo(null);
   const navigate = useNavigate();
-  const openTaskInNewTab = (taskId: number) => {
-    window.open(`/task/${taskId}`, '_blank', 'noopener,noreferrer');
+  const openTask = (taskId: number) => {
+    navigate(`/task/${taskId}`);
   };
 
   // بناء نطاق الأيام بدءًا من اليوم وحتى 30 يومًا
@@ -285,18 +289,39 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     return map;
   }, [items]);
 
+  // نفس منطق itemsByDay أعلاه لكن للتعليقات — تعليق له CalendarEndDate يُعامَل كحدث ممتد
+  // (بداية/وسط/نهاية) تماماً كالمهمة الفرعية ذات EndDate.
   const commentsByDay = useMemo(() => {
-    const map: Record<string, CalendarCommentItem[]> = {};
-    for (const comment of commentEvents) {
-      const d = new Date(comment.CreatedAt);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      if (!map[key]) map[key] = [];
-      map[key].push(comment);
+    const map: Record<string, CalendarCommentItemWithSpan[]> = {};
+    for (const c of commentEvents) {
+      const start = new Date(c.CreatedAt);
+      const startNorm = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+      const endRaw = c.CalendarEndDate ? new Date(c.CalendarEndDate) : null;
+      const endNorm = endRaw ? new Date(endRaw.getFullYear(), endRaw.getMonth(), endRaw.getDate()) : null;
+
+      if (!endNorm || endNorm.getTime() === startNorm.getTime()) {
+        const key = toLocalYMD(startNorm);
+        if (!map[key]) map[key] = [];
+        map[key].push({ ...c, _spanPos: 'single' });
+      } else {
+        const cur = new Date(startNorm);
+        let safety = 0;
+        while (cur <= endNorm && safety < 366) {
+          const key = toLocalYMD(cur);
+          if (!map[key]) map[key] = [];
+          const isFirst = cur.getTime() === startNorm.getTime();
+          const isLast  = cur.getTime() === endNorm.getTime();
+          const pos: SpanPos = isFirst && isLast ? 'single' : isFirst ? 'start' : isLast ? 'end' : 'middle';
+          map[key].push({ ...c, _spanPos: pos });
+          cur.setDate(cur.getDate() + 1);
+          safety++;
+        }
+      }
     }
     return map;
   }, [commentEvents]);
 
-  // تعيين lane ثابت لكل حدث ممتد بحيث لا تتداخل الخطوط أفقياً
+  // تعيين lane ثابت لكل حدث ممتد (مهمة فرعية) بحيث لا تتداخل الخطوط أفقياً
   const laneMap = useMemo(() => {
     const spans = items
       .filter(it => !!it.EndDate && !it.PersonalOwnerUserID)
@@ -325,6 +350,46 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     return map;
   }, [items]);
 
+  // نفس تعيين lane أعلاه لكن للتعليقات الممتدة — خريطة مستقلة (مفاتيحها CommentID) توضع في
+  // ممرّات بعد ممرّات المهام الفرعية مباشرة ضمن الشريط نفسه (combinedStripWidth أدناه).
+  const commentLaneMap = useMemo(() => {
+    const spans = commentEvents
+      .filter(c => !!c.CalendarEndDate)
+      .map(c => {
+        const s = new Date(c.CreatedAt);
+        const e = new Date(c.CalendarEndDate!);
+        return {
+          id: c.CommentID,
+          start: toLocalYMD(new Date(s.getFullYear(), s.getMonth(), s.getDate())),
+          end: toLocalYMD(new Date(e.getFullYear(), e.getMonth(), e.getDate())),
+        };
+      })
+      .filter(s => s.start !== s.end)
+      .sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : a.id - b.id);
+
+    const map = new Map<number, number>();
+    const laneEnds: string[] = [];
+
+    for (const span of spans) {
+      let lane = 0;
+      while (lane < laneEnds.length && laneEnds[lane] >= span.start) lane++;
+      map.set(span.id, lane);
+      if (lane < laneEnds.length) laneEnds[lane] = span.end;
+      else laneEnds.push(span.end);
+    }
+
+    return map;
+  }, [commentEvents]);
+
+  const subtaskLaneCount = useMemo(
+    () => (laneMap.size > 0 ? Math.max(...laneMap.values()) + 1 : 0),
+    [laneMap]
+  );
+  const commentLaneCount = useMemo(
+    () => (commentLaneMap.size > 0 ? Math.max(...commentLaneMap.values()) + 1 : 0),
+    [commentLaneMap]
+  );
+
   // أول يوم مرئي لكل حدث ممتد (لعرض عنوانه حتى لو بدأ قبل نطاق التقويم)
   const firstVisibleDayMap = useMemo(() => {
     const map = new Map<number, string>();
@@ -338,11 +403,24 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
     return map;
   }, [itemsByDay, dateRange]);
 
+  // نفس المنطق أعلاه للتعليقات الممتدة
+  const firstVisibleCommentDayMap = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const d of dateRange) {
+      for (const c of (commentsByDay[d.key] || [])) {
+        if (c._spanPos !== 'single' && !map.has(c.CommentID)) {
+          map.set(c.CommentID, d.key);
+        }
+      }
+    }
+    return map;
+  }, [commentsByDay, dateRange]);
+
+  // عرض شريط الامتداد الكامل (مهام فرعية + تعليقات معاً في شريط واحد مشترك)
   const stripWidth = useMemo(() => {
-    if (laneMap.size === 0) return 0;
-    const maxLane = Math.max(...laneMap.values());
-    return (maxLane + 1) * 7 + 1;
-  }, [laneMap]);
+    const totalLanes = subtaskLaneCount + commentLaneCount;
+    return totalLanes > 0 ? totalLanes * 7 + 1 : 0;
+  }, [subtaskLaneCount, commentLaneCount]);
 
   return (
     <aside className="w-72 shrink-0 border-r border-content/10 bg-content/5 p-3">
@@ -423,17 +501,26 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                   return it._spanPos === 'single' || (isFirstVisible && it._spanPos === 'start');
                 }) ||
                 visiblePersonal.length > 0 ||
-                visibleComments.length > 0;
+                visibleComments.some(c => {
+                  const isFirstVisible = firstVisibleCommentDayMap.get(c.CommentID) === d.key;
+                  return c._spanPos === 'single' || (isFirstVisible && c._spanPos === 'start');
+                });
               const isWeekend = d.date.getDay() === 5 || d.date.getDay() === 6;
 
               // الأحداث الممتدة لهذا اليوم (بدون تكرار، مرتبة بثبات)
               const spanningItems = visibleShared.filter(it => it._spanPos !== 'single');
               const uniqueSpanItems = [...new Map(spanningItems.map(it => [it.SubtaskID, it])).values()];
+              const spanningComments = visibleComments.filter(c => c._spanPos !== 'single');
+              const uniqueSpanComments = [...new Map(spanningComments.map(c => [c.CommentID, c])).values()];
 
               // أحداث بدأت قبل هذا اليوم لكنه أول يوم مرئي لها في النطاق
               const carryOverItems = visibleShared.filter(it => {
                 const isFirstVisible = firstVisibleDayMap.get(it.SubtaskID) === d.key;
                 return isFirstVisible && it._spanPos !== 'start' && it._spanPos !== 'single';
+              });
+              const carryOverComments = visibleComments.filter(c => {
+                const isFirstVisible = firstVisibleCommentDayMap.get(c.CommentID) === d.key;
+                return isFirstVisible && c._spanPos !== 'start' && c._spanPos !== 'single';
               });
 
               return (
@@ -446,7 +533,8 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                     });
                     const pastDue = isPastDueToday(item.DueDate);
                     const completed = !!item.IsCompleted;
-                    const isHovered = hoverInfo?.subtaskId === item.SubtaskID;
+                    const hoverKey = `s-${item.SubtaskID}`;
+                    const isHovered = hoverInfo?.key === hoverKey;
                     const isDimmed = !!hoverInfo && !isHovered;
                     return (
                       <div
@@ -454,17 +542,49 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                         dir="rtl"
                         className={`py-0.5 mb-0.5 text-xs min-w-0 transition-opacity duration-150 ${pastDue ? 'opacity-50' : ''}`}
                         style={{ borderLeft: `3px solid ${color}`, paddingLeft: '6px', opacity: isDimmed ? 0.25 : undefined }}
-                        onMouseEnter={handleSpanHover(item.SubtaskID, item.EndDate)}
-                        onMouseMove={handleSpanHover(item.SubtaskID, item.EndDate)}
+                        onMouseEnter={handleSpanHover(hoverKey, item.EndDate)}
+                        onMouseMove={handleSpanHover(hoverKey, item.EndDate)}
                         onMouseLeave={clearSpanHover}
                       >
                         <button
                           type="button"
                           style={{ color }}
                           className={`font-semibold hover:underline break-words text-right w-full block min-w-0 ${completed ? 'line-through' : ''}`}
-                          onClick={() => openTaskInNewTab(item.TaskID)}
+                          onClick={() => openTask(item.TaskID)}
                         >
                           {item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
+                        </button>
+                        <div className="text-[10px] text-content-secondary text-right">
+                          (بدأ: {startLabel})
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {carryOverComments.map((comment) => {
+                    const color = getSpanColor(comment.CommentID);
+                    const startLabel = new Date(comment.CreatedAt).toLocaleDateString('ar-EG-u-nu-latn', {
+                      day: 'numeric', month: 'short', year: 'numeric',
+                    });
+                    const hoverKey = `c-${comment.CommentID}`;
+                    const isHovered = hoverInfo?.key === hoverKey;
+                    const isDimmed = !!hoverInfo && !isHovered;
+                    return (
+                      <div
+                        key={`cc-${comment.CommentID}`}
+                        dir="rtl"
+                        className="py-0.5 mb-0.5 text-xs min-w-0 transition-opacity duration-150"
+                        style={{ borderLeft: `3px solid ${color}`, paddingLeft: '6px', opacity: isDimmed ? 0.25 : undefined }}
+                        onMouseEnter={handleSpanHover(hoverKey, comment.CalendarEndDate)}
+                        onMouseMove={handleSpanHover(hoverKey, comment.CalendarEndDate)}
+                        onMouseLeave={clearSpanHover}
+                      >
+                        <button
+                          type="button"
+                          style={{ color }}
+                          className="font-semibold hover:underline break-words text-right w-full block min-w-0"
+                          onClick={() => openTask(comment.TaskID)}
+                        >
+                          {comment.Content}
                         </button>
                         <div className="text-[10px] text-content-secondary text-right">
                           (بدأ: {startLabel})
@@ -477,7 +597,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                   <div
                     className="flex items-stretch"
                     dir="ltr"
-                    style={{ marginTop: carryOverItems.length > 0 ? '4px' : undefined }}
+                    style={{ marginTop: (carryOverItems.length > 0 || carryOverComments.length > 0) ? '4px' : undefined }}
                   >
                     {stripWidth > 0 && (
                       <div className="relative flex-shrink-0" style={{ width: `${stripWidth}px` }}>
@@ -490,11 +610,12 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                           // أحداث وسطى: الخط يمتد من أعلى (-4px) للتواصل مع اليوم السابق
                           const top = (isCarryOverItem || pos === 'start') ? '0' : '-4px';
                           const bottom = pos === 'end' ? '0' : '-4px';
-                          const isHovered = hoverInfo?.subtaskId === si.SubtaskID;
+                          const hoverKey = `s-${si.SubtaskID}`;
+                          const isHovered = hoverInfo?.key === hoverKey;
                           const isDimmed = !!hoverInfo && !isHovered;
                           return (
                             <div
-                              key={si.SubtaskID}
+                              key={hoverKey}
                               className="absolute rounded-full cursor-pointer transition-all duration-150"
                               style={{
                                 left: `${siLane * 7 + (isHovered ? 1 : 2)}px`,
@@ -505,8 +626,37 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                                 opacity: isDimmed ? 0.12 : 1,
                                 filter: isDimmed ? 'blur(0.5px)' : undefined,
                               }}
-                              onMouseEnter={handleSpanHover(si.SubtaskID, si.EndDate)}
-                              onMouseMove={handleSpanHover(si.SubtaskID, si.EndDate)}
+                              onMouseEnter={handleSpanHover(hoverKey, si.EndDate)}
+                              onMouseMove={handleSpanHover(hoverKey, si.EndDate)}
+                              onMouseLeave={clearSpanHover}
+                            />
+                          );
+                        })}
+                        {uniqueSpanComments.map((ci) => {
+                          const ciLane = subtaskLaneCount + (commentLaneMap.get(ci.CommentID) ?? 0);
+                          const ciColor = getSpanColor(ci.CommentID);
+                          const isCarryOverComment = carryOverComments.some(c => c.CommentID === ci.CommentID);
+                          const pos = ci._spanPos;
+                          const top = (isCarryOverComment || pos === 'start') ? '0' : '-4px';
+                          const bottom = pos === 'end' ? '0' : '-4px';
+                          const hoverKey = `c-${ci.CommentID}`;
+                          const isHovered = hoverInfo?.key === hoverKey;
+                          const isDimmed = !!hoverInfo && !isHovered;
+                          return (
+                            <div
+                              key={hoverKey}
+                              className="absolute rounded-full cursor-pointer transition-all duration-150"
+                              style={{
+                                left: `${ciLane * 7 + (isHovered ? 1 : 2)}px`,
+                                width: isHovered ? '5px' : '3px',
+                                top,
+                                bottom,
+                                backgroundColor: ciColor,
+                                opacity: isDimmed ? 0.12 : 1,
+                                filter: isDimmed ? 'blur(0.5px)' : undefined,
+                              }}
+                              onMouseEnter={handleSpanHover(hoverKey, ci.CalendarEndDate)}
+                              onMouseMove={handleSpanHover(hoverKey, ci.CalendarEndDate)}
                               onMouseLeave={clearSpanHover}
                             />
                           );
@@ -533,11 +683,17 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                           type DayEntry =
                             | { kind: 'shared'; time: number; item: CalendarItemWithSpan; spanning: boolean }
                             | { kind: 'personal'; time: number; item: CalendarItemWithSpan }
-                            | { kind: 'comment'; time: number; comment: CalendarCommentItem };
+                            | { kind: 'comment'; time: number; comment: CalendarCommentItemWithSpan; spanning: boolean };
 
                           const sharedRenderable = visibleShared.filter(item => {
                             const pos = item._spanPos;
                             const isFirstVisible = firstVisibleDayMap.get(item.SubtaskID) === d.key;
+                            return pos === 'single' || (isFirstVisible && pos === 'start');
+                          });
+
+                          const commentRenderable = visibleComments.filter(c => {
+                            const pos = c._spanPos;
+                            const isFirstVisible = firstVisibleCommentDayMap.get(c.CommentID) === d.key;
                             return pos === 'single' || (isFirstVisible && pos === 'start');
                           });
 
@@ -553,10 +709,11 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                               time: new Date(item.DueDate).getTime(),
                               item,
                             })),
-                            ...visibleComments.map(comment => ({
+                            ...commentRenderable.map(comment => ({
                               kind: 'comment' as const,
                               time: new Date(comment.CreatedAt).getTime(),
                               comment,
+                              spanning: comment._spanPos === 'start',
                             })),
                           ].sort((a, b) => a.time - b.time);
 
@@ -572,22 +729,23 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                                   const timePrefix = formatEventTime(item.DueDate);
                                   const pastDue = isPastDueToday(item.DueDate);
                                   const completed = !!item.IsCompleted;
-                                  const isHovered = spanning && hoverInfo?.subtaskId === item.SubtaskID;
+                                  const hoverKey = `s-${item.SubtaskID}`;
+                                  const isHovered = spanning && hoverInfo?.key === hoverKey;
                                   const isDimmed = spanning && !!hoverInfo && !isHovered;
                                   return (
                                     <div
                                       key={`s-${item.SubtaskID}-${item._spanPos}`}
                                       className={`text-xs transition-opacity duration-150 ${pastDue ? 'opacity-50' : ''}`}
                                       style={isDimmed ? { opacity: 0.25 } : undefined}
-                                      onMouseEnter={spanning ? handleSpanHover(item.SubtaskID, item.EndDate) : undefined}
-                                      onMouseMove={spanning ? handleSpanHover(item.SubtaskID, item.EndDate) : undefined}
+                                      onMouseEnter={spanning ? handleSpanHover(hoverKey, item.EndDate) : undefined}
+                                      onMouseMove={spanning ? handleSpanHover(hoverKey, item.EndDate) : undefined}
                                       onMouseLeave={spanning ? clearSpanHover : undefined}
                                     >
                                       <button
                                         type="button"
                                         style={{ color }}
                                         className={`font-semibold hover:underline cursor-pointer text-right w-full break-words block ${completed ? 'line-through' : ''}`}
-                                        onClick={() => openTaskInNewTab(item.TaskID)}
+                                        onClick={() => openTask(item.TaskID)}
                                       >
                                         {timePrefix}{item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
                                       </button>
@@ -603,7 +761,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                                     <div key={`p-${it.SubtaskID}`} className={`text-xs ${pastDue ? 'opacity-50' : ''}`}>
                                       <button
                                         type="button"
-                                        onClick={() => openTaskInNewTab(it.TaskID)}
+                                        onClick={() => openTask(it.TaskID)}
                                         className={`font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block ${completed ? 'line-through' : ''}`}
                                       >
                                         {formatEventTime(it.DueDate)}{it.SubtaskTitle}
@@ -613,16 +771,33 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                                   );
                                 }
                                 const comment = entry.comment;
+                                const spanning = entry.spanning;
+                                const color = spanning ? getSpanColor(comment.CommentID) : undefined;
+                                const hoverKey = `c-${comment.CommentID}`;
+                                const isHovered = spanning && hoverInfo?.key === hoverKey;
+                                const isDimmed = spanning && !!hoverInfo && !isHovered;
                                 return (
-                                  <button
+                                  <div
                                     key={`c-${comment.CommentID}`}
-                                    type="button"
-                                    onClick={() => openTaskInNewTab(comment.TaskID)}
-                                    className="text-xs font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full block"
+                                    className="text-xs transition-opacity duration-150"
+                                    style={isDimmed ? { opacity: 0.25 } : undefined}
+                                    onMouseEnter={spanning ? handleSpanHover(hoverKey, comment.CalendarEndDate) : undefined}
+                                    onMouseMove={spanning ? handleSpanHover(hoverKey, comment.CalendarEndDate) : undefined}
+                                    onMouseLeave={spanning ? clearSpanHover : undefined}
                                   >
-                                    {formatEventTime(comment.CreatedAt)}{comment.Content}
-                                    <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
-                                  </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => openTask(comment.TaskID)}
+                                      style={color ? { color } : undefined}
+                                      className={`font-semibold hover:underline text-right w-full block ${!spanning ? 'text-purple-800 dark:text-purple-200' : ''}`}
+                                    >
+                                      {formatEventTime(comment.CreatedAt)}{comment.Content}
+                                    </button>
+                                    <div
+                                      style={color ? { color, opacity: 0.7 } : undefined}
+                                      className={!spanning ? 'text-[11px] text-content-secondary' : 'text-[11px]'}
+                                    >ضمن: {comment.TaskTitle}</div>
+                                  </div>
                                 );
                               })}
                             </div>
@@ -640,7 +815,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
             type ExtraEntry =
               | { kind: 'subtask';  date: string; item: CalendarItem }
               | { kind: 'personal'; date: string; item: CalendarItem }
-              | { kind: 'comment';  date: string; comment: CalendarCommentItem };
+              | { kind: 'comment';  date: string; comment: CalendarCommentItem; isEndMarker: boolean };
 
             const filteredExtraWork = viewFilter === 'personal' ? []
               : viewFilter === 'vacancy' ? extraItems.filter(it => !it.PersonalOwnerUserID && String(it.AssignedToID) === String(actorId))
@@ -668,7 +843,10 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                 return { kind: 'subtask' as const, date: isEnd ? item.EndDate! : item.DueDate, item };
               }),
               ...filteredExtraPersonal.map(item => ({ kind: 'personal' as const, date: item.DueDate, item })),
-              ...filteredExtraComments.map(comment => ({ kind: 'comment' as const, date: comment.CreatedAt, comment })),
+              ...filteredExtraComments.map(comment => {
+                const isEnd = !!comment.CalendarEndDate && !!gridEndDate && new Date(comment.CreatedAt) < gridEndDate;
+                return { kind: 'comment' as const, date: isEnd ? comment.CalendarEndDate! : comment.CreatedAt, comment, isEndMarker: isEnd };
+              }),
             ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
             return (
@@ -691,7 +869,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                             <button
                               type="button"
                               className={`font-semibold text-blue-800 dark:text-blue-200 hover:underline cursor-pointer text-right ${completed ? 'line-through' : ''}`}
-                              onClick={() => openTaskInNewTab(item.TaskID)}
+                              onClick={() => openTask(item.TaskID)}
                             >
                               {isEndMarker ? '(نهاية) ' : ''}{item.SubtaskTitle}{item.AssignedToName ? ` (${item.AssignedToName})` : ''}
                             </button>
@@ -710,7 +888,7 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                           <div className="text-xs">
                             <button
                               type="button"
-                              onClick={() => openTaskInNewTab(it.TaskID)}
+                              onClick={() => openTask(it.TaskID)}
                               className={`font-semibold text-emerald-800 dark:text-emerald-200 hover:underline text-right w-full block ${completed ? 'line-through' : ''}`}
                             >
                               {it.SubtaskTitle}
@@ -721,16 +899,17 @@ const SidebarCalendar = ({ currentUser }: SidebarCalendarProps) => {
                       );
                     } else {
                       const comment = entry.comment;
+                      const timePrefix = formatEventTime(entry.isEndMarker ? (comment.CalendarEndDate || comment.CreatedAt) : comment.CreatedAt);
                       return (
                         <li key={`c-${comment.CommentID}`} className="p-2 rounded bg-white/60 dark:bg-gray-800/60 border border-content/10 text-right">
-                          <div className="text-xs text-content-secondary mb-1">{formatEventTime(comment.CreatedAt)}{dateLabel}</div>
+                          <div className="text-xs text-content-secondary mb-1">{timePrefix}{dateLabel}</div>
                           <div className="text-xs">
                             <button
                               type="button"
-                              onClick={() => openTaskInNewTab(comment.TaskID)}
+                              onClick={() => openTask(comment.TaskID)}
                               className="font-semibold text-purple-800 dark:text-purple-200 hover:underline text-right w-full"
                             >
-                              {comment.Content}
+                              {entry.isEndMarker ? '(نهاية) ' : ''}{comment.Content}
                               <div className="text-[11px] text-content-secondary">ضمن: {comment.TaskTitle}</div>
                             </button>
                           </div>

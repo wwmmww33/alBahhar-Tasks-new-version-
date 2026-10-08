@@ -2,7 +2,7 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 const { checkTaskAccess } = require('../utils/delegationUtils');
-const { setItemDepartmentShares, canManageDepartmentSharingAndBroadcast, resolveAllowedBroadcastChain } = require('../utils/departmentSharing');
+const { setItemDepartmentShares, canManageDepartmentSharingAndBroadcast, resolveAllowedBroadcastChain, isWithinItemBroadcastNarrowingChain } = require('../utils/departmentSharing');
 const { resolveActorContext } = require('../utils/vacancyResolver');
 
 // يحوّل VacancyID رقمي → UserID حقيقي (للتحقق من ملكية المهام الشخصية)
@@ -327,7 +327,7 @@ exports.getAllSubtasks = async (req, res) => {
 exports.createSubtask = async (req, res) => {
   const pool = req.app.locals.db;
   // --- تأكد من أننا نستقبل كل هذه الحقول ---
-  const { TaskID, Title, CreatedBy, ActedBy, DueDate, EndDate, AssignedTo, ShowInCalendar, ReminderEnabled, ReminderMinutes } = req.body;
+  const { TaskID, Title, CreatedBy, ActedBy, DueDate, EndDate, AssignedTo, ShowInCalendar, CalendarBroadcastDepartmentID, ReminderEnabled, ReminderMinutes } = req.body;
   
   if (!TaskID || !Title || !CreatedBy) {
     return res.status(400).json({ message: 'TaskID, Title, and CreatedBy are required.' });
@@ -360,6 +360,7 @@ exports.createSubtask = async (req, res) => {
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'DueDate') IS NOT NULL THEN 1 ELSE 0 END AS HasDueDate,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'EndDate') IS NOT NULL THEN 1 ELSE 0 END AS HasEndDate,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar,
+        CASE WHEN COL_LENGTH('dbo.Subtasks', 'CalendarBroadcastDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasBroadcastDeptCol,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'IsCompleted') IS NOT NULL THEN 1 ELSE 0 END AS HasIsCompleted,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'CreatedAt') IS NOT NULL THEN 1 ELSE 0 END AS HasCreatedAt,
         CASE WHEN COL_LENGTH('dbo.Subtasks', 'ReminderEnabled') IS NOT NULL THEN 1 ELSE 0 END AS HasReminderEnabled,
@@ -380,6 +381,24 @@ exports.createSubtask = async (req, res) => {
     const accessCheck = await checkTaskAccess(pool, TaskID, actingUserId, resolveIsAdmin(req), 'view');
     if (!accessCheck.hasAccess) {
       return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية إنشاء مهمة فرعية.' });
+    }
+
+    // مستوى بث المهمة الفرعية في التقويم لا يتجاوز مستوى بث المهمة نفسها — راجع التوضيح في
+    // isWithinItemBroadcastNarrowingChain. CalendarBroadcastDepartmentID=null يعني الاتّباع
+    // الافتراضي لمستوى بث المهمة (لا تضييق).
+    let requestedBroadcastDeptId = CalendarBroadcastDepartmentID == null ? null : parseInt(CalendarBroadcastDepartmentID, 10);
+    if (requestedBroadcastDeptId != null && ShowInCalendar) {
+      const taskRow = await pool.request().input('TaskID', sql.Int, TaskID)
+        .query('SELECT DepartmentID, CalendarBroadcastDepartmentID FROM Tasks WHERE TaskID = @TaskID');
+      const taskInfo = taskRow.recordset[0];
+      const valid = taskInfo && await isWithinItemBroadcastNarrowingChain(
+        pool, taskInfo.DepartmentID, taskInfo.CalendarBroadcastDepartmentID, requestedBroadcastDeptId
+      );
+      if (!valid) {
+        return res.status(400).json({ message: 'مستوى البث المطلوب يتجاوز مستوى بث المهمة.' });
+      }
+    } else {
+      requestedBroadcastDeptId = null;
     }
 
     const createdByActorForStorage = await resolveActorId(pool, CreatedBy, !!schema.HasCreatedByVacancy);
@@ -436,6 +455,11 @@ exports.createSubtask = async (req, res) => {
       createReq.input('ShowInCalendar', sql.Bit, ShowInCalendar === true ? 1 : 0);
       insertColumns.push('ShowInCalendar');
       insertValues.push('@ShowInCalendar');
+    }
+    if (schema.HasBroadcastDeptCol) {
+      createReq.input('CalendarBroadcastDepartmentID', sql.Int, requestedBroadcastDeptId);
+      insertColumns.push('CalendarBroadcastDepartmentID');
+      insertValues.push('@CalendarBroadcastDepartmentID');
     }
     if (schema.HasReminderEnabled) {
       const remEnabled = ReminderEnabled === true || ReminderEnabled === 1 ? 1 : 0;
@@ -1021,7 +1045,7 @@ exports.updateSubtaskDetails = async (req, res) => {
 exports.updateSubtaskCalendarFlag = async (req, res) => {
   const pool = req.app.locals.db;
   const { subtaskId } = req.params;
-  const { ShowInCalendar } = req.body;
+  const { ShowInCalendar, CalendarBroadcastDepartmentID } = req.body;
 
   if (!subtaskId) {
     return res.status(400).json({ message: 'subtaskId is required.' });
@@ -1039,17 +1063,56 @@ exports.updateSubtaskCalendarFlag = async (req, res) => {
     if (check.recordset.length === 0) {
       return res.status(404).json({ message: 'Subtask not found.' });
     }
+    const existingSubtask = check.recordset[0];
 
-    const accessCheck = await checkTaskAccess(pool, check.recordset[0].TaskID, resolveActingUserId(req), resolveIsAdmin(req), 'edit');
-    if (!accessCheck.hasAccess) {
-      return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية تعديل عرض المهمة الفرعية في التقويم.' });
+    const actingUserId = resolveActingUserId(req);
+    const isAdminFlag = resolveIsAdmin(req);
+
+    const taskRow = await pool.request().input('TaskID', sql.Int, existingSubtask.TaskID)
+      .query('SELECT DepartmentID, CalendarBroadcastDepartmentID FROM Tasks WHERE TaskID = @TaskID');
+    const taskInfo = taskRow.recordset[0];
+
+    // إظهار المهمة الفرعية في التقويم: صلاحية منشئها (أو آخر من تصرّف فيها) فقط، بالإضافة إلى
+    // مدير القسم المستقل (أو المفوَّض له) — وليس أي متعاون في المهمة بشكل عام.
+    const actorCandidates = await resolveActorCandidates(pool, actingUserId);
+    const isOwner = hasSubtaskOwnership(existingSubtask, actorCandidates);
+    const isDeptManager = taskInfo
+      ? await canManageDepartmentSharingAndBroadcast(pool, actingUserId, isAdminFlag, taskInfo.DepartmentID)
+      : false;
+    if (!isOwner && !isDeptManager) {
+      return res.status(403).json({ message: 'إظهار المهمة الفرعية في التقويم متاح لمنشئها أو لمدير القسم المستقل فقط.' });
     }
 
-    // تحديث العلم
-    await pool.request()
+    // مستوى بث المهمة الفرعية لا يتجاوز مستوى بث المهمة نفسها — راجع createSubtask لنفس المنطق.
+    let requestedBroadcastDeptId = CalendarBroadcastDepartmentID == null ? null : parseInt(CalendarBroadcastDepartmentID, 10);
+    if (requestedBroadcastDeptId != null && ShowInCalendar) {
+      const valid = taskInfo && await isWithinItemBroadcastNarrowingChain(
+        pool, taskInfo.DepartmentID, taskInfo.CalendarBroadcastDepartmentID, requestedBroadcastDeptId
+      );
+      if (!valid) {
+        return res.status(400).json({ message: 'مستوى البث المطلوب يتجاوز مستوى بث المهمة.' });
+      }
+    } else {
+      requestedBroadcastDeptId = null;
+    }
+
+    const broadcastColProbe = await pool.request().query(
+      `SELECT COL_LENGTH('dbo.Subtasks','CalendarBroadcastDepartmentID') AS Len`
+    );
+    const hasBroadcastDeptCol = !!broadcastColProbe.recordset[0]?.Len;
+
+    // تحديث العلم (ومستوى البث إن تغيّر — لا نلمسه إن لم يُرسَل التبديل على ShowInCalendar=true،
+    // حفاظاً على ما ضبطه مدير القسم مسبقاً عبر setSubtaskBroadcastLevel عند مجرد إعادة التفعيل بلا تغيير)
+    const updateReq = pool.request()
       .input('SubtaskID', sql.Int, subtaskId)
-      .input('ShowInCalendar', sql.Bit, ShowInCalendar ? 1 : 0)
-      .query('UPDATE Subtasks SET ShowInCalendar = @ShowInCalendar WHERE SubtaskID = @SubtaskID');
+      .input('ShowInCalendar', sql.Bit, ShowInCalendar ? 1 : 0);
+    let updateSql = 'UPDATE Subtasks SET ShowInCalendar = @ShowInCalendar';
+    if (hasBroadcastDeptCol && ShowInCalendar) {
+      updateReq.input('CalendarBroadcastDepartmentID', sql.Int, requestedBroadcastDeptId);
+      updateSql += ', CalendarBroadcastDepartmentID = @CalendarBroadcastDepartmentID';
+    }
+    updateSql += ' WHERE SubtaskID = @SubtaskID';
+    await updateReq.query(updateSql);
 
     // إعادة إرجاع السجل المحدث
     const result = await pool.request()

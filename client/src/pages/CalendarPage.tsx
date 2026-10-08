@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, Fragment } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, FileDown } from 'lucide-react';
 import type { CurrentUser } from '../types';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
@@ -25,9 +26,11 @@ type CalendarCommentItem = {
   TaskTitle: string;
   Content: string;
   CreatedAt: string;
+  CalendarEndDate?: string | null;
   CommentedByName?: string;
   PersonalOwnerUserID?: string | null;
 };
+type CalendarCommentItemWithSpan = CalendarCommentItem & { _spanPos: SpanPos };
 
 type ViewMode = 'month' | 'week' | 'day' | 'year';
 type ViewFilter = 'both' | 'shared' | 'vacancy' | 'personal';
@@ -39,19 +42,24 @@ type DayEntry =
   | { kind: 'span'; time: number; item: CalendarItemWithSpan }
   | { kind: 'single'; time: number; item: CalendarItemWithSpan }
   | { kind: 'personal'; time: number; item: CalendarItemWithSpan }
-  | { kind: 'comment'; time: number; comment: CalendarCommentItem };
+  | { kind: 'comment'; time: number; comment: CalendarCommentItemWithSpan; spanning: boolean };
 
 function buildDayEntries(
   spanStarts: CalendarItemWithSpan[],
   singles: CalendarItemWithSpan[],
   personal: CalendarItemWithSpan[],
-  comments: CalendarCommentItem[],
+  comments: CalendarCommentItemWithSpan[],
 ): DayEntry[] {
   return [
     ...spanStarts.map(item => ({ kind: 'span' as const, time: new Date(item.DueDate).getTime(), item })),
     ...singles.map(item => ({ kind: 'single' as const, time: new Date(item.DueDate).getTime(), item })),
     ...personal.map(item => ({ kind: 'personal' as const, time: new Date(item.DueDate).getTime(), item })),
-    ...comments.map(comment => ({ kind: 'comment' as const, time: new Date(comment.CreatedAt).getTime(), comment })),
+    ...comments.map(comment => ({
+      kind: 'comment' as const,
+      time: new Date(comment.CreatedAt).getTime(),
+      comment,
+      spanning: comment._spanPos === 'start',
+    })),
   ].sort((a, b) => a.time - b.time);
 }
 
@@ -75,15 +83,16 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
   const [taskSearch, setTaskSearch] = useState('');
   const [taskSearchOpen, setTaskSearchOpen] = useState(false);
 
-  const openTaskInNewTab = (taskId: number) => {
-    window.open(`/task/${taskId}`, '_blank', 'noopener,noreferrer');
+  const navigate = useNavigate();
+  const openTask = (taskId: number) => {
+    navigate(`/task/${taskId}`);
   };
 
   const SPAN_COLORS = [
     '#3b82f6', '#22c55e', '#a855f7', '#f97316',
     '#ec4899', '#14b8a6', '#ef4444', '#eab308',
   ];
-  const getSpanColor = (subtaskId: number) => SPAN_COLORS[subtaskId % SPAN_COLORS.length];
+  const getSpanColor = (id: number) => SPAN_COLORS[id % SPAN_COLORS.length];
 
   const formatEventTime = (dateStr: string): string => {
     if (!dateStr) return '';
@@ -259,6 +268,15 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     return taskFiltered;
   }, [items, viewFilter, actorId, selectedTaskId]);
 
+  // نفس منطق displayItems أعلاه لكن للتعليقات — موحَّد هنا بدل تكرار فلترة viewFilter/selectedTaskId
+  // في كل موقع استخدام (الشبكة/القائمة)، تماماً كما فُعل مع المهام الفرعية.
+  const displayComments = useMemo(() => {
+    const taskFiltered = selectedTaskId !== null ? commentEvents.filter(c => c.TaskID === selectedTaskId) : commentEvents;
+    if (viewFilter === 'personal') return taskFiltered.filter(c => c.PersonalOwnerUserID);
+    if (viewFilter === 'both') return taskFiltered;
+    return taskFiltered.filter(c => !c.PersonalOwnerUserID);
+  }, [commentEvents, viewFilter, selectedTaskId]);
+
   const itemsByDay = useMemo(() => {
     const map: Record<string, CalendarItemWithSpan[]> = {};
     for (const it of displayItems) {
@@ -302,41 +320,70 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     return map;
   }, [items, selectedTaskId]);
 
+  // نفس منطق itemsByDay أعلاه لكن للتعليقات — تعليق له CalendarEndDate يُعامَل كحدث ممتد
+  // (بداية/وسط/نهاية) تماماً كالمهمة الفرعية ذات EndDate.
   const commentsByDay = useMemo(() => {
-    const map: Record<string, CalendarCommentItem[]> = {};
-    const filtered = selectedTaskId !== null ? commentEvents.filter(c => c.TaskID === selectedTaskId) : commentEvents;
-    for (const comment of filtered) {
-      const d = new Date(comment.CreatedAt);
-      const key = toLocalYMD(d);
-      if (!map[key]) map[key] = [];
-      map[key].push(comment);
+    const map: Record<string, CalendarCommentItemWithSpan[]> = {};
+    for (const c of displayComments) {
+      const start = new Date(c.CreatedAt);
+      const startNorm = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+      const endRaw = c.CalendarEndDate ? new Date(c.CalendarEndDate) : null;
+      const endNorm = endRaw ? new Date(endRaw.getFullYear(), endRaw.getMonth(), endRaw.getDate()) : null;
+
+      if (!endNorm || endNorm.getTime() === startNorm.getTime()) {
+        const key = toLocalYMD(startNorm);
+        if (!map[key]) map[key] = [];
+        map[key].push({ ...c, _spanPos: 'single' });
+      } else {
+        const cur = new Date(startNorm);
+        let safety = 0;
+        while (cur <= endNorm && safety < 366) {
+          const key = toLocalYMD(cur);
+          if (!map[key]) map[key] = [];
+          const isFirst = cur.getTime() === startNorm.getTime();
+          const isLast = cur.getTime() === endNorm.getTime();
+          const pos: SpanPos = isFirst && isLast ? 'single' : isFirst ? 'start' : isLast ? 'end' : 'middle';
+          map[key].push({ ...c, _spanPos: pos });
+          cur.setDate(cur.getDate() + 1);
+          safety++;
+        }
+      }
     }
     return map;
-  }, [commentEvents]);
+  }, [displayComments]);
 
-  // أشرطة الامتداد الرأسية لعرض القائمة/اليومي
+  // أشرطة الامتداد الرأسية لعرض القائمة/اليومي — تجمع مهاماً فرعية وتعليقات معاً في ممرّات مشتركة
+  type VBar = { kind: 'subtask' | 'comment'; id: number; taskId: number; title: string; startKey: string; endKey: string; lane: number };
   const verticalBars = useMemo(() => {
-    if (!dateRange.length) return [] as { item: CalendarItem; startKey: string; endKey: string; lane: number }[];
+    if (!dateRange.length) return [] as VBar[];
     const rangeStartKey = dateRange[0].key;
     const rangeEndKey   = dateRange[dateRange.length - 1].key;
-    const bars: { item: CalendarItem; startKey: string; endKey: string; lane: number }[] = [];
-    for (const item of displayItems.filter(it => !!it.EndDate)) {
-      const dD = new Date(item.DueDate);
-      const eD = new Date(item.EndDate!);
+    const bars: VBar[] = [];
+
+    type Cand = { kind: 'subtask' | 'comment'; id: number; taskId: number; title: string; due: string; end: string };
+    const candidates: Cand[] = [
+      ...displayItems.filter(it => !!it.EndDate).map(it => ({ kind: 'subtask' as const, id: it.SubtaskID, taskId: it.TaskID, title: it.SubtaskTitle, due: it.DueDate, end: it.EndDate! })),
+      ...displayComments.filter(c => !!c.CalendarEndDate).map(c => ({ kind: 'comment' as const, id: c.CommentID, taskId: c.TaskID, title: c.Content, due: c.CreatedAt, end: c.CalendarEndDate! })),
+    ];
+
+    for (const cand of candidates) {
+      const dD = new Date(cand.due);
+      const eD = new Date(cand.end);
       const dueKey = toLocalYMD(new Date(dD.getFullYear(), dD.getMonth(), dD.getDate()));
       const endKey = toLocalYMD(new Date(eD.getFullYear(), eD.getMonth(), eD.getDate()));
+      if (dueKey === endKey) continue; // ليس امتداداً فعلياً (نفس اليوم)
       if (dueKey > rangeEndKey || endKey < rangeStartKey) continue;
       const startKey = dueKey < rangeStartKey ? rangeStartKey : dueKey;
       const endKeyC  = endKey > rangeEndKey   ? rangeEndKey   : endKey;
       let lane = 0;
       while (bars.some(b => b.lane === lane && !(b.endKey < startKey || b.startKey > endKeyC))) lane++;
-      bars.push({ item, startKey, endKey: endKeyC, lane });
+      bars.push({ kind: cand.kind, id: cand.id, taskId: cand.taskId, title: cand.title, startKey, endKey: endKeyC, lane });
     }
     return bars;
-  }, [displayItems, dateRange]);
+  }, [displayItems, displayComments, dateRange]);
   const maxVLane = verticalBars.length > 0 ? Math.max(...verticalBars.map(b => b.lane)) : -1;
 
-  // مهام بدأت قبل الفترة الحالية وتمتد خلالها
+  // مهام/تعليقات بدأت قبل الفترة الحالية وتمتد خلالها
   const priorSpans = useMemo(() => {
     if (!dateRange.length) return [];
     const rangeStart = new Date(dateRange[0].date);
@@ -351,6 +398,20 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     });
   }, [dateRange, displayItems]);
 
+  const priorCommentSpans = useMemo(() => {
+    if (!dateRange.length) return [];
+    const rangeStart = new Date(dateRange[0].date);
+    rangeStart.setHours(0, 0, 0, 0);
+    return displayComments.filter(c => {
+      if (!c.CalendarEndDate) return false;
+      const dueD = new Date(c.CreatedAt);
+      dueD.setHours(0, 0, 0, 0);
+      const endD = new Date(c.CalendarEndDate);
+      endD.setHours(0, 0, 0, 0);
+      return dueD < rangeStart && endD >= rangeStart;
+    });
+  }, [dateRange, displayComments]);
+
   const filteredListRange = useMemo(() => {
     const effectiveHideEmpty = hideEmptyDays || selectedTaskId !== null;
     if (!effectiveHideEmpty && !hideContinuationOnly) return dateRange;
@@ -359,16 +420,11 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
       const personalForDay = personalByDay[d.key] || [];
       const commentsForDay = commentsByDay[d.key] || [];
       const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? personalForDay : [];
-      const visibleComments = viewFilter === 'personal'
-        ? commentsForDay.filter(c => c.PersonalOwnerUserID)
-        : viewFilter === 'both'
-          ? commentsForDay
-          : commentsForDay.filter(c => !c.PersonalOwnerUserID);
-      const hasAnyEvents = sharedForDay.length > 0 || visiblePersonal.length > 0 || visibleComments.length > 0;
+      const hasAnyEvents = sharedForDay.length > 0 || visiblePersonal.length > 0 || commentsForDay.length > 0;
       if (effectiveHideEmpty && !hasAnyEvents) return false;
       if (hideContinuationOnly) {
         const hasNonCont = sharedForDay.some(it => it._spanPos === 'start' || it._spanPos === 'single' || it._spanPos === 'end') ||
-                           visiblePersonal.length > 0 || visibleComments.length > 0;
+                           visiblePersonal.length > 0 || commentsForDay.some(c => c._spanPos === 'start' || c._spanPos === 'single' || c._spanPos === 'end');
         if (!hasNonCont) return false;
       }
       return true;
@@ -456,6 +512,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
     for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, Math.min(i + 7, cells.length)));
 
     const spanItems = displayItems.filter(it => !!it.EndDate);
+    const commentSpanItems = displayComments.filter(c => !!c.CalendarEndDate);
     const todayKey = toLocalYMD(new Date());
 
     return (
@@ -475,12 +532,24 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
             const weekStartD = new Date(wd0.getFullYear(), wd0.getMonth(), wd0.getDate());
             const weekEndD   = new Date(wdN.getFullYear(), wdN.getMonth(), wdN.getDate());
 
-            type BarInfo = { item: CalendarItem; startCol: number; endCol: number; lane: number; isFirst: boolean; isLast: boolean };
+            type BarInfo = {
+              kind: 'subtask' | 'comment'; id: number; taskId: number; title: string; taskTitle: string; assignedToName?: string;
+              startCol: number; endCol: number; lane: number; isFirst: boolean; isLast: boolean;
+            };
             const bars: BarInfo[] = [];
 
-            for (const item of spanItems) {
-              const dD = new Date(item.DueDate); const dueD = new Date(dD.getFullYear(), dD.getMonth(), dD.getDate());
-              const eD = new Date(item.EndDate!); const endD = new Date(eD.getFullYear(), eD.getMonth(), eD.getDate());
+            type BarCand = {
+              kind: 'subtask' | 'comment'; id: number; taskId: number; title: string; taskTitle: string; assignedToName?: string; due: string; end: string;
+            };
+            const barCandidates: BarCand[] = [
+              ...spanItems.map(it => ({ kind: 'subtask' as const, id: it.SubtaskID, taskId: it.TaskID, title: it.SubtaskTitle, taskTitle: it.TaskTitle, assignedToName: it.AssignedToName, due: it.DueDate, end: it.EndDate! })),
+              ...commentSpanItems.map(c => ({ kind: 'comment' as const, id: c.CommentID, taskId: c.TaskID, title: c.Content, taskTitle: c.TaskTitle, due: c.CreatedAt, end: c.CalendarEndDate! })),
+            ];
+
+            for (const cand of barCandidates) {
+              const dD = new Date(cand.due); const dueD = new Date(dD.getFullYear(), dD.getMonth(), dD.getDate());
+              const eD = new Date(cand.end); const endD = new Date(eD.getFullYear(), eD.getMonth(), eD.getDate());
+              if (dueD.getTime() === endD.getTime()) continue; // ليس امتداداً فعلياً
               if (dueD > weekEndD || endD < weekStartD) continue;
 
               const clampedStart = dueD < weekStartD ? weekStartD : dueD;
@@ -492,7 +561,10 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
 
               let lane = 0;
               while (bars.some(b => b.lane === lane && b.startCol <= endCol && b.endCol >= startCol)) lane++;
-              bars.push({ item, startCol, endCol, lane, isFirst: dueD >= weekStartD, isLast: endD <= weekEndD });
+              bars.push({
+                kind: cand.kind, id: cand.id, taskId: cand.taskId, title: cand.title, taskTitle: cand.taskTitle, assignedToName: cand.assignedToName,
+                startCol, endCol, lane, isFirst: dueD >= weekStartD, isLast: endD <= weekEndD,
+              });
             }
 
             const maxLane = bars.length > 0 ? Math.max(...bars.map(b => b.lane)) : -1;
@@ -506,11 +578,11 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                       {week.map((_c, i) => <div key={i} className="border-r border-content/10 last:border-r-0 h-full" />)}
                     </div>
                     {bars.map(bar => {
-                      const barColor = getSpanColor(bar.item.SubtaskID);
+                      const barColor = getSpanColor(bar.id);
                       return (
                         <div
-                          key={bar.item.SubtaskID}
-                          title={`${bar.item.SubtaskTitle}${bar.item.AssignedToName ? ` (${bar.item.AssignedToName})` : ''} — ضمن: ${bar.item.TaskTitle}`}
+                          key={`${bar.kind}-${bar.id}`}
+                          title={`${bar.title}${bar.assignedToName ? ` (${bar.assignedToName})` : ''} — ضمن: ${bar.taskTitle}`}
                           style={{
                             position: 'absolute',
                             top:   `${bar.lane * 14 + 2}px`,
@@ -533,19 +605,18 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                     const dayOfWeek = cell.date.getDay();
                     const isWeekend = dayOfWeek === 5 || dayOfWeek === 6;
                     const allCellItems   = itemsByDay[key] || [];
+                    const allCellComments = commentsByDay[key] || [];
                     const personalForDay = (viewFilter === 'both' || viewFilter === 'personal') ? (personalByDay[key] || []) : [];
-                    const rawCommentsForDay = commentsByDay[key] || [];
-                    const commentsForDay = viewFilter === 'personal'
-                      ? rawCommentsForDay.filter(c => c.PersonalOwnerUserID)
-                      : viewFilter === 'both'
-                        ? rawCommentsForDay
-                        : rawCommentsForDay.filter(c => !c.PersonalOwnerUserID);
                     const hasBarOnDay = bars.some(b => b.startCol <= colIdx && b.endCol >= colIdx);
-                    const hasEvents   = allCellItems.length > 0 || personalForDay.length > 0 || commentsForDay.length > 0 || hasBarOnDay;
+                    const hasEvents   = allCellItems.length > 0 || personalForDay.length > 0 || allCellComments.length > 0 || hasBarOnDay;
 
                     const contSpansCell  = allCellItems.filter(it => it._spanPos === 'middle' || it._spanPos === 'end').sort((a,b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime());
                     const startSpansCell = allCellItems.filter(it => it._spanPos === 'start').sort((a,b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime());
                     const singlesCell    = allCellItems.filter(it => it._spanPos === 'single').sort((a,b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime());
+                    const commentContSpansCell  = allCellComments.filter(c => c._spanPos === 'middle' || c._spanPos === 'end').sort((a,b) => new Date(a.CreatedAt).getTime() - new Date(b.CreatedAt).getTime());
+                    const commentStartSpansCell = allCellComments.filter(c => c._spanPos === 'start').sort((a,b) => new Date(a.CreatedAt).getTime() - new Date(b.CreatedAt).getTime());
+                    const commentSinglesCell    = allCellComments.filter(c => c._spanPos === 'single').sort((a,b) => new Date(a.CreatedAt).getTime() - new Date(b.CreatedAt).getTime());
+                    const commentRenderableCell = [...commentStartSpansCell, ...commentSinglesCell];
 
                     return (
                       <div
@@ -564,31 +635,33 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                           <span className={`text-xs font-semibold ${isToday ? 'bg-primary text-white rounded-full px-1' : ''}`}>
                             {cell.date.getDate()}
                           </span>
-                          {(allCellItems.length > 0 || personalForDay.length > 0 || commentsForDay.length > 0) && (
+                          {(allCellItems.length > 0 || personalForDay.length > 0 || allCellComments.length > 0) && (
                             <span className="w-2 h-2 rounded-full bg-primary inline-block" />
                           )}
                         </div>
                         <div className="space-y-0.5 text-[10px]">
-                          {contSpansCell.length > 0 && (
+                          {(contSpansCell.length > 0 || commentContSpansCell.length > 0) && (
                             <div className="flex flex-wrap items-center gap-[2px] font-bold leading-tight">
-                              {contSpansCell.map((it, idx) => (
-                                <span key={it.SubtaskID} className="flex items-center gap-[1px]">
+                              {[...contSpansCell.map(it => ({ kind: 'subtask' as const, id: it.SubtaskID, taskId: it.TaskID, title: it.SubtaskTitle, taskTitle: it.TaskTitle, assignedToName: it.AssignedToName })),
+                                ...commentContSpansCell.map(c => ({ kind: 'comment' as const, id: c.CommentID, taskId: c.TaskID, title: c.Content, taskTitle: c.TaskTitle, assignedToName: undefined as string | undefined }))]
+                                .map((entry, idx) => (
+                                <span key={`${entry.kind}-${entry.id}`} className="flex items-center gap-[1px]">
                                   {idx > 0 && <span className="text-gray-400 text-[9px]">|</span>}
-                                  <button type="button" onClick={() => openTaskInNewTab(it.TaskID)}
-                                    style={{ color: getSpanColor(it.SubtaskID) }} className="hover:underline"
-                                    title={`${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} — ضمن: ${it.TaskTitle}`}>
-                                    {it.SubtaskID}
+                                  <button type="button" onClick={() => openTask(entry.taskId)}
+                                    style={{ color: getSpanColor(entry.id) }} className="hover:underline"
+                                    title={`${entry.title}${entry.assignedToName ? ` (${entry.assignedToName})` : ''} — ضمن: ${entry.taskTitle}`}>
+                                    {entry.id}
                                   </button>
                                 </span>
                               ))}
                             </div>
                           )}
                           {/* نُدمج المهام (الفرعية والشخصية) والتعليقات في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث */}
-                          {buildDayEntries(startSpansCell, singlesCell, personalForDay, commentsForDay).map(entry => {
+                          {buildDayEntries(startSpansCell, singlesCell, personalForDay, commentRenderableCell).map(entry => {
                             if (entry.kind === 'span' || entry.kind === 'single') {
                               const it = entry.item;
                               return (
-                                <button key={`${entry.kind}-${it.SubtaskID}`} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                                <button key={`${entry.kind}-${it.SubtaskID}`} type="button" onClick={() => openTask(it.TaskID)}
                                   style={{ color: getSpanColor(it.SubtaskID) }}
                                   className={`${entry.kind === 'span' ? 'font-bold' : 'font-semibold'} hover:underline text-right w-full block break-words`}
                                   title={`${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} — ضمن: ${it.TaskTitle}`}>
@@ -599,7 +672,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             if (entry.kind === 'personal') {
                               const it = entry.item;
                               return (
-                                <button key={`personal-${it.SubtaskID}`} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                                <button key={`personal-${it.SubtaskID}`} type="button" onClick={() => openTask(it.TaskID)}
                                   className="w-full text-right break-words hover:underline font-semibold"
                                   style={{ color: '#059669' }}>
                                   {formatEventTime(it.DueDate)}★ {it.SubtaskTitle || it.TaskTitle}
@@ -607,13 +680,17 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                               );
                             }
                             const cm = entry.comment;
+                            const spanning = entry.spanning;
+                            const color = spanning ? getSpanColor(cm.CommentID) : '#7c3aed';
                             return (
-                              <button key={`comment-${cm.CommentID}`} type="button" onClick={() => openTaskInNewTab(cm.TaskID)}
-                                style={{ color: '#7c3aed' }}
+                              <button key={`comment-${cm.CommentID}`} type="button" onClick={() => openTask(cm.TaskID)}
+                                style={{ color }}
                                 className="hover:underline text-right w-full block break-words"
                                 title={`${cm.Content} — ضمن: ${cm.TaskTitle}`}>
-                                {formatEventTime(cm.CreatedAt)}💬 {cm.Content}
-                                <span className="opacity-60 text-[9px] block">ضمن مهمة: {cm.TaskTitle}</span>
+                                {spanning
+                                  ? <>{formatEventTime(cm.CreatedAt)}{cm.CommentID}◀ {cm.Content} (ضمن: {cm.TaskTitle})</>
+                                  : <>{formatEventTime(cm.CreatedAt)}💬 {cm.Content}<span className="opacity-60 text-[9px] block">ضمن مهمة: {cm.TaskTitle}</span></>
+                                }
                               </button>
                             );
                           })}
@@ -763,7 +840,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                 dateRange,
                 displayItems,
                 personalByDay,
-                commentsByDay,
+                comments: displayComments,
                 viewMode,
                 viewLayout,
                 filteredListRange,
@@ -892,32 +969,37 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
             </div>
           )}
 
-          {/* مهام بدأت قبل هذه الفترة وتمتد خلالها */}
-          {viewMode !== 'year' && priorSpans.length > 0 && (
+          {/* مهام/تعليقات بدأت قبل هذه الفترة وتمتد خلالها */}
+          {viewMode !== 'year' && (priorSpans.length > 0 || priorCommentSpans.length > 0) && (
             <div className="mt-3 border rounded-lg p-3 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700">
               <div className="text-sm font-semibold text-amber-900 dark:text-amber-200 mb-2 border-b border-amber-200 dark:border-amber-700 pb-1">
-                مهام بدأت قبل {viewMode === 'month' ? 'هذا الشهر' : viewMode === 'week' ? 'هذا الأسبوع' : 'اليوم'} وتمتد خلاله
+                أحداث بدأت قبل {viewMode === 'month' ? 'هذا الشهر' : viewMode === 'week' ? 'هذا الأسبوع' : 'اليوم'} وتمتد خلاله
               </div>
               <div className="space-y-1">
-                {priorSpans.map(it => (
-                  <div key={it.SubtaskID} className="flex flex-wrap items-baseline gap-2 text-xs">
+                {[
+                  ...priorSpans.map(it => ({ kind: 'subtask' as const, id: it.SubtaskID, taskId: it.TaskID, date: it.DueDate, label: `${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: ${it.TaskTitle})` })),
+                  ...priorCommentSpans.map(c => ({ kind: 'comment' as const, id: c.CommentID, taskId: c.TaskID, date: c.CreatedAt, label: `${c.Content} (ضمن: ${c.TaskTitle})` })),
+                ]
+                  .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+                  .map(entry => (
+                  <div key={`${entry.kind}-${entry.id}`} className="flex flex-wrap items-baseline gap-2 text-xs">
                     <button
                       type="button"
-                      onClick={() => openTaskInNewTab(it.TaskID)}
-                      style={{ color: getSpanColor(it.SubtaskID) }}
+                      onClick={() => openTask(entry.taskId)}
+                      style={{ color: getSpanColor(entry.id) }}
                       className="font-bold hover:underline flex-shrink-0"
                     >
-                      {it.SubtaskID}
+                      {entry.id}
                     </button>
                     <span className="text-content-secondary flex-shrink-0 text-[11px]">
-                      {formatEventTime(it.DueDate)}{new Date(it.DueDate).toLocaleDateString('ar-EG-u-nu-latn', { year: 'numeric', month: 'long', day: 'numeric' })}
+                      {formatEventTime(entry.date)}{new Date(entry.date).toLocaleDateString('ar-EG-u-nu-latn', { year: 'numeric', month: 'long', day: 'numeric' })}
                     </span>
                     <button
                       type="button"
-                      onClick={() => openTaskInNewTab(it.TaskID)}
+                      onClick={() => openTask(entry.taskId)}
                       className="font-semibold hover:underline text-right break-words"
                     >
-                      {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
+                      {entry.label}
                     </button>
                   </div>
                 ))}
@@ -945,11 +1027,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                 const commentsForDay = commentsByDay[d.key] || [];
                 const visibleShared   = sharedForDay;
                 const visiblePersonal = (viewFilter === 'both' || viewFilter === 'personal') ? personalForDay : [];
-                const visibleComments = viewFilter === 'personal'
-                  ? commentsForDay.filter(c => c.PersonalOwnerUserID)
-                  : viewFilter === 'both'
-                    ? commentsForDay
-                    : commentsForDay.filter(c => !c.PersonalOwnerUserID);
+                const visibleComments = commentsForDay;
                 const hasEvents = visibleShared.length > 0 || visiblePersonal.length > 0 || visibleComments.length > 0;
                 const todayKey  = toLocalYMD(new Date());
                 const isToday   = d.key === todayKey;
@@ -960,9 +1038,16 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                 const contList   = visibleShared.filter(it => it._spanPos === 'middle' || it._spanPos === 'end').sort((a,b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime());
                 const startList  = visibleShared.filter(it => it._spanPos === 'start').sort((a,b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime());
                 const singleList = visibleShared.filter(it => it._spanPos === 'single').sort((a,b) => new Date(a.DueDate).getTime() - new Date(b.DueDate).getTime());
+                const commentContList   = visibleComments.filter(c => c._spanPos === 'middle' || c._spanPos === 'end').sort((a,b) => new Date(a.CreatedAt).getTime() - new Date(b.CreatedAt).getTime());
+                const commentStartList  = visibleComments.filter(c => c._spanPos === 'start').sort((a,b) => new Date(a.CreatedAt).getTime() - new Date(b.CreatedAt).getTime());
+                const commentSingleList = visibleComments.filter(c => c._spanPos === 'single').sort((a,b) => new Date(a.CreatedAt).getTime() - new Date(b.CreatedAt).getTime());
+                const commentRenderableList = [...commentStartList, ...commentSingleList];
 
                 const dayVBars   = verticalBars.filter(b => b.startKey <= d.key && b.endKey >= d.key).sort((a,b) => a.lane - b.lane);
-                const spanPosMap = new Map(visibleShared.map(it => [it.SubtaskID, it._spanPos]));
+                const spanPosMap = new Map<string, SpanPos>([
+                  ...visibleShared.map(it => [`s-${it.SubtaskID}`, it._spanPos] as [string, SpanPos]),
+                  ...visibleComments.map(c => [`c-${c.CommentID}`, c._spanPos] as [string, SpanPos]),
+                ]);
 
                 const cardBg = isToday
                   ? 'bg-yellow-100 dark:bg-yellow-900'
@@ -983,7 +1068,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                         {Array.from({ length: maxVLane + 1 }, (_, laneIdx) => {
                           const bar     = dayVBars.find(b => b.lane === laneIdx);
                           if (!bar) return <div key={laneIdx} className="w-2.5" />;
-                          const spanPos = spanPosMap.get(bar.item.SubtaskID) ?? 'middle';
+                          const spanPos = spanPosMap.get(`${bar.kind === 'subtask' ? 's' : 'c'}-${bar.id}`) ?? 'middle';
                           const isStart = spanPos === 'start';
                           const isEnd   = spanPos === 'end';
                           return (
@@ -991,9 +1076,9 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                               {isStart && <div style={{ height: '8px', flexShrink: 0 }} />}
                               <button
                                 type="button"
-                                onClick={() => openTaskInNewTab(bar.item.TaskID)}
-                                title={`${bar.item.SubtaskTitle}${bar.item.AssignedToName ? ` (${bar.item.AssignedToName})` : ''} — ضمن: ${bar.item.TaskTitle}`}
-                                style={{ backgroundColor: getSpanColor(bar.item.SubtaskID), flex: 1, display: 'block', width: '100%' }}
+                                onClick={() => openTask(bar.taskId)}
+                                title={bar.title}
+                                style={{ backgroundColor: getSpanColor(bar.id), flex: 1, display: 'block', width: '100%' }}
                                 className={[
                                   isStart ? 'rounded-t-full' : '',
                                   isEnd   ? 'rounded-b-full' : '',
@@ -1025,27 +1110,29 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                         )}
                       </div>
                       <div className="space-y-1 text-right">
-                        {contList.length > 0 && (
+                        {(contList.length > 0 || commentContList.length > 0) && (
                           <div className="flex flex-wrap items-center gap-1 text-xs font-bold">
-                            {contList.map((it, idx) => (
-                              <span key={it.SubtaskID} className="flex items-center gap-0.5">
+                            {[...contList.map(it => ({ kind: 'subtask' as const, id: it.SubtaskID, taskId: it.TaskID, title: it.SubtaskTitle, taskTitle: it.TaskTitle, assignedToName: it.AssignedToName })),
+                              ...commentContList.map(c => ({ kind: 'comment' as const, id: c.CommentID, taskId: c.TaskID, title: c.Content, taskTitle: c.TaskTitle, assignedToName: undefined as string | undefined }))]
+                              .map((entry, idx) => (
+                              <span key={`${entry.kind}-${entry.id}`} className="flex items-center gap-0.5">
                                 {idx > 0 && <span className="text-gray-400">|</span>}
-                                <button type="button" onClick={() => openTaskInNewTab(it.TaskID)}
-                                  style={{ color: getSpanColor(it.SubtaskID) }} className="hover:underline"
-                                  title={`${it.SubtaskTitle}${it.AssignedToName ? ` (${it.AssignedToName})` : ''} — ضمن: ${it.TaskTitle}`}>
-                                  {it.SubtaskID}
+                                <button type="button" onClick={() => openTask(entry.taskId)}
+                                  style={{ color: getSpanColor(entry.id) }} className="hover:underline"
+                                  title={`${entry.title}${entry.assignedToName ? ` (${entry.assignedToName})` : ''} — ضمن: ${entry.taskTitle}`}>
+                                  {entry.id}
                                 </button>
                               </span>
                             ))}
                           </div>
                         )}
                         {/* نُدمج المهام (الفرعية والشخصية) والتعليقات في قائمة واحدة مرتبة زمنياً من الأقدم للأحدث */}
-                        {buildDayEntries(startList, singleList, visiblePersonal, visibleComments).map(entry => {
+                        {buildDayEntries(startList, singleList, visiblePersonal, commentRenderableList).map(entry => {
                           if (entry.kind === 'span' || entry.kind === 'single') {
                             const it = entry.item;
                             return (
                               <div key={`${entry.kind}-${it.SubtaskID}`} className="text-xs">
-                                <button type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                                <button type="button" onClick={() => openTask(it.TaskID)}
                                   style={{ color: getSpanColor(it.SubtaskID) }}
                                   className={`${entry.kind === 'span' ? 'font-bold' : 'font-semibold'} hover:underline break-words text-right`}>
                                   {formatEventTime(it.DueDate)}{it.SubtaskID}◀ {it.SubtaskTitle}{it.AssignedToName ? ` (${it.AssignedToName})` : ''} (ضمن: {it.TaskTitle})
@@ -1056,7 +1143,7 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                           if (entry.kind === 'personal') {
                             const it = entry.item;
                             return (
-                              <button key={`personal-${it.SubtaskID}`} type="button" onClick={() => openTaskInNewTab(it.TaskID)}
+                              <button key={`personal-${it.SubtaskID}`} type="button" onClick={() => openTask(it.TaskID)}
                                 className="text-xs font-semibold hover:underline text-right w-full break-words"
                                 style={{ color: '#059669' }}>
                                 {formatEventTime(it.DueDate)}★ {it.SubtaskTitle || it.TaskTitle}
@@ -1064,12 +1151,16 @@ const CalendarPage = ({ currentUser }: CalendarPageProps) => {
                             );
                           }
                           const cm = entry.comment;
+                          const spanning = entry.spanning;
+                          const color = spanning ? getSpanColor(cm.CommentID) : '#7c3aed';
                           return (
-                            <button key={`comment-${cm.CommentID}`} type="button" onClick={() => openTaskInNewTab(cm.TaskID)}
+                            <button key={`comment-${cm.CommentID}`} type="button" onClick={() => openTask(cm.TaskID)}
                               className="text-xs font-semibold hover:underline text-right w-full break-words"
-                              style={{ color: '#7c3aed' }}>
-                              {formatEventTime(cm.CreatedAt)}💬 {cm.Content}
-                              <span className="opacity-60 text-[9px] block font-normal">ضمن مهمة: {cm.TaskTitle}</span>
+                              style={{ color }}>
+                              {spanning
+                                ? <>{formatEventTime(cm.CreatedAt)}{cm.CommentID}◀ {cm.Content} (ضمن: {cm.TaskTitle})</>
+                                : <>{formatEventTime(cm.CreatedAt)}💬 {cm.Content}<span className="opacity-60 text-[9px] block font-normal">ضمن مهمة: {cm.TaskTitle}</span></>
+                              }
                             </button>
                           );
                         })}

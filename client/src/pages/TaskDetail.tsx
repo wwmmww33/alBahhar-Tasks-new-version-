@@ -383,12 +383,14 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     }
   };
 
-  const handleCommentSubmit = async (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean }) => {
+  const handleCommentSubmit = async (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean; calendarEndDate?: string | null; calendarBroadcastDepartmentId?: number | null }) => {
     setIsSubmittingComment(true);
     try {
         // التعامل مع البيانات القديمة (string) والجديدة (object)
         let content: string;
         let calendarDisplayDate: string | null = null;
+        let calendarEndDate: string | null = null;
+        let calendarBroadcastDepartmentId: number | null = null;
         let showInCalendar = false;
 
         if (typeof commentData === 'string') {
@@ -396,6 +398,8 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         } else {
             content = commentData.content;
             calendarDisplayDate = commentData.calendarDisplayDate;
+            calendarEndDate = commentData.calendarEndDate ?? null;
+            calendarBroadcastDepartmentId = commentData.calendarBroadcastDepartmentId ?? null;
             if (typeof commentData.showInCalendar === 'boolean') {
               showInCalendar = commentData.showInCalendar;
             }
@@ -412,6 +416,12 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         // تاريخ ظهور التعليق في التقويم (مستقل عن تاريخ الإنشاء الفعلي)
         if (showInCalendar && calendarDisplayDate) {
             requestBody.CalendarDisplayDate = calendarDisplayDate;
+            if (calendarEndDate) {
+                requestBody.CalendarEndDate = calendarEndDate;
+            }
+            if (calendarBroadcastDepartmentId) {
+                requestBody.CalendarBroadcastDepartmentID = calendarBroadcastDepartmentId;
+            }
         }
 
         const res = await fetch(getApiUrl('comments'), {

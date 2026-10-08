@@ -2,7 +2,7 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 const { hasActiveDelegation, checkTaskAccess } = require('../utils/delegationUtils');
-const { setItemDepartmentShares, canManageDepartmentSharingAndBroadcast, resolveAllowedBroadcastChain } = require('../utils/departmentSharing');
+const { setItemDepartmentShares, canManageDepartmentSharingAndBroadcast, resolveAllowedBroadcastChain, isWithinItemBroadcastNarrowingChain } = require('../utils/departmentSharing');
 const { resolveActorContext } = require('../utils/vacancyResolver');
 
 async function resolveActorId(pool, rawUserId, prefersVacancy) {
@@ -155,7 +155,7 @@ function hasCommentOwnership(existingComment, actorCandidates) {
 
 exports.createComment = async (req, res) => {
     const pool = req.app.locals.db;
-    const { TaskID, UserID, ActedBy, Content, ShowInCalendar, CalendarDisplayDate, isAdmin } = req.body;
+    const { TaskID, UserID, ActedBy, Content, ShowInCalendar, CalendarDisplayDate, CalendarEndDate, CalendarBroadcastDepartmentID, isAdmin } = req.body;
 
     if (!TaskID || !UserID || !Content) {
         return res.status(400).json({ message: 'TaskID, UserID, and Content are required.' });
@@ -170,6 +170,8 @@ exports.createComment = async (req, res) => {
                 CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentLastActedByVacancy,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentShowInCalendar,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarDisplayDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentCalendarDisplayDate,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarEndDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentCalendarEndDate,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarBroadcastDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasBroadcastDeptCol,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyUser,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifCommentedByVacancy,
@@ -206,11 +208,40 @@ exports.createComment = async (req, res) => {
         // المستخدم عبر نافذة اختيار تاريخ/وقت في الواجهة. إن غاب لأي سبب نسقط افتراضياً للحظة
         // الحالية بدلاً من رفض الطلب.
         let calendarDisplayDate = null;
+        let calendarEndDate = null;
         if (ShowInCalendar) {
             calendarDisplayDate = CalendarDisplayDate ? new Date(CalendarDisplayDate) : new Date();
             if (isNaN(calendarDisplayDate.getTime())) {
                 return res.status(400).json({ message: 'Invalid CalendarDisplayDate date format.' });
             }
+            // تاريخ نهاية اختياري — يجعل التعليق يظهر كحدث ممتد (بداية/نهاية) بلا حاجة لإسناده
+            // لأي شخص، بنفس فكرة بداية/نهاية المهمة الفرعية.
+            if (CalendarEndDate) {
+                calendarEndDate = new Date(CalendarEndDate);
+                if (isNaN(calendarEndDate.getTime())) {
+                    return res.status(400).json({ message: 'Invalid CalendarEndDate date format.' });
+                }
+                if (calendarEndDate.getTime() < calendarDisplayDate.getTime()) {
+                    return res.status(400).json({ message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية.' });
+                }
+            }
+        }
+
+        // مستوى بث التعليق في التقويم لا يتجاوز مستوى بث المهمة نفسها — راجع التوضيح في
+        // isWithinItemBroadcastNarrowingChain (subtaskController.createSubtask لنفس المنطق).
+        let requestedBroadcastDeptId = CalendarBroadcastDepartmentID == null ? null : parseInt(CalendarBroadcastDepartmentID, 10);
+        if (requestedBroadcastDeptId != null && ShowInCalendar) {
+            const taskRow = await pool.request().input('TaskID', sql.Int, TaskID)
+                .query('SELECT DepartmentID, CalendarBroadcastDepartmentID FROM Tasks WHERE TaskID = @TaskID');
+            const taskInfo = taskRow.recordset[0];
+            const valid = taskInfo && await isWithinItemBroadcastNarrowingChain(
+                pool, taskInfo.DepartmentID, taskInfo.CalendarBroadcastDepartmentID, requestedBroadcastDeptId
+            );
+            if (!valid) {
+                return res.status(400).json({ message: 'مستوى البث المطلوب يتجاوز مستوى بث المهمة.' });
+            }
+        } else {
+            requestedBroadcastDeptId = null;
         }
 
         let actorUserId = null;
@@ -263,6 +294,18 @@ exports.createComment = async (req, res) => {
             insertRequest.input('CalendarDisplayDate', sql.DateTime, calendarDisplayDate);
             insertColumns.push('CalendarDisplayDate');
             insertValues.push('@CalendarDisplayDate');
+        }
+
+        if (schema.HasCommentCalendarEndDate) {
+            insertRequest.input('CalendarEndDate', sql.DateTime, calendarEndDate);
+            insertColumns.push('CalendarEndDate');
+            insertValues.push('@CalendarEndDate');
+        }
+
+        if (schema.HasBroadcastDeptCol) {
+            insertRequest.input('CalendarBroadcastDepartmentID', sql.Int, requestedBroadcastDeptId);
+            insertColumns.push('CalendarBroadcastDepartmentID');
+            insertValues.push('@CalendarBroadcastDepartmentID');
         }
 
         await insertRequest.query(`
@@ -359,7 +402,7 @@ exports.createComment = async (req, res) => {
 exports.updateComment = async (req, res) => {
     const pool = req.app.locals.db;
     const { commentId } = req.params;
-    const { Content, UserID, ShowInCalendar, CalendarDisplayDate, isAdmin } = req.body || {};
+    const { Content, UserID, ShowInCalendar, CalendarDisplayDate, CalendarEndDate, CalendarBroadcastDepartmentID, isAdmin } = req.body || {};
 
     if (!commentId || !UserID) {
         return res.status(400).json({ message: 'commentId and UserID are required.' });
@@ -377,7 +420,9 @@ exports.updateComment = async (req, res) => {
                 CASE WHEN COL_LENGTH('dbo.Comments', 'CommentedByUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentedByUser,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'LastActedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasLastActedByVacancy,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'ShowInCalendar') IS NOT NULL THEN 1 ELSE 0 END AS HasShowInCalendar,
-                CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarDisplayDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCalendarDisplayDate
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarDisplayDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCalendarDisplayDate,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarEndDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCalendarEndDate,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarBroadcastDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasBroadcastDeptCol
         `);
         const schema = schemaProbe.recordset[0] || {};
 
@@ -402,16 +447,30 @@ exports.updateComment = async (req, res) => {
 
         const existing = existingResult.recordset[0];
         const actingUserId = UserID.toString();
+        const isAdminFlag = isAdmin === true || isAdmin === 'true';
         const actorCandidates = await resolveActorCandidates(pool, actingUserId);
         const ownsComment = hasCommentOwnership(existing, actorCandidates);
 
-        const accessCheck = await checkTaskAccess(pool, existing.TaskID, actingUserId, isAdmin === true || isAdmin === 'true', 'edit');
+        const accessCheck = await checkTaskAccess(pool, existing.TaskID, actingUserId, isAdminFlag, 'edit');
         if (!accessCheck.hasAccess && !ownsComment) {
             return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية تعديل هذا التعليق.' });
         }
 
-        if (!ownsComment) {
-            return res.status(403).json({ message: 'لا تملك صلاحية تعديل هذا التعليق.' });
+        // تعديل نص التعليق يبقى حصراً لصاحبه، تماماً كالسابق. إظهار/إخفاء التعليق في التقويم
+        // (وتاريخه ومستوى بثه) ليس تعديلاً لمحتوى التعليق — فيُسمح به لصاحب التعليق أو لمدير القسم
+        // المستقل (أو المفوَّض له) تحديداً، لا لأي متعاون في المهمة بشكل عام.
+        const onlyTogglingCalendar = typeof Content === 'undefined';
+        let isDeptManager = false;
+        if (!ownsComment && onlyTogglingCalendar) {
+            const taskDeptRow = await pool.request().input('TaskID', sql.Int, existing.TaskID)
+                .query('SELECT DepartmentID FROM Tasks WHERE TaskID = @TaskID');
+            const taskDeptId = taskDeptRow.recordset[0]?.DepartmentID;
+            isDeptManager = taskDeptId != null
+                ? await canManageDepartmentSharingAndBroadcast(pool, actingUserId, isAdminFlag, taskDeptId)
+                : false;
+        }
+        if (!ownsComment && !isDeptManager) {
+            return res.status(403).json({ message: 'إظهار التعليق في التقويم متاح لصاحبه أو لمدير القسم المستقل فقط.' });
         }
 
         if (typeof ShowInCalendar !== 'undefined' && !schema.HasShowInCalendar) {
@@ -439,8 +498,45 @@ exports.updateComment = async (req, res) => {
                     }
                     request.input('CalendarDisplayDate', sql.DateTime, parsed);
                     setClauses.push('CalendarDisplayDate = @CalendarDisplayDate');
+
+                    if (schema.HasCalendarEndDate) {
+                        if (CalendarEndDate) {
+                            const parsedEnd = new Date(CalendarEndDate);
+                            if (isNaN(parsedEnd.getTime())) {
+                                return res.status(400).json({ message: 'Invalid CalendarEndDate date format.' });
+                            }
+                            if (parsedEnd.getTime() < parsed.getTime()) {
+                                return res.status(400).json({ message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية.' });
+                            }
+                            request.input('CalendarEndDate', sql.DateTime, parsedEnd);
+                            setClauses.push('CalendarEndDate = @CalendarEndDate');
+                        } else {
+                            setClauses.push('CalendarEndDate = NULL');
+                        }
+                    }
+
+                    // مستوى بث التعليق لا يتجاوز مستوى بث المهمة نفسها — راجع التوضيح في
+                    // isWithinItemBroadcastNarrowingChain.
+                    if (schema.HasBroadcastDeptCol) {
+                        let requestedBroadcastDeptId = CalendarBroadcastDepartmentID == null ? null : parseInt(CalendarBroadcastDepartmentID, 10);
+                        if (requestedBroadcastDeptId != null) {
+                            const taskRow = await pool.request().input('TaskID', sql.Int, existing.TaskID)
+                                .query('SELECT DepartmentID, CalendarBroadcastDepartmentID FROM Tasks WHERE TaskID = @TaskID');
+                            const taskInfo = taskRow.recordset[0];
+                            const valid = taskInfo && await isWithinItemBroadcastNarrowingChain(
+                                pool, taskInfo.DepartmentID, taskInfo.CalendarBroadcastDepartmentID, requestedBroadcastDeptId
+                            );
+                            if (!valid) {
+                                return res.status(400).json({ message: 'مستوى البث المطلوب يتجاوز مستوى بث المهمة.' });
+                            }
+                        }
+                        request.input('CalendarBroadcastDepartmentID', sql.Int, requestedBroadcastDeptId);
+                        setClauses.push('CalendarBroadcastDepartmentID = @CalendarBroadcastDepartmentID');
+                    }
                 } else {
                     setClauses.push('CalendarDisplayDate = NULL');
+                    if (schema.HasCalendarEndDate) setClauses.push('CalendarEndDate = NULL');
+                    if (schema.HasBroadcastDeptCol) setClauses.push('CalendarBroadcastDepartmentID = NULL');
                 }
             }
         }

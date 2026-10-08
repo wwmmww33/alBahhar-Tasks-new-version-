@@ -23,7 +23,8 @@ exports.getPublicCalendar = async (req, res) => {
       SELECT
         COL_LENGTH('dbo.Subtasks','IsPublicBroadcast') AS SubtaskLen,
         COL_LENGTH('dbo.Comments','IsPublicBroadcast') AS CommentLen,
-        COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS CalDisplayDateLen
+        COL_LENGTH('dbo.Comments','CalendarDisplayDate') AS CalDisplayDateLen,
+        COL_LENGTH('dbo.Comments','CalendarEndDate') AS CalEndDateLen
     `);
     const p = colProbe.recordset[0] || {};
 
@@ -55,8 +56,9 @@ exports.getPublicCalendar = async (req, res) => {
 
     if (p.CommentLen) {
       const commentDateExpr = p.CalDisplayDateLen ? 'COALESCE(c.CalendarDisplayDate, c.CreatedAt)' : 'c.CreatedAt';
+      const endDateSelect = p.CalEndDateLen ? 'c.CalendarEndDate' : 'CAST(NULL AS DATETIME)';
       const commentResult = await pool.request().query(`
-        SELECT TOP (${MAX_EVENTS}) c.CommentID, c.Content, ${commentDateExpr} AS EventDate, t.Title AS TaskTitle
+        SELECT TOP (${MAX_EVENTS}) c.CommentID, c.Content, ${commentDateExpr} AS EventDate, ${endDateSelect} AS EventEndDate, t.Title AS TaskTitle
         FROM dbo.Comments c
         INNER JOIN dbo.Tasks t ON t.TaskID = c.TaskID
         WHERE c.ShowInCalendar = 1 AND c.IsPublicBroadcast = 1 AND t.PersonalOwnerUserID IS NULL
@@ -73,7 +75,7 @@ exports.getPublicCalendar = async (req, res) => {
           title: content,
           taskTitle,
           startDate: row.EventDate,
-          endDate: null,
+          endDate: row.EventEndDate || null,
         });
       }
     }

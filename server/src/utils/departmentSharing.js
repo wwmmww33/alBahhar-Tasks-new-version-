@@ -52,25 +52,31 @@ async function resolveFullAncestorChain(pool, departmentId) {
   const colProbe = await pool.request().query(`
     SELECT
       CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
-      CASE WHEN COL_LENGTH('dbo.Departments','ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID
+      CASE WHEN COL_LENGTH('dbo.Departments','ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+      CASE WHEN COL_LENGTH('dbo.Departments','IsIndependent') IS NOT NULL THEN 1 ELSE 0 END AS HasIsIndependent
   `);
   const p = colProbe.recordset[0] || {};
   const parentCol = p.HasParentDeptID ? 'ParentDepartmentID' : (p.HasParentID ? 'ParentID' : null);
+  // عمود IsIndependent (البديل المخصّص لعلامة الاستقلالية — راجع التوضيح أعلى الملف) قد لا يكون
+  // موجوداً بعد على قاعدة بيانات لم تُرحَّل؛ نستثني TRY_CAST(Type AS INT)=1 كاحتياط دفاعي فقط.
+  const independentSelect = p.HasIsIndependent
+    ? 'IsIndependent'
+    : "CASE WHEN TRY_CAST([Type] AS INT) = 1 THEN 1 ELSE 0 END AS IsIndependent";
   if (!parentCol) {
     const r = await pool.request().input('DepartmentID', sql.Int, departmentId)
-      .query('SELECT DepartmentID, Name, [Type], CAST(NULL AS INT) AS ParentDepartmentID FROM dbo.Departments WHERE DepartmentID = @DepartmentID');
+      .query(`SELECT DepartmentID, Name, [Type], ${independentSelect}, CAST(NULL AS INT) AS ParentDepartmentID FROM dbo.Departments WHERE DepartmentID = @DepartmentID`);
     return r.recordset;
   }
   const result = await pool.request().input('DepartmentID', sql.Int, departmentId).query(`
     ;WITH UpTree AS (
-      SELECT DepartmentID, Name, [Type], ${parentCol} AS ParentDepartmentID, 0 AS Depth
+      SELECT DepartmentID, Name, [Type], ${independentSelect}, ${parentCol} AS ParentDepartmentID, 0 AS Depth
       FROM dbo.Departments WHERE DepartmentID = @DepartmentID
       UNION ALL
-      SELECT d.DepartmentID, d.Name, d.[Type], d.${parentCol} AS ParentDepartmentID, u.Depth + 1
+      SELECT d.DepartmentID, d.Name, d.[Type], ${p.HasIsIndependent ? 'd.IsIndependent' : "CASE WHEN TRY_CAST(d.[Type] AS INT) = 1 THEN 1 ELSE 0 END"}, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
       FROM dbo.Departments d INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
       WHERE u.Depth < 15
     )
-    SELECT DepartmentID, Name, [Type], ParentDepartmentID FROM UpTree ORDER BY Depth ASC
+    SELECT DepartmentID, Name, [Type], IsIndependent, ParentDepartmentID FROM UpTree ORDER BY Depth ASC
     OPTION (MAXRECURSION 20)
   `);
   return result.recordset;
@@ -383,6 +389,20 @@ async function isTrueSystemAdmin(pool, rawUserId) {
   }
 }
 
+// يتحقق هل قيمة مستوى بث مطلوبة لعنصر (مهمة فرعية/تعليق) صالحة لـ"تضييق" اختياري من قِبل منشئ
+// العنصر العادي — أي ضمن سلسلة أسلاف قسم المهمة، من قسم المهمة نفسه وحتى مستوى بث المهمة الحالي
+// (Tasks.CalendarBroadcastDepartmentID) شاملاً، بلا تجاوزه أبداً. التصعيد لمستوى أعلى يبقى حصراً
+// لمدير القسم عبر مستوى بث المهمة نفسه (canManageDepartmentSharingAndBroadcast + مستوى بث المهمة).
+// يُعيد true أيضاً إن لم تكن المهمة تحمل مستوى بث مضبوطاً والقيمة المطلوبة = قسم المهمة نفسه (لا تضييق فعلي).
+async function isWithinItemBroadcastNarrowingChain(pool, taskDepartmentId, taskBroadcastDepartmentId, requestedDeptId) {
+  if (requestedDeptId == null) return true;
+  const chain = await resolveFullAncestorChain(pool, taskDepartmentId);
+  const ceilingId = taskBroadcastDepartmentId ?? taskDepartmentId;
+  const ceilingIdx = chain.findIndex(d => d.DepartmentID === ceilingId);
+  const allowed = ceilingIdx === -1 ? chain.slice(0, 1) : chain.slice(0, ceilingIdx + 1);
+  return allowed.some(d => d.DepartmentID === requestedDeptId);
+}
+
 module.exports = {
   isDelegatedSharingManager,
   canManageDepartmentSharingAndBroadcast,
@@ -404,4 +424,5 @@ module.exports = {
   getPublicCalendarTitle,
   setPublicCalendarTitle,
   getPublicCalendarSettings,
+  isWithinItemBroadcastNarrowingChain,
 };

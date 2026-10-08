@@ -841,6 +841,45 @@ module.exports = {
     }
   },
 
+  // علامة الاستقلالية (القسم المستقل) كانت مُحمَّلة ضمنياً على Departments.Type (عمود نصي وصفي
+  // Type=NVARCHAR يحمل أيضاً تسميات حرة كـ"مديرية"/"قسم") بالقيمة النصية "1" — تعارض خطير بين
+  // علامة بنيوية وتسمية وصفية حرة (سبب خلل سابق: شارة مستوى البث لم تظهر أبداً بسبب مقارنة رقم
+  // بنص، وقبله: أي حفظ للقسم عبر نموذج التعديل كان يمحو التسمية الوصفية المستورَدة من إكسل صمتاً).
+  // الحل: عمود IsIndependent BIT مخصّص ومستقل تماماً عن Type، ونرحّل القيمة القديمة إليه، ثم نستعيد
+  // التسمية الوصفية الصحيحة لمن كان Type فيه هو السلسلة "1" فقط (تحويلها إلى "مديرية").
+  ensureDepartmentIsIndependentColumn: async function ensureDepartmentIsIndependentColumn(pool) {
+    try {
+      const check = await pool.request().query(`SELECT COL_LENGTH('dbo.Departments','IsIndependent') AS Len`);
+      if (!check.recordset[0]?.Len) {
+        await pool.request().query(`ALTER TABLE dbo.Departments ADD IsIndependent BIT NULL;`);
+        console.log('✅ Added Departments.IsIndependent column.');
+      } else {
+        console.log('ℹ️ Departments.IsIndependent already exists.');
+      }
+      // ترحيل/تنظيف دفاعي يُعاد تشغيله كل بدء تشغيل (آمن: لا يؤثر إلا على صفوف لم تُرحَّل بعد) —
+      // يتعامل أيضاً مع صفوف أُنشئت بالطريقة القديمة (Type='1') قبل أن يتوقف نموذج الواجهة عن ذلك.
+      const typeColCheck = await pool.request().query(`SELECT COL_LENGTH('dbo.Departments','Type') AS Len`);
+      if (typeColCheck.recordset[0]?.Len) {
+        const result = await pool.request().query(`
+          UPDATE dbo.Departments SET IsIndependent = 1
+          WHERE (IsIndependent IS NULL OR IsIndependent = 0) AND TRY_CAST(Type AS INT) = 1;
+
+          UPDATE dbo.Departments SET Type = N'مديرية'
+          WHERE TRY_CAST(Type AS INT) = 1;
+        `);
+        const affected = Array.isArray(result.rowsAffected) ? result.rowsAffected.reduce((a, b) => a + b, 0) : 0;
+        if (affected > 0) {
+          console.log(`✅ Migrated ${affected} legacy Type='1' department row(s) to IsIndependent + descriptive Type='مديرية'.`);
+        }
+      }
+      await pool.request().query(`UPDATE dbo.Departments SET IsIndependent = 0 WHERE IsIndependent IS NULL;`);
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring Departments.IsIndependent column:', err);
+      throw err;
+    }
+  },
+
   // تفويض إداري موسّع على مستوى المنصب: يمنحه مدير القسم المستقل لمنصب آخر ضمن مديريته،
   // فيصبح بإمكان حامل هذا المنصب فتح/إغلاق قنوات المشاركة مع مديريات أخرى، والتحكم بمستوى
   // بث التقويم (للمهمة وللعنصر) — بنفس نطاق صلاحية المدير الحقيقي (كل مديريته المستقلة).
@@ -1003,6 +1042,30 @@ module.exports = {
       return { changed: true };
     } catch (err) {
       console.error('❌ Failed ensuring IsPublicBroadcast columns:', err);
+      throw err;
+    }
+  },
+
+  // تاريخ نهاية اختياري لظهور التعليق في التقويم — يسمح بعرض تعليق كـ"حدث ممتد" (بداية ونهاية،
+  // كالمهمة الفرعية تماماً) دون الحاجة لإسناده لأي شخص، لأن التعليقات أصلاً بلا مُسنَد إليه.
+  // CalendarDisplayDate يبقى تاريخ البداية؛ هذا الحقل هو النهاية فقط، واختياري (NULL = نقطة
+  // زمنية واحدة لا تمتد، السلوك الحالي بلا تغيير).
+  ensureCommentCalendarEndDateColumn: async function ensureCommentCalendarEndDateColumn(pool) {
+    try {
+      const check = await pool.request().query(
+        `SELECT COL_LENGTH('dbo.Comments','CalendarEndDate') AS Len`
+      );
+      if (check.recordset[0].Len) {
+        console.log('ℹ️ Comments.CalendarEndDate already exists.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        ALTER TABLE dbo.Comments ADD CalendarEndDate DATETIME NULL;
+      `);
+      console.log('✅ Added Comments.CalendarEndDate column.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring Comments.CalendarEndDate:', err);
       throw err;
     }
   },

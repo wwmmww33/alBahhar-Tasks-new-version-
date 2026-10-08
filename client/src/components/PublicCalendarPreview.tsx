@@ -265,52 +265,57 @@ const PublicCalendarPreview = ({ onAvailabilityChange, className = 'w-full max-w
           const isSpanEndOnly = !hasEvents && day.spanSegments.some(s => s.position === 'end');
           const showHeader = hasEvents || isSpanEndOnly || isToday;
           return (
-            <div key={day.key} className="flex items-stretch gap-2">
-              {laneCount > 0 && (
-                <div className="relative shrink-0" style={{ width: laneCount * LANE_WIDTH }}>
-                  {day.spanSegments.map(seg => {
-                    const isDimmed = hoveredSpanId !== null && hoveredSpanId !== seg.id;
-                    return (
-                      <div
-                        key={seg.id}
-                        className="absolute rounded-full cursor-pointer transition-opacity duration-150"
-                        style={{
-                          right: seg.lane * LANE_WIDTH + 2,
-                          width: 4,
-                          backgroundColor: seg.color,
-                          top: seg.position === 'start' ? '50%' : 0,
-                          bottom: seg.position === 'end' ? '50%' : 0,
-                          opacity: isDimmed ? 0.12 : 1,
-                        }}
-                        onMouseEnter={() => setHoveredSpanId(seg.id)}
-                        onMouseLeave={() => setHoveredSpanId(null)}
-                      />
-                    );
-                  })}
-                </div>
-              )}
-              <div className={`flex-1 min-w-0 ${showHeader ? 'pb-4' : 'pb-1.5'}`}>
-                {showHeader && (
-                  <p className={`text-xs font-semibold mb-1.5 ${hasEvents ? 'text-primary' : 'text-content-secondary'}`}>
-                    {formatDayLabel(day.date)}
-                  </p>
-                )}
-                {hasEvents && (
-                  <div className="space-y-1.5">
-                    {day.events.map((ev, idx) => {
-                      const timeRange = formatEventTimeRange(ev);
-                      // لا نُكرر توقيتاً مطابقاً لتوقيت الحدث السابق مباشرة ضمن نفس اليوم.
-                      const prevTimeRange = idx > 0 ? formatEventTimeRange(day.events[idx - 1]) : null;
-                      const showTime = !!timeRange && timeRange !== prevTimeRange;
-                      return renderCard(ev, timeRange, showTime);
+            <div key={day.key}>
+              <div className="flex items-stretch gap-2">
+                {laneCount > 0 && (
+                  <div className="relative shrink-0" style={{ width: laneCount * LANE_WIDTH }}>
+                    {day.spanSegments.map(seg => {
+                      const isDimmed = hoveredSpanId !== null && hoveredSpanId !== seg.id;
+                      return (
+                        <div
+                          key={seg.id}
+                          className="absolute rounded-full cursor-pointer transition-opacity duration-150"
+                          style={{
+                            right: seg.lane * LANE_WIDTH + 2,
+                            width: 4,
+                            backgroundColor: seg.color,
+                            top: seg.position === 'start' ? '50%' : 0,
+                            bottom: seg.position === 'end' ? '50%' : 0,
+                            opacity: isDimmed ? 0.12 : 1,
+                          }}
+                          onMouseEnter={() => setHoveredSpanId(seg.id)}
+                          onMouseLeave={() => setHoveredSpanId(null)}
+                        />
+                      );
                     })}
                   </div>
                 )}
-                {!showHeader && (
-                  // يوم عبور بلا أحداث خاصة به — موجود فقط ليحمل خط امتداد حدث آخر
-                  <div className="h-3" />
-                )}
+                <div className={`flex-1 min-w-0 ${showHeader ? 'pb-2' : 'pb-1.5'}`}>
+                  {showHeader && (
+                    <p className={`text-xs font-semibold mb-1.5 ${hasEvents ? 'text-primary' : 'text-content-secondary'}`}>
+                      {formatDayLabel(day.date)}
+                    </p>
+                  )}
+                  {hasEvents && (
+                    <div className="space-y-1.5">
+                      {day.events.map((ev, idx) => {
+                        const timeRange = formatEventTimeRange(ev);
+                        // لا نُكرر توقيتاً مطابقاً لتوقيت الحدث السابق مباشرة ضمن نفس اليوم.
+                        const prevTimeRange = idx > 0 ? formatEventTimeRange(day.events[idx - 1]) : null;
+                        const showTime = !!timeRange && timeRange !== prevTimeRange;
+                        return renderCard(ev, timeRange, showTime);
+                      })}
+                    </div>
+                  )}
+                  {!showHeader && (
+                    // يوم عبور بلا أحداث خاصة به — موجود فقط ليحمل خط امتداد حدث آخر
+                    <div className="h-3" />
+                  )}
+                </div>
               </div>
+              {/* خط فاصل يمتد لعرض عارض التقويم العام كاملاً (يتخطى حشو البطاقة) للتمييز بصرياً
+                  بين يوم وآخر — يُعرض فقط بعد يوم له عنوان ظاهر فعلياً. */}
+              {showHeader && <div className="border-b border-gray-200 dark:border-gray-700 -mx-6 mb-3" />}
             </div>
           );
         })}

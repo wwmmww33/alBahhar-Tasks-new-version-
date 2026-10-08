@@ -445,6 +445,7 @@ async function hasDirectorateAccessByTaskDepartment(pool, effectiveActorId, task
       CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
       CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
       CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDepartmentType,
+      CASE WHEN COL_LENGTH('dbo.Departments', 'IsIndependent') IS NOT NULL THEN 1 ELSE 0 END AS HasIsIndependent,
       CASE WHEN COL_LENGTH('dbo.Users', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasUsersDepartmentID,
       CASE WHEN COL_LENGTH('dbo.Users', 'LegacyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasLegacyUserID,
       CASE WHEN COL_LENGTH('dbo.Users', 'ServiceID') IS NOT NULL THEN 1 ELSE 0 END AS HasServiceID,
@@ -559,7 +560,7 @@ async function hasDirectorateAccessByTaskDepartment(pool, effectiveActorId, task
         SELECT u.DepartmentID, u.Depth
         FROM UpTree u
         INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
-        WHERE ${p.HasDepartmentType ? `(TRY_CAST(d.[Type] AS INT) = 1 OR LTRIM(RTRIM(CAST(d.[Type] AS NVARCHAR(50)))) = N'1')` : '1=0'}
+        WHERE ${p.HasIsIndependent ? 'd.IsIndependent = 1' : (p.HasDepartmentType ? `(TRY_CAST(d.[Type] AS INT) = 1 OR LTRIM(RTRIM(CAST(d.[Type] AS NVARCHAR(50)))) = N'1')` : '1=0')}
       ) x
       ORDER BY x.Depth ASC
       OPTION (MAXRECURSION 10)

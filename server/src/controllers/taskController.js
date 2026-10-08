@@ -170,6 +170,7 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
           CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
           CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
           CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDepartmentType,
+          CASE WHEN COL_LENGTH('dbo.Departments', 'IsIndependent') IS NOT NULL THEN 1 ELSE 0 END AS HasIsIndependent,
           CASE WHEN COL_LENGTH('dbo.Users', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasUsersDepartmentID,
           CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
           CASE WHEN COL_LENGTH('dbo.vw_UserCurrentProfile', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileDepartmentID,
@@ -279,8 +280,12 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
     baseDepartmentId = String(baseDepartmentId).trim();
     if (!baseDepartmentId || !/^\d+$/.test(baseDepartmentId)) return [];
 
+    const isIndependentExpr = p.HasIsIndependent
+        ? 'd.IsIndependent = 1'
+        : (p.HasDepartmentType ? 'TRY_CAST(d.[Type] AS INT) = 1' : '1=0');
+
     let rootDepartmentId = baseDepartmentId;
-    if (p.HasDepartmentType) {
+    if (p.HasIsIndependent || p.HasDepartmentType) {
         const rootResult = await pool.request()
             .input('DepartmentID', sql.NVarChar, baseDepartmentId)
             .query(`
@@ -298,7 +303,7 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
                 SELECT TOP 1 u.DepartmentID
                 FROM UpTree u
                 INNER JOIN dbo.Departments d ON d.DepartmentID = u.DepartmentID
-                WHERE TRY_CAST(d.[Type] AS INT) = 1
+                WHERE ${isIndependentExpr}
                 ORDER BY u.Depth ASC
                 OPTION (MAXRECURSION 10)
             `);
@@ -309,9 +314,11 @@ async function resolveUserDirectorateDepartmentIds(pool, rawUserId) {
     }
     if (!rootDepartmentId || !/^\d+$/.test(String(rootDepartmentId))) return [];
 
-    const typeStopClause = p.HasDepartmentType
-        ? `AND (TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)`
-        : '';
+    const typeStopClause = p.HasIsIndependent
+        ? `AND (d.IsIndependent IS NULL OR d.IsIndependent = 0)`
+        : (p.HasDepartmentType
+          ? `AND (TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)`
+          : '');
 
     const deptTreeResult = await pool.request()
         .input('RootDepartmentID', sql.NVarChar, rootDepartmentId)

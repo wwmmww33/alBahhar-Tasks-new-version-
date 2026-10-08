@@ -293,6 +293,7 @@ async function resolveIndependentDeptGroup(pool, deptId) {
       SELECT
         CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
         CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
+        CASE WHEN COL_LENGTH('dbo.Departments','IsIndependent')      IS NOT NULL THEN 1 ELSE 0 END AS HasIsIndependent,
         CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasType
     `);
     const p = probe.recordset[0] || {};
@@ -307,22 +308,26 @@ async function resolveIndependentDeptGroup(pool, deptId) {
 
     let rootId = deptIdInt;
 
-    if (p.HasType) {
-      // اصعد في الشجرة للعثور على أقرب قسم مستقل (Type=1)، قد يكون القسم نفسه
+    if (p.HasIsIndependent || p.HasType) {
+      // اصعد في الشجرة للعثور على أقرب قسم مستقل، قد يكون القسم نفسه. IsIndependent هو عمود
+      // الاستقلالية المخصّص (راجع departmentSharing.js)؛ TRY_CAST([Type] AS INT)=1 يبقى احتياطاً
+      // دفاعياً فقط لقاعدة بيانات لم تُرحَّل بعد.
+      const deptTypeExpr = p.HasIsIndependent ? 'IsIndependent' : 'TRY_CAST([Type] AS INT)';
+      const deptTypeExprRec = p.HasIsIndependent ? 'd.IsIndependent' : 'TRY_CAST(d.[Type] AS INT)';
       const upRes = await pool.request()
         .input('DeptID', sql.Int, deptIdInt)
         .query(`
           ;WITH UpTree AS (
             SELECT DepartmentID,
                    TRY_CAST(${parentCol} AS INT)  AS ParentDeptID,
-                   TRY_CAST([Type] AS INT)         AS DeptType,
+                   ${deptTypeExpr}                 AS DeptType,
                    0 AS Depth
             FROM dbo.Departments
             WHERE DepartmentID = @DeptID
             UNION ALL
             SELECT d.DepartmentID,
                    TRY_CAST(d.${parentCol} AS INT),
-                   TRY_CAST(d.[Type] AS INT),
+                   ${deptTypeExprRec},
                    u.Depth + 1
             FROM dbo.Departments d
             INNER JOIN UpTree u
