@@ -175,28 +175,37 @@ exports.transferVacancy = async (req, res) => {
             const deptRow = deptCheck.recordset[0] || {};
             if (!deptRow.ToDept) return res.status(404).json({ message: 'المنصب المستهدف غير موجود.' });
 
-            // فحص وجود عمود Type وعمود الأب في الأقسام
+            // فحص وجود عمود الاستقلالية (IsIndependent) أو Type احتياطاً، وعمود الأب في الأقسام
             const deptSchemaProbe = await pool.request().query(`
                 SELECT
+                    CASE WHEN COL_LENGTH('dbo.Departments','IsIndependent')      IS NOT NULL THEN 1 ELSE 0 END AS HasIsIndependent,
                     CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasType,
                     CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
                     CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID
             `);
             const ds = deptSchemaProbe.recordset[0] || {};
             const parentCol = ds.HasParentID ? 'ParentID' : (ds.HasParentDeptID ? 'ParentDepartmentID' : null);
+            // IsIndependent هو عمود الاستقلالية المخصّص (راجع departmentSharing.js)؛ Type أصبح وصفياً
+            // بحتاً ولا يُستخدم كعلامة استقلالية بعد الآن. TRY_CAST(Type)=1 يبقى احتياطاً دفاعياً فقط.
+            const hasIndependenceInfo = ds.HasIsIndependent || ds.HasType;
+            const dTypeAnchorExpr = ds.HasIsIndependent ? 'IsIndependent' : 'TRY_CAST([Type] AS INT)';
+            const dTypeRecExpr = ds.HasIsIndependent ? 'd.IsIndependent' : 'TRY_CAST(d.[Type] AS INT)';
+            const dTypeStopExpr = ds.HasIsIndependent
+                ? '(d.IsIndependent IS NULL OR d.IsIndependent = 0)'
+                : '(TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)';
 
-            if (ds.HasType && parentCol) {
-                // نجد جذر Type=1 لمنصب المصدر، ثم نتحقق أن قسم المنصب الهدف
+            if (hasIndependenceInfo && parentCol) {
+                // نجد الجذر المستقل لمنصب المصدر، ثم نتحقق أن قسم المنصب الهدف
                 // يقع ضمن النطاق الهابط من ذلك الجذر (يشمل الأقسام الفرعية المتداخلة).
                 const scopeCheck = await pool.request()
                     .input('FromDept', sql.Int, deptRow.FromDept)
                     .input('ToDept',   sql.Int, deptRow.ToDept)
                     .query(`
                         WITH FromAnc AS (
-                            SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, TRY_CAST([Type] AS INT) AS DType
+                            SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, ${dTypeAnchorExpr} AS DType
                             FROM dbo.Departments WHERE DepartmentID = @FromDept
                             UNION ALL
-                            SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT), TRY_CAST(d.[Type] AS INT)
+                            SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT), ${dTypeRecExpr}
                             FROM dbo.Departments d INNER JOIN FromAnc a ON a.PID IS NOT NULL AND d.DepartmentID = a.PID
                             WHERE a.DType IS NULL OR a.DType <> 1
                         ),
@@ -215,7 +224,7 @@ exports.transferVacancy = async (req, res) => {
                             FROM dbo.Departments d
                             INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
                                                    AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
-                            WHERE TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1
+                            WHERE ${dTypeStopExpr}
                         )
                         SELECT
                             (SELECT RootDeptID FROM FromRoot) AS FromRoot,

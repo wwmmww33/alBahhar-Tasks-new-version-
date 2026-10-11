@@ -821,6 +821,9 @@ const UnifiedTimeline = ({
       });
       if (resp.ok) {
         window.dispatchEvent(new CustomEvent('calendar:subtask:updated', { detail: { SubtaskID: subtask.SubtaskID, ShowInCalendar: nextShow } }));
+        // ShowInCalendar=false يخفي العنصر من التقويم العام أيضاً إن كان مُعلَّماً كبث مفتوح —
+        // راجع شرط /api/public/calendar (ShowInCalendar=1 AND IsPublicBroadcast=1).
+        window.dispatchEvent(new CustomEvent('calendar:public:updated'));
         onSubtaskUpdate();
         refreshTasks();
         refreshNotifications();
@@ -938,6 +941,7 @@ const UnifiedTimeline = ({
       if (resp.ok) {
         onCommentsUpdate();
         window.dispatchEvent(new CustomEvent('calendar:comment:updated', { detail: { CommentID: commentId, ShowInCalendar: next } }));
+        window.dispatchEvent(new CustomEvent('calendar:public:updated'));
       } else {
         const text = await resp.text().catch(() => '');
         alert(`فشل تحديث إظهار التعليق في التقويم (${resp.status}). ${text}`);
@@ -959,6 +963,7 @@ const UnifiedTimeline = ({
       });
       if (resp.ok) {
         onSubtaskUpdate();
+        window.dispatchEvent(new CustomEvent('calendar:public:updated'));
       } else {
         const data = await resp.json().catch(() => ({}));
         alert(data.message || 'فشل تحديث البث المفتوح للمهمة الفرعية.');
@@ -978,6 +983,7 @@ const UnifiedTimeline = ({
       });
       if (resp.ok) {
         onCommentsUpdate();
+        window.dispatchEvent(new CustomEvent('calendar:public:updated'));
       } else {
         const data = await resp.json().catch(() => ({}));
         alert(data.message || 'فشل تحديث البث المفتوح للتعليق.');

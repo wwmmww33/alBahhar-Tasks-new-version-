@@ -6,13 +6,17 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 const { getPublicCalendarSettings } = require('../utils/departmentSharing');
+const { checkTaskAccess } = require('../utils/delegationUtils');
 
 const MAX_EVENTS = 300;
 
-// GET /api/public/calendar — بلا مصادقة. يُرجع { enabled, title, events } دوماً؛ events=[] إذا
-// كان التقويم العام موقوفاً من المدير العام، حتى لو وُجدت عناصر عليها بث مفتوح.
+// GET /api/public/calendar — بلا مصادقة أساساً (صفحة الدخول). عند تمرير userId (من اللوحة
+// المنسدلة بعد تسجيل الدخول فقط) نتحقق إضافياً من صلاحية الوصول لمهمة كل عنصر، ونُرفق taskId
+// حصراً للعناصر التي يملك صاحب الطلب صلاحية فتحها — لا نكشف taskId مطلقاً بلا userId (زائر غير
+// مسجّل)، فتبقى خصوصية صفحة الدخول كما هي دون أي تغيير.
 exports.getPublicCalendar = async (req, res) => {
   const pool = req.app.locals.db;
+  const { userId, isAdmin } = req.query;
   try {
     const { enabled, title } = await getPublicCalendarSettings(pool);
     if (!enabled) {
@@ -32,7 +36,7 @@ exports.getPublicCalendar = async (req, res) => {
 
     if (p.SubtaskLen) {
       const subtaskResult = await pool.request().query(`
-        SELECT TOP (${MAX_EVENTS}) s.SubtaskID, s.Title, s.DueDate, s.EndDate, t.Title AS TaskTitle
+        SELECT TOP (${MAX_EVENTS}) s.SubtaskID, s.TaskID, s.Title, s.DueDate, s.EndDate, t.Title AS TaskTitle
         FROM dbo.Subtasks s
         INNER JOIN dbo.Tasks t ON t.TaskID = s.TaskID
         WHERE s.ShowInCalendar = 1 AND s.IsPublicBroadcast = 1 AND t.PersonalOwnerUserID IS NULL
@@ -46,6 +50,7 @@ exports.getPublicCalendar = async (req, res) => {
         events.push({
           type: 'subtask',
           id: row.SubtaskID,
+          taskId: row.TaskID,
           title,
           taskTitle,
           startDate: row.DueDate,
@@ -58,7 +63,7 @@ exports.getPublicCalendar = async (req, res) => {
       const commentDateExpr = p.CalDisplayDateLen ? 'COALESCE(c.CalendarDisplayDate, c.CreatedAt)' : 'c.CreatedAt';
       const endDateSelect = p.CalEndDateLen ? 'c.CalendarEndDate' : 'CAST(NULL AS DATETIME)';
       const commentResult = await pool.request().query(`
-        SELECT TOP (${MAX_EVENTS}) c.CommentID, c.Content, ${commentDateExpr} AS EventDate, ${endDateSelect} AS EventEndDate, t.Title AS TaskTitle
+        SELECT TOP (${MAX_EVENTS}) c.CommentID, c.TaskID, c.Content, ${commentDateExpr} AS EventDate, ${endDateSelect} AS EventEndDate, t.Title AS TaskTitle
         FROM dbo.Comments c
         INNER JOIN dbo.Tasks t ON t.TaskID = c.TaskID
         WHERE c.ShowInCalendar = 1 AND c.IsPublicBroadcast = 1 AND t.PersonalOwnerUserID IS NULL
@@ -72,6 +77,7 @@ exports.getPublicCalendar = async (req, res) => {
         events.push({
           type: 'comment',
           id: row.CommentID,
+          taskId: row.TaskID,
           title: content,
           taskTitle,
           startDate: row.EventDate,
@@ -82,7 +88,32 @@ exports.getPublicCalendar = async (req, res) => {
 
     events.sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
 
-    res.status(200).json({ enabled: true, title, events: events.slice(0, MAX_EVENTS) });
+    const trimmedEvents = events.slice(0, MAX_EVENTS);
+    const trimmedUserId = String(userId || '').trim();
+
+    if (!trimmedUserId) {
+      // زائر غير مسجّل (صفحة الدخول) — لا نُرفق taskId مطلقاً، حفاظاً على الخصوصية كما كانت.
+      for (const ev of trimmedEvents) delete ev.taskId;
+      return res.status(200).json({ enabled: true, title, events: trimmedEvents });
+    }
+
+    // مستخدم مسجَّل (اللوحة المنسدلة بعد الدخول) — نتحقق من صلاحية الوصول لكل مهمة على حدة
+    // (مرة واحدة فقط لكل TaskID مميَّز)، ونُبقي taskId فقط للعناصر المصرَّح بفتحها.
+    const isAdminFlag = isAdmin === true || isAdmin === 'true';
+    const distinctTaskIds = [...new Set(trimmedEvents.map(ev => ev.taskId).filter(id => id != null))];
+    const accessibleTaskIds = new Set();
+    await Promise.all(distinctTaskIds.map(async (taskId) => {
+      try {
+        const access = await checkTaskAccess(pool, taskId, trimmedUserId, isAdminFlag, 'view');
+        if (access?.hasAccess) accessibleTaskIds.add(taskId);
+      } catch (_) { /* تجاهل دفاعياً — يبقى العنصر غير قابل للفتح */ }
+    }));
+
+    for (const ev of trimmedEvents) {
+      if (!accessibleTaskIds.has(ev.taskId)) delete ev.taskId;
+    }
+
+    res.status(200).json({ enabled: true, title, events: trimmedEvents });
   } catch (err) {
     console.error('GET PUBLIC CALENDAR ERROR:', err);
     // دفاعياً: لا نكشف تفاصيل الخطأ لزائر غير مسجّل، ونعيد تقويماً فارغاً بدل خطأ 500 ظاهر

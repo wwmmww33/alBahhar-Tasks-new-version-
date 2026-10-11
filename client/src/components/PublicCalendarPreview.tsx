@@ -3,12 +3,16 @@
 // حدَّدها مدير القسم المستقل (أو المفوَّض له) صراحة كـ"بث مفتوح"، بصيغة قائمة زمنية (أقرب للأعلى)
 // تتخطى الأيام التي لا تحتوي أحداثاً ولا يعبرها أي حدث ممتد. لا تُعرض هوية المُسنَد إليه أو صاحب
 // التعليق أبداً هنا (الخادم نفسه لا يرسلها).
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Calendar as CalendarIcon, Clock } from 'lucide-react';
 
 type PublicEvent = {
   type: 'subtask' | 'comment';
   id: number;
+  // لا تُرفَق إلا لمستخدم مسجَّل يملك صلاحية فتح مهمة هذا العنصر (راجع currentUserId أدناه) —
+  // الخادم لا يُرسلها إطلاقاً لزائر غير مسجّل (صفحة الدخول).
+  taskId?: number | null;
   title: string;
   taskTitle: string;
   startDate: string;
@@ -174,11 +178,16 @@ type Props = {
   // الحاضنة (صفحة الدخول) من تعديل توزيع العناصر (ربع/ثلاثة أرباع) تبعاً لذلك.
   onAvailabilityChange?: (visible: boolean) => void;
   className?: string;
+  // مُمرَّرة فقط من اللوحة المنسدلة بعد تسجيل الدخول (لا من صفحة الدخول) — يستخدمها الخادم
+  // للتحقق من صلاحية فتح مهمة كل عنصر، فتصبح العناصر المصرَّح بها قابلة للنقر لفتح تفاصيلها.
+  currentUserId?: string;
+  isAdmin?: boolean;
 };
 
 const LANE_WIDTH = 10;
 
-const PublicCalendarPreview = ({ onAvailabilityChange, className = 'w-full max-w-md' }: Props) => {
+const PublicCalendarPreview = ({ onAvailabilityChange, className = 'w-full max-w-md', currentUserId, isAdmin }: Props) => {
+  const navigate = useNavigate();
   const [enabled, setEnabled] = useState(false);
   const [title, setTitle] = useState('التقويم العام');
   const [events, setEvents] = useState<PublicEvent[]>([]);
@@ -187,19 +196,40 @@ const PublicCalendarPreview = ({ onAvailabilityChange, className = 'w-full max-w
   // لتسهيل تمييزه وتتبّعه بصرياً — نفس فكرة التظليل في التقويم الجانبي.
   const [hoveredSpanId, setHoveredSpanId] = useState<number | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/public/calendar')
+  const fetchCalendar = (onDone?: () => void) => {
+    const params = new URLSearchParams();
+    if (currentUserId) {
+      params.set('userId', currentUserId);
+      if (isAdmin) params.set('isAdmin', 'true');
+    }
+    const qs = params.toString();
+    fetch(`/api/public/calendar${qs ? `?${qs}` : ''}`)
       .then(r => r.ok ? r.json() : { enabled: false, title: '', events: [] })
       .then(data => {
-        if (cancelled) return;
         setEnabled(!!data.enabled);
         setTitle(data.title || 'التقويم العام');
         setEvents(Array.isArray(data.events) ? data.events : []);
       })
-      .catch(() => { if (!cancelled) setEnabled(false); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+      .catch(() => setEnabled(false))
+      .finally(() => onDone?.());
+  };
+  // ref يضمن أن مستمع الحدث أدناه يستدعي دائماً أحدث نسخة من fetchCalendar (أحدث currentUserId/isAdmin)
+  const fetchRef = useRef(fetchCalendar);
+  useEffect(() => { fetchRef.current = fetchCalendar; });
+
+  useEffect(() => {
+    setLoading(true);
+    fetchCalendar(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUserId, isAdmin]);
+
+  // تحديث مباشر عند تبديل "بث مفتوح" (Globe) أو "إظهار في التقويم" لأي مهمة فرعية/تعليق من صفحة
+  // تفاصيل المهمة — بلا هذا، يبقى التقويم العام (هنا أو في صفحة الدخول) يعرض بيانات قديمة حتى
+  // يُعاد تحميل الصفحة.
+  useEffect(() => {
+    const handler = () => fetchRef.current();
+    window.addEventListener('calendar:public:updated', handler);
+    return () => window.removeEventListener('calendar:public:updated', handler);
   }, []);
 
   const { carriedOver, days, laneCount } = prepareCalendar(events);
@@ -219,15 +249,21 @@ const PublicCalendarPreview = ({ onAvailabilityChange, className = 'w-full max-w
   // الماضي في قسمها المستقل أعلى القائمة. timeLabel: نص التوقيت الجاهز للعرض (قد يتضمن تاريخ البداية).
   const renderCard = (ev: PreparedEvent, timeLabel: string, showTime: boolean) => {
     const isDimmed = !!ev.spanColor && hoveredSpanId !== null && hoveredSpanId !== ev.id;
+    const canOpen = ev.taskId != null;
     return (
       <div
         key={`${ev.type}-${ev.id}`}
+        role={canOpen ? 'button' : undefined}
+        tabIndex={canOpen ? 0 : undefined}
+        onClick={canOpen ? () => navigate(`/task/${ev.taskId}`) : undefined}
+        onKeyDown={canOpen ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(`/task/${ev.taskId}`); } } : undefined}
         className={`flex items-start justify-between gap-2 text-sm transition-opacity duration-150 ${
           ev.spanColor ? 'cursor-pointer' : 'text-gray-700 dark:text-gray-200'
-        }`}
+        } ${canOpen ? 'cursor-pointer hover:underline' : ''}`}
         style={ev.spanColor ? { color: ev.spanColor, opacity: isDimmed ? 0.4 : 1 } : undefined}
         onMouseEnter={ev.spanColor ? () => setHoveredSpanId(ev.id) : undefined}
         onMouseLeave={ev.spanColor ? () => setHoveredSpanId(null) : undefined}
+        title={canOpen ? 'انقر لفتح تفاصيل المهمة' : undefined}
       >
         <span className={`shrink-0 flex items-center gap-1 text-xs text-content-secondary whitespace-nowrap ${showTime ? '' : 'invisible'}`}>
           <Clock size={11} />

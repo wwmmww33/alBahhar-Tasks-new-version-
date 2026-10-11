@@ -74,10 +74,11 @@ exports.listByDepartmentScope = async (req, res) => {
         const parentColJS = sampleKeys.find(k => k === 'ParentID')
                           || sampleKeys.find(k => k === 'ParentDepartmentID')
                           || null;
+        const independentColJS = sampleKeys.find(k => k === 'IsIndependent') || null;
         const typeColJS   = sampleKeys.find(k => k === 'Type') || null;
         const deptIdCol   = sampleKeys.find(k => k === 'DepartmentID') || 'DepartmentID';
 
-        console.log(`[SCOPE] deptId=${departmentId} depts=${allDepts.length} parentCol=${parentColJS} typeCol=${typeColJS} deptIdCol=${deptIdCol}`);
+        console.log(`[SCOPE] deptId=${departmentId} depts=${allDepts.length} parentCol=${parentColJS} independentCol=${independentColJS} deptIdCol=${deptIdCol}`);
 
         // تحويل آمن إلى integer
         function toInt(val) {
@@ -85,14 +86,20 @@ exports.listByDepartmentScope = async (req, res) => {
             return Number.isFinite(n) ? Math.round(n) : null;
         }
 
-        // التحقق من أن القسم هو Type=1 (مستقل) — يتعامل مع INT و BIT و string
+        // التحقق من أن القسم مستقل — IsIndependent هو عمود الاستقلالية المخصّص (راجع
+        // departmentSharing.js)؛ Type أصبح وصفياً بحتاً ("مديرية"، "قسم"...) ولا يُستخدم كعلامة
+        // استقلالية بعد الآن. نُبقي فحص Type=1 احتياطاً دفاعياً فقط لقاعدة بيانات لم تُرحَّل بعد.
         function isIndependent(dept) {
+            if (independentColJS) {
+                const v = dept[independentColJS];
+                return v === 1 || v === true || v === '1';
+            }
             if (!typeColJS) return false;
             const v = dept[typeColJS];
             return v === 1 || v === true || v === '1';
         }
 
-        // دالة الصعود حتى القسم المستقل (Type=1)
+        // دالة الصعود حتى القسم المستقل
         function findIndependentRoot(startId) {
             const map = new Map(allDepts.map(d => [toInt(d[deptIdCol]), d]));
             let cur = map.get(startId);
@@ -533,10 +540,19 @@ exports.listByIndependentDepartment = async (req, res) => {
             SELECT
                 CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
                 CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+                CASE WHEN COL_LENGTH('dbo.Departments','IsIndependent')      IS NOT NULL THEN 1 ELSE 0 END AS HasIsIndependent,
                 CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
         `);
         const dp = deptProbe.recordset[0] || {};
         const parentCol = dp.HasParentID ? 'ParentID' : (dp.HasParentDeptID ? 'ParentDepartmentID' : null);
+        // IsIndependent هو عمود الاستقلالية المخصّص (راجع departmentSharing.js)؛ Type أصبح وصفياً
+        // بحتاً ولا يُستخدم كعلامة استقلالية بعد الآن. تُستخدم هذه التعابير أدناه بدل TRY_CAST(Type)=1.
+        const dTypeAnchorExpr = dp.HasIsIndependent ? 'IsIndependent' : 'TRY_CAST([Type] AS INT)';
+        const dTypeRecExpr = dp.HasIsIndependent ? 'd.IsIndependent' : 'TRY_CAST(d.[Type] AS INT)';
+        const dTypeStopExpr = dp.HasIsIndependent
+            ? '(d.IsIndependent IS NULL OR d.IsIndependent = 0)'
+            : '(TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)';
+        const hasIndependenceInfo = dp.HasIsIndependent || dp.HasDeptType;
 
         const nameCol     = s.HasVacName   ? 'jv.Name'    : 'CAST(jv.VacancyID AS NVARCHAR(50))';
         const isActiveCol = s.HasVacIsActive ? 'jv.IsActive' : 'CAST(1 AS BIT)';
@@ -565,17 +581,17 @@ exports.listByIndependentDepartment = async (req, res) => {
         let withCte = '';
         let deptFilter = '';
 
-        if (parentCol && dp.HasDeptType) {
-            // صعود حتى أقرب قسم Type=1، ثم هبوط منه شاملاً كل الأقسام الفرعية
+        if (parentCol && hasIndependenceInfo) {
+            // صعود حتى أقرب قسم مستقل، ثم هبوط منه شاملاً كل الأقسام الفرعية
             withCte = `
                 WITH UpTree AS (
                     SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, 0 AS Lvl,
-                           TRY_CAST([Type] AS INT) AS DType
+                           ${dTypeAnchorExpr} AS DType
                     FROM dbo.Departments
                     WHERE DepartmentID = @DepartmentID
                     UNION ALL
                     SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS PID, u.Lvl + 1,
-                           TRY_CAST(d.[Type] AS INT) AS DType
+                           ${dTypeRecExpr} AS DType
                     FROM dbo.Departments d
                     INNER JOIN UpTree u ON u.PID IS NOT NULL AND d.DepartmentID = u.PID
                     WHERE u.DType <> 1 OR u.DType IS NULL
@@ -595,7 +611,7 @@ exports.listByIndependentDepartment = async (req, res) => {
                     FROM dbo.Departments d
                     INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
                                            AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
-                    WHERE TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1
+                    WHERE ${dTypeStopExpr}
                 )
             `;
             deptFilter = 'EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)';
@@ -698,10 +714,19 @@ exports.listByUserTransferScope = async (req, res) => {
             SELECT
                 CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
                 CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
+                CASE WHEN COL_LENGTH('dbo.Departments','IsIndependent')      IS NOT NULL THEN 1 ELSE 0 END AS HasIsIndependent,
                 CASE WHEN COL_LENGTH('dbo.Departments','Type')               IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
         `);
         const dp = deptProbe.recordset[0] || {};
         const parentCol = dp.HasParentID ? 'ParentID' : (dp.HasParentDeptID ? 'ParentDepartmentID' : null);
+        // IsIndependent هو عمود الاستقلالية المخصّص (راجع departmentSharing.js)؛ Type أصبح وصفياً
+        // بحتاً ولا يُستخدم كعلامة استقلالية بعد الآن. تُستخدم هذه التعابير أدناه بدل TRY_CAST(Type)=1.
+        const dTypeAnchorExpr = dp.HasIsIndependent ? 'IsIndependent' : 'TRY_CAST([Type] AS INT)';
+        const dTypeRecExpr = dp.HasIsIndependent ? 'd.IsIndependent' : 'TRY_CAST(d.[Type] AS INT)';
+        const dTypeStopExpr = dp.HasIsIndependent
+            ? '(d.IsIndependent IS NULL OR d.IsIndependent = 0)'
+            : '(TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1)';
+        const hasIndependenceInfo = dp.HasIsIndependent || dp.HasDeptType;
 
         const nameCol     = s.HasVacName    ? 'jv.Name'    : 'CAST(jv.VacancyID AS NVARCHAR(50))';
         const isActiveCol = s.HasVacIsActive ? 'jv.IsActive' : 'CAST(1 AS BIT)';
@@ -730,16 +755,16 @@ exports.listByUserTransferScope = async (req, res) => {
         let withCte = '';
         let deptFilter = '';
 
-        if (parentCol && dp.HasDeptType) {
+        if (parentCol && hasIndependenceInfo) {
             withCte = `
                 WITH UpTree AS (
                     SELECT DepartmentID, TRY_CAST(${parentCol} AS INT) AS PID, 0 AS Lvl,
-                           TRY_CAST([Type] AS INT) AS DType
+                           ${dTypeAnchorExpr} AS DType
                     FROM dbo.Departments
                     WHERE DepartmentID = @DepartmentID
                     UNION ALL
                     SELECT d.DepartmentID, TRY_CAST(d.${parentCol} AS INT) AS PID, u.Lvl + 1,
-                           TRY_CAST(d.[Type] AS INT) AS DType
+                           ${dTypeRecExpr} AS DType
                     FROM dbo.Departments d
                     INNER JOIN UpTree u ON u.PID IS NOT NULL AND d.DepartmentID = u.PID
                     WHERE u.DType <> 1 OR u.DType IS NULL
@@ -759,7 +784,7 @@ exports.listByUserTransferScope = async (req, res) => {
                     FROM dbo.Departments d
                     INNER JOIN DeptScope t ON TRY_CAST(d.${parentCol} AS INT) IS NOT NULL
                                            AND TRY_CAST(d.${parentCol} AS INT) = t.DepartmentID
-                    WHERE TRY_CAST(d.[Type] AS INT) IS NULL OR TRY_CAST(d.[Type] AS INT) <> 1
+                    WHERE ${dTypeStopExpr}
                 )
             `;
             deptFilter = 'EXISTS (SELECT 1 FROM DeptScope sc WHERE sc.DepartmentID = jv.DepartmentID)';

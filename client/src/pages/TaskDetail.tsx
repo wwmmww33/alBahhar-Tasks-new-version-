@@ -6,6 +6,7 @@ import UnifiedTimeline from '../components/UnifiedTimeline';
 import RelatedTasksSection from '../components/RelatedTasksSection';
 import MergeTaskModal from '../components/MergeTaskModal';
 import TaskSharingModal from '../components/TaskSharingModal';
+import PublicCalendarDrawer from '../components/PublicCalendarDrawer';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, User, Category, Task, Comment } from '../types';
 import { Trash2, ExternalLink, Copy, Check, ArrowRight, FileDown, GitMerge, Share2 } from 'lucide-react';
@@ -495,6 +496,8 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
   const canDeleteTask = actingUserId === taskCreatorId(task);
 
   return (
+    <>
+    <PublicCalendarDrawer currentUser={currentUser} />
     <div className="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-md max-w-4xl mx-auto">
       <div className="mb-4 flex items-center justify-between gap-4">
         <button
@@ -1006,6 +1009,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         </div>
       )}
     </div>
+    </>
   );
 };
 export default TaskDetail;

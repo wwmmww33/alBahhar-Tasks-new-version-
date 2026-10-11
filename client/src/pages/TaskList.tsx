@@ -4,6 +4,7 @@ import { writeClipboard } from '../utils/clipboard';
 import { Link } from 'react-router-dom';
 import TaskCard from '../components/TaskCard';
 import SearchBar from '../components/SearchBar';
+import PublicCalendarDrawer from '../components/PublicCalendarDrawer';
 import { useNotification } from '../contexts/NotificationContext';
 import type { CurrentUser, Subtask, Comment } from '../types';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
@@ -350,15 +351,22 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   }, [updatesSubTab]);
 
   // تجميع التحديثات المتتالية لنفس المهمة في مربع واحد
+  // تُجمَّع كل تحديثات المهمة نفسها معاً تحت مجموعة واحدة، بغض النظر عن تداخل تحديثات مهام أخرى
+  // بينها زمنياً — لا تُقارَن إلا بآخر مجموعة فقط، بل بكل مهمة سبق ظهورها ضمن النطاق المفحوص
+  // (نفس منطق exportActivityLog أدناه). ترتيب المجموعات نفسه = ترتيب أول ظهور لكل مهمة، وهو
+  // الأحدث تحديثاً لها بالضرورة (activityItems مرتبة من الأحدث للأقدم).
   const groupedActivity = useMemo<ActivityGroup[]>(() => {
     const groups: ActivityGroup[] = [];
+    const groupByTaskId = new Map<number, ActivityGroup>();
     for (const item of activityItems) {
-      const last = groups[groups.length - 1];
-      if (last && last.TaskID === item.TaskID) {
-        last.items.push(item);
-        if (new Date(item.CreatedAt) > new Date(last.latestAt)) last.latestAt = item.CreatedAt;
+      const existing = groupByTaskId.get(item.TaskID);
+      if (existing) {
+        existing.items.push(item);
+        if (new Date(item.CreatedAt) > new Date(existing.latestAt)) existing.latestAt = item.CreatedAt;
       } else {
-        groups.push({ TaskID: item.TaskID, TaskTitle: item.TaskTitle, TaskStatus: item.TaskStatus, items: [item], latestAt: item.CreatedAt });
+        const group: ActivityGroup = { TaskID: item.TaskID, TaskTitle: item.TaskTitle, TaskStatus: item.TaskStatus, items: [item], latestAt: item.CreatedAt };
+        groups.push(group);
+        groupByTaskId.set(item.TaskID, group);
       }
     }
     return groups;
@@ -1099,6 +1107,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
 
   return (
     <div className="space-y-12 relative">
+      <PublicCalendarDrawer currentUser={currentUser} />
       {/* --- البحث والفلتر والتصدير --- */}
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border p-4 mb-6">
         <div className="flex flex-col lg:flex-row items-start lg:items-center gap-4">
