@@ -1372,92 +1372,34 @@ exports.getUsersByDepartment = async (req, res) => {
                 CASE WHEN OBJECT_ID('dbo.vw_UserCurrentProfile', 'V') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileView,
                 CASE WHEN COL_LENGTH('dbo.vw_UserCurrentProfile', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasProfileDepartmentID,
                 CASE WHEN COL_LENGTH('dbo.JobVacancies', 'DepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasVacancyDepartmentID,
-                CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDepartmentType
+                CASE WHEN OBJECT_ID('dbo.Assignments', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasAssignmentsTable
         `);
         const s = schema.recordset[0] || {};
 
-        const parentCol = s.HasParentID ? 'ParentID' : (s.HasParentDepartmentID ? 'ParentDepartmentID' : null);
-        // القاعدة الوظيفية: الأقسام ذات Type=0 هي وحدات مستقلة ومنفصلة تمامًا.
-        // نصعد في الشجرة متوقفين عند أي قسم أب من نوع Type=0 (لا نعبر حدوده).
-        // أعلى سلف نصل إليه قبل الوصول لـ Type=0 أو لقمة الشجرة يكون هو الجذر.
-        // عند الهبوط، نستثني الأقسام Type=0 وجميع أبنائها.
-        const rootCte = (parentCol && s.HasDepartmentType) ? `
-            UpTree AS (
-                SELECT DepartmentID, ${parentCol} AS ParentDepartmentID, 0 AS Depth
-                FROM dbo.Departments
-                WHERE DepartmentID = @DepartmentID
-                UNION ALL
-                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID, u.Depth + 1
-                FROM dbo.Departments d
-                INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
-                WHERE CAST(d.[Type] AS INT) <> 0 OR d.[Type] IS NULL
-            ),
-            RootDept AS (
-                SELECT TOP 1 DepartmentID AS RootDepartmentID
-                FROM UpTree
-                ORDER BY Depth DESC
-            )
-        ` : (parentCol ? `
-            UpTree AS (
-                SELECT DepartmentID, ${parentCol} AS ParentDepartmentID
-                FROM dbo.Departments
-                WHERE DepartmentID = @DepartmentID
-                UNION ALL
-                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
-                FROM dbo.Departments d
-                INNER JOIN UpTree u ON d.DepartmentID = u.ParentDepartmentID
-            ),
-            RootDept AS (
-                SELECT TOP 1 DepartmentID AS RootDepartmentID
-                FROM UpTree
-                WHERE ParentDepartmentID IS NULL
-                ORDER BY DepartmentID
-            )
-        ` : '');
-        // إن لم نجد جذرًا أثناء الصعود نستخدم DepartmentID نفسه كجذر (خطة أمان).
-        const deptScopeCte = parentCol ? `
-            WITH ${rootCte},
-            RootDeptFallback AS (
-                SELECT COALESCE((SELECT TOP 1 RootDepartmentID FROM RootDept), @DepartmentID) AS RootDepartmentID
-            ),
-            DeptTree AS (
-                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
-                FROM dbo.Departments d
-                CROSS JOIN RootDeptFallback r
-                WHERE d.DepartmentID = r.RootDepartmentID
-                UNION ALL
-                SELECT d.DepartmentID, d.${parentCol} AS ParentDepartmentID
-                FROM dbo.Departments d
-                INNER JOIN DeptTree t ON d.${parentCol} = t.DepartmentID
-                ${s.HasDepartmentType ? 'WHERE CAST(d.[Type] AS INT) <> 0 OR d.[Type] IS NULL' : ''}
-            )
-        ` : '';
+        // نطاق الأقسام المستقلة الكامل (الجذر المستقل + كل أبنائه) — نفس الدالة الموحّدة
+        // المستخدمة في كل مكان آخر بالنظام، بدل إعادة تنفيذ محلي يعتمد على عمود Type القديم.
+        const scopeIds = await resolveIndependentDeptGroup(pool, parsedDepartmentId);
+        const deptScope = scopeIds.length > 0 ? scopeIds : [parsedDepartmentId];
 
-        const inDeptProfile = parentCol
-            ? `EXISTS (SELECT 1 FROM DeptTree dt WHERE dt.DepartmentID = p.DepartmentID)`
-            : `p.DepartmentID = @DepartmentID`;
-        const inDeptVacancy = parentCol
-            ? `EXISTS (SELECT 1 FROM DeptTree dt WHERE dt.DepartmentID = jv.DepartmentID)`
-            : `jv.DepartmentID = @DepartmentID`;
-        const inDeptUsers = parentCol
-            ? `EXISTS (SELECT 1 FROM DeptTree dt WHERE dt.DepartmentID = u.DepartmentID)`
-            : `u.DepartmentID = @DepartmentID`;
+        function buildDeptInClause(request, columnExpr) {
+            const placeholders = deptScope.map((id, i) => {
+                request.input(`Dept${i}`, sql.Int, id);
+                return `@Dept${i}`;
+            }).join(',');
+            return `${columnExpr} IN (${placeholders})`;
+        }
 
         let result = { recordset: [] };
 
         if (s.UsesSubtaskVacancy) {
             if (s.HasProfileView) {
-                const profileDeptPredicate = s.HasProfileDepartmentID ? inDeptProfile : '1=0';
-                const usersDeptPredicate = s.HasUsersDepartmentID ? inDeptUsers : '1=0';
-                const vacancyDeptPredicate = s.HasVacancyDepartmentID ? inDeptVacancy : '1=0';
+                let request = pool.request();
+                const profileDeptPredicate = s.HasProfileDepartmentID ? buildDeptInClause(request, 'p.DepartmentID') : '1=0';
+                const usersDeptPredicate = s.HasUsersDepartmentID ? buildDeptInClause(request, 'u.DepartmentID') : '1=0';
+                const vacancyDeptPredicate = s.HasVacancyDepartmentID ? buildDeptInClause(request, 'jv.DepartmentID') : '1=0';
 
-                result = await pool.request()
-                    .input('DepartmentID', sql.Int, parsedDepartmentId)
+                result = await request
                     .query(`
-                        ${deptScopeCte}
                         SELECT DISTINCT
                             u.UserID,
                             COALESCE(jv.Name, u.FullName, u.UserID)
@@ -1480,25 +1422,25 @@ exports.getUsersByDepartment = async (req, res) => {
             }
 
             if ((!result.recordset || result.recordset.length === 0) && s.HasVacancyDepartmentID) {
-                result = await pool.request()
-                    .input('DepartmentID', sql.Int, parsedDepartmentId)
+                let request = pool.request();
+                const vacancyDeptPredicate = buildDeptInClause(request, 'jv.DepartmentID');
+                result = await request
                     .query(`
-                        ${deptScopeCte}
                         SELECT DISTINCT
                             CAST(jv.VacancyID AS NVARCHAR(50)) AS UserID,
                             COALESCE(jv.Name, CAST(jv.VacancyID AS NVARCHAR(50))) AS FullName,
                             jv.VacancyID
                         FROM dbo.JobVacancies jv
-                        WHERE ${inDeptVacancy}
+                        WHERE ${vacancyDeptPredicate}
                         ORDER BY FullName
                     `);
             }
 
             if ((!result.recordset || result.recordset.length <= 1) && s.HasAssignmentsTable && s.HasVacancyDepartmentID) {
-                result = await pool.request()
-                    .input('DepartmentID', sql.Int, parsedDepartmentId)
+                let request = pool.request();
+                const vacancyDeptPredicate = buildDeptInClause(request, 'jv.DepartmentID');
+                result = await request
                     .query(`
-                        ${deptScopeCte}
                         SELECT DISTINCT
                             u.UserID,
                             COALESCE(jv.Name, u.FullName, u.UserID)
@@ -1512,21 +1454,21 @@ exports.getUsersByDepartment = async (req, res) => {
                         INNER JOIN dbo.Users u ON a.UserID = u.UserID
                         LEFT JOIN dbo.JobVacancies jv ON a.VacancyID = jv.VacancyID
                         WHERE a.VacancyID IS NOT NULL
-                            AND ${inDeptVacancy}
+                            AND ${vacancyDeptPredicate}
                         ORDER BY FullName
                     `);
             }
         } else if (s.HasUsersDepartmentID) {
-            result = await pool.request()
-                .input('DepartmentID', sql.Int, parsedDepartmentId)
+            let request = pool.request();
+            const usersDeptPredicate = buildDeptInClause(request, 'u.DepartmentID');
+            result = await request
                 .query(`
-                    ${deptScopeCte}
                     SELECT DISTINCT
                         u.UserID,
                         u.FullName,
                         NULL AS VacancyID
                     FROM dbo.Users u
-                    WHERE ${inDeptUsers}
+                    WHERE ${usersDeptPredicate}
                     ORDER BY u.FullName
                 `);
         }

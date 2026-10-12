@@ -1,7 +1,7 @@
 // src/controllers/procedureController.js
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
-const { detectSchema, resolveVacancyId } = require('../utils/vacancyResolver');
+const { detectSchema, resolveVacancyId, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
 
 /**
  * دالة لجلب كل المهام الافتراضية التي يمكن للمستخدم رؤيتها.
@@ -36,8 +36,16 @@ exports.getAllProcedures = async (req, res) => {
     `;
 
     if (departmentId && departmentId !== 'null') {
-      query += ` OR (IsPublic = 1 AND DepartmentID = @DepartmentID)`;
-      request.input('DepartmentID', sql.Int, departmentId);
+      // التوسّع إلى كامل المجموعة المستقلة (نفس الدالة الموحّدة المستخدمة في كل مكان آخر)، بحيث
+      // تظهر المهمة الافتراضية العامة لأي منصب في أي قسم تابع لنفس المديرية المستقلة لا لقسم
+      // المُنشئ المباشر فقط.
+      const scopeIds = await resolveIndependentDeptGroup(pool, parseInt(departmentId, 10));
+      const deptScope = scopeIds.length > 0 ? scopeIds : [parseInt(departmentId, 10)];
+      const placeholders = deptScope.map((id, i) => {
+        request.input(`Dept${i}`, sql.Int, id);
+        return `@Dept${i}`;
+      }).join(',');
+      query += ` OR (IsPublic = 1 AND DepartmentID IN (${placeholders}))`;
     } else if (userId === 'admin') {
       query += ` OR IsPublic = 1`;
     }

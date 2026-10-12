@@ -1,7 +1,7 @@
 const sql = require('mssql');
 const dbConfig = require('../config/db.config');
 const encryptionConfig = require('../config/encryption.config');
-const { detectSchema, resolveVacancyId, ensureVacancyId } = require('../utils/vacancyResolver');
+const { detectSchema, resolveVacancyId, ensureVacancyId, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
 
 // أفضّل استخدام pool المُجمَّع من req.app.locals.db، وإلا نقع على sql.connect(dbConfig)
 async function getPool(req) {
@@ -45,76 +45,31 @@ const getCategoriesByDepartment = async (req, res) => {
         const pool = await getPool(req);
         const schema = await detectSchema(pool);
 
-        const deptProbe = await pool.request().query(`
-            SELECT
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDepartmentID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'ParentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentID,
-                CASE WHEN COL_LENGTH('dbo.Departments', 'Type') IS NOT NULL THEN 1 ELSE 0 END AS HasDeptType
-        `);
-        const dp = deptProbe.recordset[0] || {};
-        const parentCol = dp.HasParentDepartmentID ? 'ParentDepartmentID' : (dp.HasParentID ? 'ParentID' : null);
-
         const createdByJoin = identityJoinForCreatedBy(schema, 'c', 'CreatedBy');
         const createdByName = identityNameForCreatedBy(schema, 'c');
 
-        const request = pool.request().input('DepartmentID', sql.Int, parseInt(departmentId, 10));
-        let query;
+        const deptIds = await resolveIndependentDeptGroup(pool, parseInt(departmentId, 10));
+        const scopeIds = deptIds.length > 0 ? deptIds : [parseInt(departmentId, 10)];
 
-        if (parentCol) {
-            const typeGuard = dp.HasDeptType
-                ? `AND (TRY_CAST(d.[Type] AS INT) <> 0 OR d.[Type] IS NULL)`
-                : '';
-            query = `
-                WITH UpTree AS (
-                    SELECT DepartmentID, ${parentCol} AS PID, 0 AS Depth
-                    FROM dbo.Departments WHERE DepartmentID = @DepartmentID
-                    UNION ALL
-                    SELECT d.DepartmentID, d.${parentCol}, u.Depth + 1
-                    FROM dbo.Departments d
-                    INNER JOIN UpTree u ON d.DepartmentID = u.PID
-                    WHERE TRY_CAST(d.[Type] AS INT) <> 0 OR d.[Type] IS NULL
-                ),
-                RootDept AS (
-                    SELECT TOP 1 DepartmentID AS RootDepartmentID
-                    FROM UpTree ORDER BY Depth DESC
-                ),
-                DeptScope AS (
-                    SELECT d.DepartmentID
-                    FROM dbo.Departments d CROSS JOIN RootDept r
-                    WHERE d.DepartmentID = r.RootDepartmentID
-                    UNION ALL
-                    SELECT d.DepartmentID
-                    FROM dbo.Departments d
-                    INNER JOIN DeptScope ds ON d.${parentCol} = ds.DepartmentID
-                    ${typeGuard}
-                )
-                SELECT
-                    c.CategoryID, c.Name, c.Description, c.DepartmentID,
-                    c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.IsActive,
-                    ${createdByName} as CreatedByName,
-                    dep.Name as DepartmentName
-                FROM Categories c
-                ${createdByJoin}
-                LEFT JOIN Departments dep ON c.DepartmentID = dep.DepartmentID
-                WHERE c.DepartmentID IN (SELECT DepartmentID FROM DeptScope)
-                    AND c.IsActive = 1
-                ORDER BY c.Name
-                OPTION (MAXRECURSION 100)
-            `;
-        } else {
-            query = `
-                SELECT
-                    c.CategoryID, c.Name, c.Description, c.DepartmentID,
-                    c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.IsActive,
-                    ${createdByName} as CreatedByName,
-                    dep.Name as DepartmentName
-                FROM Categories c
-                ${createdByJoin}
-                LEFT JOIN Departments dep ON c.DepartmentID = dep.DepartmentID
-                WHERE c.DepartmentID = @DepartmentID AND c.IsActive = 1
-                ORDER BY c.Name
-            `;
-        }
+        const request = pool.request();
+        const placeholders = scopeIds.map((id, i) => {
+            request.input(`Dept${i}`, sql.Int, id);
+            return `@Dept${i}`;
+        }).join(',');
+
+        const query = `
+            SELECT
+                c.CategoryID, c.Name, c.Description, c.DepartmentID,
+                c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.IsActive,
+                ${createdByName} as CreatedByName,
+                dep.Name as DepartmentName
+            FROM Categories c
+            ${createdByJoin}
+            LEFT JOIN Departments dep ON c.DepartmentID = dep.DepartmentID
+            WHERE c.DepartmentID IN (${placeholders})
+                AND c.IsActive = 1
+            ORDER BY c.Name
+        `;
 
         const result = await request.query(query);
         const categories = result.recordset.map(c => {

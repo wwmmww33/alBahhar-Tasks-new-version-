@@ -1,7 +1,7 @@
 // src/controllers/delegationController.js
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
-const { detectSchema, resolveVacancyId } = require('../utils/vacancyResolver');
+const { detectSchema, resolveVacancyId, resolveIndependentDeptGroup } = require('../utils/vacancyResolver');
 
 // قراءة معرف المستخدم من الهيدر أو البودي
 function getCurrentUserId(req) {
@@ -456,43 +456,31 @@ exports.listVacantPositions = async (req, res) => {
   try {
     const probe = await pool.request().query(`
       SELECT
-        CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')            IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent,
-        CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID')   IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
-        CASE WHEN COL_LENGTH('dbo.Departments','ParentID')             IS NOT NULL THEN 1 ELSE 0 END AS HasParentID
+        CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent') IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent
     `);
     const p = probe.recordset[0] || {};
     const isCurrentFilter = p.HasIsCurrent ? 'AND a.IsCurrent = 1' : '';
-    const parentCol = p.HasParentDeptID ? 'ParentDepartmentID' : (p.HasParentID ? 'ParentID' : null);
 
     const request = pool.request();
     let query;
 
-    if (deptId && parentCol) {
-      request.input('DeptID', sql.Int, deptId);
+    if (deptId) {
+      // التوسّع إلى كامل المجموعة المستقلة (نفس الدالة الموحّدة المستخدمة في كل مكان آخر بالنظام)،
+      // بحيث يرى أي منصب في القسم المستقل المناصب الشاغرة ضمن كل أقسام مديريته، لا ضمن قسمه
+      // المباشر فقط أو أبنائه دون أشقائه.
+      const scopeIds = await resolveIndependentDeptGroup(pool, deptId);
+      const deptScope = scopeIds.length > 0 ? scopeIds : [deptId];
+      const placeholders = deptScope.map((id, i) => {
+        request.input(`Dept${i}`, sql.Int, id);
+        return `@Dept${i}`;
+      }).join(',');
       query = `
-        WITH DeptTree AS (
-          SELECT DepartmentID FROM dbo.Departments WHERE DepartmentID = @DeptID
-          UNION ALL
-          SELECT d.DepartmentID FROM dbo.Departments d
-          INNER JOIN DeptTree t ON d.${parentCol} = t.DepartmentID
-        )
         SELECT jv.VacancyID, jv.Name AS VacancyName, dept.Name AS DepartmentName
         FROM dbo.JobVacancies jv
-        JOIN DeptTree dt ON jv.DepartmentID = dt.DepartmentID
         LEFT JOIN dbo.Assignments a ON a.VacancyID = jv.VacancyID ${isCurrentFilter}
         LEFT JOIN dbo.Departments dept ON dept.DepartmentID = jv.DepartmentID
-        WHERE a.AssignmentID IS NULL
+        WHERE a.AssignmentID IS NULL AND jv.DepartmentID IN (${placeholders})
         ORDER BY dept.Name, jv.Name
-      `;
-    } else if (deptId) {
-      request.input('DeptID', sql.Int, deptId);
-      query = `
-        SELECT jv.VacancyID, jv.Name AS VacancyName, dept.Name AS DepartmentName
-        FROM dbo.JobVacancies jv
-        LEFT JOIN dbo.Assignments a ON a.VacancyID = jv.VacancyID ${isCurrentFilter}
-        LEFT JOIN dbo.Departments dept ON dept.DepartmentID = jv.DepartmentID
-        WHERE a.AssignmentID IS NULL AND jv.DepartmentID = @DeptID
-        ORDER BY jv.Name
       `;
     } else {
       query = `
@@ -612,13 +600,10 @@ exports.listVacantPositionDelegations = async (req, res) => {
 
     const probe = await pool.request().query(`
       SELECT
-        CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent')          IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent,
-        CASE WHEN COL_LENGTH('dbo.Departments','ParentDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentDeptID,
-        CASE WHEN COL_LENGTH('dbo.Departments','ParentID')           IS NOT NULL THEN 1 ELSE 0 END AS HasParentID
+        CASE WHEN COL_LENGTH('dbo.Assignments','IsCurrent') IS NOT NULL THEN 1 ELSE 0 END AS HasIsCurrent
     `);
     const p = probe.recordset[0] || {};
     const isCurrentFilter = p.HasIsCurrent ? 'AND a.IsCurrent = 1' : '';
-    const parentCol = p.HasParentDeptID ? 'ParentDepartmentID' : (p.HasParentID ? 'ParentID' : null);
 
     const request = pool.request();
     let query;
@@ -641,26 +626,17 @@ exports.listVacantPositionDelegations = async (req, res) => {
       JOIN dbo.JobVacancies jvDst ON jvDst.VacancyID = td.DelegateVacancyID
     `;
 
-    if (deptId && parentCol) {
-      request.input('DeptID', sql.Int, deptId);
-      query = `
-        WITH DeptTree AS (
-          SELECT DepartmentID FROM dbo.Departments WHERE DepartmentID = @DeptID
-          UNION ALL
-          SELECT d.DepartmentID FROM dbo.Departments d
-          INNER JOIN DeptTree t ON d.${parentCol} = t.DepartmentID
-        )
-        SELECT ${selectCols}
-        ${joins}
-        JOIN DeptTree dt ON jvSrc.DepartmentID = dt.DepartmentID
-        WHERE a.AssignmentID IS NULL
-        ORDER BY td.CreatedAt DESC
-      `;
-    } else if (deptId) {
-      request.input('DeptID', sql.Int, deptId);
+    if (deptId) {
+      // نفس التوسّع إلى كامل المجموعة المستقلة المستخدم في listVacantPositions أعلاه.
+      const scopeIds = await resolveIndependentDeptGroup(pool, deptId);
+      const deptScope = scopeIds.length > 0 ? scopeIds : [deptId];
+      const placeholders = deptScope.map((id, i) => {
+        request.input(`Dept${i}`, sql.Int, id);
+        return `@Dept${i}`;
+      }).join(',');
       query = `
         SELECT ${selectCols} ${joins}
-        WHERE a.AssignmentID IS NULL AND jvSrc.DepartmentID = @DeptID
+        WHERE a.AssignmentID IS NULL AND jvSrc.DepartmentID IN (${placeholders})
         ORDER BY td.CreatedAt DESC
       `;
     } else {
