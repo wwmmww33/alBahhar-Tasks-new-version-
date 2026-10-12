@@ -10,6 +10,7 @@ const {
     getPublicCalendarSettings,
     setPublicCalendarEnabled,
     setPublicCalendarTitle,
+    setPublicCalendarOwnerDepartmentId,
 } = require('../utils/departmentSharing');
 const { resolveActorContext } = require('../utils/vacancyResolver');
 
@@ -553,11 +554,41 @@ exports.setMaxBroadcastLevel = async (req, res) => {
     }
 };
 
-// PUT /api/departments/public-calendar-settings  { userId, enabled?, title? }  — المدير العام فقط.
-// يضبط إظهار/إخفاء "التقويم العام" في صفحة الدخول وعنوانه المعروض.
+// GET /api/departments/public-calendar-settings?userId=  — المدير العام فقط. يُرجع الإعدادات
+// الكاملة (بخلاف /api/public/calendar العام الذي لا يُرجع إلا enabled/title/events بلا أي حقل
+// إداري حساس). تُستخدَم من لوحة إدارة النظام فقط.
+exports.getPublicCalendarSettingsForAdmin = async (req, res) => {
+    const pool = req.app.locals.db;
+    const { userId } = req.query;
+    if (!userId) {
+        return res.status(401).json({ message: 'userId is required.' });
+    }
+    try {
+        const allowed = await isTrueSystemAdmin(pool, userId);
+        if (!allowed) {
+            return res.status(403).json({ message: 'هذه الميزة متاحة للمدير العام للنظام فقط.' });
+        }
+        const settings = await getPublicCalendarSettings(pool);
+        let ownerDepartmentName = null;
+        if (settings.ownerDepartmentId != null) {
+            const r = await pool.request().input('DepartmentID', sql.Int, settings.ownerDepartmentId)
+                .query('SELECT Name FROM dbo.Departments WHERE DepartmentID = @DepartmentID');
+            ownerDepartmentName = r.recordset[0]?.Name ?? null;
+        }
+        res.status(200).json({ ...settings, ownerDepartmentName });
+    } catch (err) {
+        console.error('GET PUBLIC CALENDAR SETTINGS (ADMIN) ERROR:', err);
+        res.status(500).json({ message: 'Error fetching public calendar settings', detail: err.message });
+    }
+};
+
+// PUT /api/departments/public-calendar-settings  { userId, enabled?, title?, ownerDepartmentId? }
+// — المدير العام فقط. يضبط إظهار/إخفاء "التقويم العام" في صفحة الدخول وعنوانه المعروض، والقسم
+// الذي يمثّله (إن ضُبط، يُقصَر خيار "بث مفتوح" على عناصر هذا القسم أو مجموعته المستقلة فقط).
+// ownerDepartmentId: null أو مفتاح محذوف من الطلب = بلا قيد (أي مدير قسم مستقل).
 exports.setPublicCalendarSettings = async (req, res) => {
     const pool = req.app.locals.db;
-    const { userId, enabled, title } = req.body || {};
+    const { userId, enabled, title, ownerDepartmentId } = req.body || {};
     if (!userId) {
         return res.status(401).json({ message: 'userId is required.' });
     }
@@ -571,6 +602,10 @@ exports.setPublicCalendarSettings = async (req, res) => {
         }
         if (typeof title === 'string') {
             await setPublicCalendarTitle(pool, title, userId);
+        }
+        if (Object.prototype.hasOwnProperty.call(req.body || {}, 'ownerDepartmentId')) {
+            const deptId = ownerDepartmentId == null ? null : parseInt(ownerDepartmentId, 10);
+            await setPublicCalendarOwnerDepartmentId(pool, deptId, userId);
         }
         const settings = await getPublicCalendarSettings(pool);
         res.status(200).json({ message: 'تم تحديث إعدادات التقويم العام.', ...settings });

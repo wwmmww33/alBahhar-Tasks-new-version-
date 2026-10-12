@@ -1,6 +1,6 @@
 // src/pages/SystemManagement.tsx
 import { useState } from 'react';
-import { Building, Users, UserPlus, UserCheck, Megaphone, BookUser, Lightbulb } from 'lucide-react';
+import { Building, Users, UserPlus, UserCheck, Megaphone, BookUser, Lightbulb, CalendarClock } from 'lucide-react';
 import DepartmentManagement from '../components/DepartmentManagement';
 import UserManagement from '../components/UserManagement';
 import RegistrationRequests from '../components/RegistrationRequests';
@@ -8,9 +8,10 @@ import DelegationManagement from '../components/DelegationManagement';
 import AnnouncementsManagement from '../components/AnnouncementsManagement';
 import DirectoryManagement from '../components/DirectoryManagement';
 import ProposalsManagement from '../components/ProposalsManagement';
+import CalendarBroadcastSettings from '../components/CalendarBroadcastSettings';
 import type { CurrentUser } from '../types';
 
-type AdminTab = 'departments' | 'users' | 'requests' | 'delegations' | 'announcements' | 'directory' | 'proposals';
+type AdminTab = 'departments' | 'users' | 'requests' | 'delegations' | 'announcements' | 'directory' | 'proposals' | 'calendarBroadcast';
 
 const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
@@ -114,6 +115,12 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
           </button>
         )}
         {isSystemAdmin && (
+          <button onClick={() => setActiveTab('calendarBroadcast')} className={getTabClassName('calendarBroadcast')}>
+            <CalendarClock size={20} />
+            <span>التقويم والبث</span>
+          </button>
+        )}
+        {isSystemAdmin && (
           <button onClick={() => setActiveTab('announcements')} className={getTabClassName('announcements')}>
             <Megaphone size={20} />
             <span>تحديثات النظام</span>
@@ -137,6 +144,7 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
       <div className="animate-fade-in">
         {activeTab === 'departments' && <DepartmentManagement currentUser={currentUser} />}
         {activeTab === 'users'       && isSystemAdmin && <UserManagement currentUser={currentUser} />}
+        {activeTab === 'calendarBroadcast' && isSystemAdmin && <CalendarBroadcastSettings currentUser={currentUser} />}
         {activeTab === 'requests'    && (isSystemAdmin || isDeptManager) && <RegistrationRequests currentUser={currentUser} />}
         {activeTab === 'delegations' && (isSystemAdmin || isDeptManager) && <DelegationManagement currentUser={currentUser} />}
         {activeTab === 'announcements' && isSystemAdmin && <AnnouncementsManagement currentUser={currentUser} />}

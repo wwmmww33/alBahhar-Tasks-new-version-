@@ -6,6 +6,7 @@ router.post('/', departmentController.createDepartment);
 // الحد الأعلى لمستوى بث التقويم (مسارات ثابتة — يجب أن تسبق PUT /:id لتجنب تضارب المطابقة)
 router.get('/max-broadcast-level', departmentController.getMaxBroadcastLevel);
 router.put('/max-broadcast-level', departmentController.setMaxBroadcastLevel);
+router.get('/public-calendar-settings', departmentController.getPublicCalendarSettingsForAdmin);
 router.put('/public-calendar-settings', departmentController.setPublicCalendarSettings);
 router.put('/:id', departmentController.updateDepartment);
 router.delete('/:id', departmentController.deleteDepartment);

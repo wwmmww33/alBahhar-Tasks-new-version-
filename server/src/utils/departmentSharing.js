@@ -347,12 +347,56 @@ async function setPublicCalendarTitle(pool, title, actorUserId) {
     `);
 }
 
+// القسم الذي "يمثّل" التقويم العام — إن ضُبط، يُقصَر خيار "بث مفتوح" (إظهار عنصر في التقويم
+// العام) على عناصر المهام التابعة لهذا القسم أو مجموعته المستقلة فقط (راجع resolveIndependentDeptGroup)،
+// بدل أن يكون متاحاً لأي مدير قسم مستقل في النظام. NULL = غير مقيَّد (السلوك الافتراضي السابق:
+// أي مدير قسم مستقل يمكنه تفعيل البث المفتوح لعناصره).
+async function getPublicCalendarOwnerDepartmentId(pool) {
+  try {
+    const r = await pool.request().query(
+      `SELECT SettingValue FROM dbo.SystemSettings WHERE SettingKey = 'PublicCalendarOwnerDepartmentID'`
+    );
+    const parsed = parseInt(r.recordset[0]?.SettingValue, 10);
+    return Number.isInteger(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function setPublicCalendarOwnerDepartmentId(pool, deptId, actorUserId) {
+  const value = deptId == null ? null : String(parseInt(deptId, 10));
+  await pool.request()
+    .input('Value', sql.NVarChar, value)
+    .input('UserID', sql.NVarChar, String(actorUserId || ''))
+    .query(`
+      MERGE dbo.SystemSettings AS target
+      USING (SELECT 'PublicCalendarOwnerDepartmentID' AS K) AS src
+      ON target.SettingKey = src.K
+      WHEN MATCHED THEN UPDATE SET SettingValue = @Value, UpdatedAt = GETDATE(), UpdatedByUserID = @UserID
+      WHEN NOT MATCHED THEN INSERT (SettingKey, SettingValue, UpdatedAt, UpdatedByUserID)
+        VALUES ('PublicCalendarOwnerDepartmentID', @Value, GETDATE(), @UserID);
+    `);
+}
+
+// يتحقق هل قسم مهمة معيّنة يقع ضمن نطاق القسم "المالك" للتقويم العام (مجموعته المستقلة كاملة) —
+// يُستخدَم لتقييد خيار "بث مفتوح". إن لم يُضبط قسم مالك إطلاقاً، لا قيد (يُعاد true دوماً).
+async function isDepartmentWithinPublicCalendarScope(pool, departmentId) {
+  const ownerDeptId = await getPublicCalendarOwnerDepartmentId(pool);
+  if (ownerDeptId == null) return true;
+  const targetId = parseInt(String(departmentId ?? '').trim(), 10);
+  if (!Number.isInteger(targetId)) return false;
+  if (targetId === ownerDeptId) return true;
+  const scopeIds = await resolveIndependentDeptGroup(pool, ownerDeptId);
+  return scopeIds.map(String).includes(String(targetId));
+}
+
 async function getPublicCalendarSettings(pool) {
-  const [enabled, title] = await Promise.all([
+  const [enabled, title, ownerDepartmentId] = await Promise.all([
     getPublicCalendarEnabled(pool),
     getPublicCalendarTitle(pool),
+    getPublicCalendarOwnerDepartmentId(pool),
   ]);
-  return { enabled, title };
+  return { enabled, title, ownerDepartmentId };
 }
 
 // يتحقق هل صاحب الطلب مدير عام حقيقي للنظام (Role=1) — بعض إعدادات البث (الحد العام والحد الخاص
@@ -423,6 +467,9 @@ module.exports = {
   setPublicCalendarEnabled,
   getPublicCalendarTitle,
   setPublicCalendarTitle,
+  getPublicCalendarOwnerDepartmentId,
+  setPublicCalendarOwnerDepartmentId,
+  isDepartmentWithinPublicCalendarScope,
   getPublicCalendarSettings,
   isWithinItemBroadcastNarrowingChain,
 };

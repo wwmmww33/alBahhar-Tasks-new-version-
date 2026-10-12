@@ -13,6 +13,75 @@ async function probeUserRolesSchema(pool) {
     return r.recordset[0] || {};
 }
 
+// رتبة الشخص نفسه (UserRanks: UserID, RankID) — مستقلة تماماً عن رتبة المنصب الذي يشغله حالياً
+// (VacancyRanks/JobVacancies.Rank). قد يختلف الاثنان (مثال: شخص برتبة "عقيد" يشغل مؤقتاً منصباً
+// برتبة "مقدم").
+async function probeUserRanksSchema(pool) {
+    const r = await pool.request().query(`
+        SELECT
+          CASE WHEN OBJECT_ID('dbo.UserRanks','U')      IS NOT NULL THEN 1 ELSE 0 END AS HasTable,
+          CASE WHEN OBJECT_ID('dbo.Ranks','U')           IS NOT NULL THEN 1 ELSE 0 END AS HasRanksTable,
+          CASE WHEN COL_LENGTH('dbo.Ranks','Name')       IS NOT NULL THEN 1 ELSE 0 END AS HasName,
+          CASE WHEN COL_LENGTH('dbo.Ranks','RankName')   IS NOT NULL THEN 1 ELSE 0 END AS HasRankName
+    `);
+    const s = r.recordset[0] || {};
+    return { ...s, nameCol: s.HasName ? 'Name' : (s.HasRankName ? 'RankName' : null) };
+}
+
+async function getUserRanksJoined(pool) {
+    const s = await probeUserRanksSchema(pool);
+    if (!s.HasTable) return [];
+    if (s.HasRanksTable && s.nameCol) {
+        const result = await pool.request().query(`
+            SELECT ur.UserID, ur.RankID, r.${s.nameCol} AS RankName
+            FROM dbo.UserRanks ur
+            LEFT JOIN dbo.Ranks r ON r.RankID = ur.RankID
+        `);
+        return result.recordset || [];
+    }
+    const result = await pool.request().query(`SELECT UserID, RankID, CAST(NULL AS NVARCHAR(200)) AS RankName FROM dbo.UserRanks`);
+    return result.recordset || [];
+}
+
+// ---- PUT /api/users/:id/rank ----
+// Body: { RankID: number | null } — null لمسح رتبة الشخص (لا رتبة مضبوطة له شخصياً).
+exports.setUserRank = async (req, res) => {
+    const pool = req.app.locals.db;
+    if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
+    const { id } = req.params;
+    const rawRankId = req.body?.RankID;
+    const rankId = rawRankId == null ? null : parseInt(rawRankId, 10);
+    if (rawRankId != null && !Number.isInteger(rankId)) {
+        return res.status(400).json({ message: 'RankID must be an integer or null.' });
+    }
+    try {
+        const s = await probeUserRanksSchema(pool);
+        if (!s.HasTable) return res.status(400).json({ message: 'UserRanks table does not exist.' });
+
+        if (rankId == null) {
+            await pool.request().input('UserID', sql.NVarChar, id)
+                .query(`DELETE FROM dbo.UserRanks WHERE UserID = @UserID`);
+            return res.status(200).json({ message: 'Rank cleared successfully.' });
+        }
+
+        const existing = await pool.request().input('UserID', sql.NVarChar, id)
+            .query(`SELECT TOP 1 UserID FROM dbo.UserRanks WHERE UserID = @UserID`);
+        if (existing.recordset[0]) {
+            await pool.request()
+                .input('UserID', sql.NVarChar, id).input('RankID', sql.Int, rankId)
+                .query(`UPDATE dbo.UserRanks SET RankID = @RankID WHERE UserID = @UserID`);
+        } else {
+            await pool.request()
+                .input('UserID', sql.NVarChar, id).input('RankID', sql.Int, rankId)
+                .query(`INSERT INTO dbo.UserRanks (UserID, RankID, CreatedAt) VALUES (@UserID, @RankID, GETDATE())`);
+        }
+        res.status(200).json({ message: 'Rank updated successfully.' });
+    } catch (err) {
+        console.error('SET USER RANK ERROR:', err);
+        res.status(500).json({ message: 'Error setting rank', detail: err.message });
+    }
+};
+
 // يتحقق من كون صاحب الطلب "مدير عام" (Role=1) فعلياً عبر قاعدة البيانات — لا يُعتمد على أي
 // قيمة isAdmin قادمة من العميل، لأن هذا التحقق يحمي ميزة حساسة (عرض كلمة مرور بصيغة واضحة).
 async function isSystemAdmin(pool, rawUserId) {
@@ -156,9 +225,19 @@ exports.getAllUsers = async (req, res) => {
             }
         } catch (_) {}
 
+        // رتبة الشخص نفسه (UserRanks) — مستقلة تماماً عن رتبة المنصب الذي يشغله (VacancyRanks/
+        // JobVacancies.Rank). راجع التوضيح في setUserRank أدناه.
+        const ranksMap = new Map();
+        try {
+            const rankRows = await getUserRanksJoined(pool);
+            for (const row of rankRows) ranksMap.set(String(row.UserID).trim(), { RankID: row.RankID, RankName: row.RankName });
+        } catch (_) {}
+
         const usersWithRoles = result.recordset.map(u => ({
             ...u,
             Role: rolesMap.get(u.UserID) ?? 0,
+            RankID: ranksMap.get(String(u.UserID).trim())?.RankID ?? null,
+            RankName: ranksMap.get(String(u.UserID).trim())?.RankName ?? null,
         }));
 
         console.log(`Found ${usersWithRoles.length} users.`);

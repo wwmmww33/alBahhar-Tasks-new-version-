@@ -11,8 +11,12 @@ type User = {
   DepartmentName: string | null;
   IsActive: boolean;
   Role?: number;
+  // رتبة الشخص نفسه (UserRanks) — مستقلة عن رتبة المنصب الذي يشغله حالياً.
+  RankID?: number | null;
+  RankName?: string | null;
 };
 type Department = { DepartmentID: number; Name: string; };
+type RankOption = { RankID: number; Name?: string; RankName?: string };
 
 const ROLE_LABELS: Record<number, { label: string; className: string }> = {
   0: { label: 'مستخدم',    className: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300' },
@@ -24,6 +28,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
   const currentUserRole = currentUser?.Role ?? 0;
   const [users, setUsers] = useState<User[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
+  const [ranks, setRanks] = useState<RankOption[]>([]);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
   const [editingServiceId, setEditingServiceId] = useState('');
@@ -35,14 +40,17 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
 
   const fetchData = useCallback(async () => {
     try {
-      const [usersRes, deptsRes] = await Promise.all([
+      const [usersRes, deptsRes, ranksRes] = await Promise.all([
         fetch('/api/users'),
-        fetch('/api/departments')
+        fetch('/api/departments'),
+        fetch('/api/ranks'),
       ]);
       const usersData = await usersRes.json();
       const deptsData = await deptsRes.json();
+      const ranksData = ranksRes.ok ? await ranksRes.json() : [];
       setUsers(usersData);
       setDepartments(deptsData);
+      setRanks(Array.isArray(ranksData) ? ranksData : []);
     } catch (error) {
       console.error("Failed to fetch data:", error);
     }
@@ -90,6 +98,16 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role }),
+    });
+    fetchData();
+  };
+
+  // رتبة الشخص نفسه — مستقلة عن رتبة المنصب الذي يشغله حالياً (قد يختلفان).
+  const handleSetRank = async (user: User, rankId: number | null) => {
+    await fetch(`/api/users/${user.UserID}/rank`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ RankID: rankId }),
     });
     fetchData();
   };
@@ -160,6 +178,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
                 <th className="p-2 font-semibold">الاسم الكامل</th>
                 <th className="p-2 font-semibold">القسم</th>
                 <th className="p-2 font-semibold">الدور</th>
+                <th className="p-2 font-semibold">الرتبة</th>
                 <th className="p-2 font-semibold">إجراءات</th>
               </tr>
             </thead>
@@ -193,6 +212,22 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
                         <span className={`text-xs px-2 py-0.5 rounded font-semibold ${roleInfo.className}`}>
                           {roleInfo.label}
                         </span>
+                      )}
+                    </td>
+                    <td className="p-2">
+                      {currentUserRole === 1 ? (
+                        <select
+                          value={user.RankID ?? ''}
+                          onChange={e => handleSetRank(user, e.target.value ? parseInt(e.target.value, 10) : null)}
+                          className="text-xs px-2 py-0.5 rounded border border-content/20 bg-white dark:bg-gray-700 cursor-pointer"
+                        >
+                          <option value="">-- بلا رتبة --</option>
+                          {ranks.map(r => (
+                            <option key={r.RankID} value={r.RankID}>{r.Name || r.RankName}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        user.RankName || <span className="text-xs text-gray-400">غير محدد</span>
                       )}
                     </td>
                     <td className="p-2">

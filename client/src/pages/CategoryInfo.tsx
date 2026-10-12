@@ -4,6 +4,8 @@ import type { Category, CategoryInformation, CurrentUser } from '../types';
 import { getApiUrl } from '../config/api';
 import { getActiveUserId } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
+import { renderMarkdown } from '../utils/markdown';
+import MarkdownEditor from '../components/MarkdownEditor';
 import './CategoryInfo.css';
 
 // CSS styles for the component
@@ -369,11 +371,11 @@ const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
             <form onSubmit={handleAddInformation}>
               <div className="form-group">
                 <label htmlFor="content">المحتوى *</label>
-                <textarea
+                <MarkdownEditor
                   id="content"
                   value={newInfo.content}
-                  onChange={(e) => setNewInfo(prev => ({ ...prev, content: e.target.value }))}
-                  placeholder="أدخل محتوى المعلومة"
+                  onChange={(v) => setNewInfo(prev => ({ ...prev, content: v }))}
+                  placeholder="أدخل محتوى المعلومة... (يدعم **عريض** *مائل* - قائمة | جدول | — الصق جدول Excel مباشرة)"
                   rows={5}
                   required
                 />
@@ -407,11 +409,11 @@ const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
             <form onSubmit={handleEditInformation}>
               <div className="form-group">
                 <label htmlFor="edit-content">المحتوى *</label>
-                <textarea
+                <MarkdownEditor
                   id="edit-content"
                   value={editFormData.content}
-                  onChange={(e) => setEditFormData(prev => ({ ...prev, content: e.target.value }))}
-                  placeholder="أدخل محتوى المعلومة"
+                  onChange={(v) => setEditFormData(prev => ({ ...prev, content: v }))}
+                  placeholder="أدخل محتوى المعلومة... (يدعم **عريض** *مائل* - قائمة | جدول | — الصق جدول Excel مباشرة)"
                   rows={5}
                   required
                 />
@@ -470,7 +472,7 @@ const CategoryInfo: React.FC<CategoryInfoProps> = ({ currentUser }) => {
                         )}
                       </div>
                     </div>
-                    <div className="info-content" dangerouslySetInnerHTML={{ __html: info.Content.replace(/\n/g, '<br>') }} />
+                    <div className="info-content" dir="auto" dangerouslySetInnerHTML={{ __html: renderMarkdown(info.Content) }} />
                     <div className="info-meta info-meta-hover">
                       <small className="font-semibold">
                         {(info as any).CreatedByName && (

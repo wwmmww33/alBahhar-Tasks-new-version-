@@ -2,7 +2,7 @@
 const sql = require('mssql');
 const encryptionConfig = require('../config/encryption.config');
 const { checkTaskAccess } = require('../utils/delegationUtils');
-const { setItemDepartmentShares, canManageDepartmentSharingAndBroadcast, resolveAllowedBroadcastChain, isWithinItemBroadcastNarrowingChain } = require('../utils/departmentSharing');
+const { setItemDepartmentShares, canManageDepartmentSharingAndBroadcast, resolveAllowedBroadcastChain, isWithinItemBroadcastNarrowingChain, isDepartmentWithinPublicCalendarScope } = require('../utils/departmentSharing');
 const { resolveActorContext } = require('../utils/vacancyResolver');
 
 // يحوّل VacancyID رقمي → UserID حقيقي (للتحقق من ملكية المهام الشخصية)
@@ -1252,6 +1252,14 @@ exports.setSubtaskPublicBroadcast = async (req, res) => {
     const allowed = await canManageDepartmentSharingAndBroadcast(pool, userId, isAdmin, subtask.TaskDepartmentID);
     if (!allowed) {
       return res.status(403).json({ message: 'هذه الميزة متاحة لمدير القسم المستقل أو المفوَّض له فقط.' });
+    }
+    // إن ضبط المدير العام قسماً "مالكاً" للتقويم العام، يُقصَر تفعيل البث المفتوح على عناصر
+    // تابعة لقسمه أو مجموعته المستقلة فقط — لا قيد عند التعطيل (دوماً مسموح).
+    if (IsPublicBroadcast) {
+      const withinScope = await isDepartmentWithinPublicCalendarScope(pool, subtask.TaskDepartmentID);
+      if (!withinScope) {
+        return res.status(403).json({ message: 'البث المفتوح متاح فقط للقسم الذي يمثّل التقويم العام (يضبطه المدير العام للنظام).' });
+      }
     }
 
     await pool.request()
