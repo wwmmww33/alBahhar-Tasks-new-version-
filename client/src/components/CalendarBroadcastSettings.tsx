@@ -8,8 +8,7 @@ import type { CurrentUser } from '../types';
 import DepartmentTreeSelect, { type Department } from './DepartmentTreeSelect';
 
 const CalendarBroadcastSettings = ({ currentUser }: { currentUser?: CurrentUser }) => {
-  const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
-  const isSystemAdmin = userRole === 1;
+  const isSystemAdmin = !!currentUser?.IsAdmin;
 
   const [departments, setDepartments] = useState<Department[]>([]);
 

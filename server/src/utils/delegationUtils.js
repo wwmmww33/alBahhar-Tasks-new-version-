@@ -61,8 +61,8 @@ async function isUserManagerOrAdmin(pool, rawUserId, isAdminFlag) {
         INNER JOIN dbo.UserRoles r ON r.UserID = u.UserID
         WHERE ${whereParts.join(' OR ')}
       `);
-    const role = result.recordset[0]?.Role;
-    return role === 1 || role === 2;
+    const role = result.recordset[0]?.Role ?? 0;
+    return (role & 1) !== 0 || (role & 2) !== 0;
   } catch (_) {
     return false;
   }

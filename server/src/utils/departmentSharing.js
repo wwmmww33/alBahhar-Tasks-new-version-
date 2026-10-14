@@ -399,7 +399,7 @@ async function getPublicCalendarSettings(pool) {
   return { enabled, title, ownerDepartmentId };
 }
 
-// يتحقق هل صاحب الطلب مدير عام حقيقي للنظام (Role=1) — بعض إعدادات البث (الحد العام والحد الخاص
+// يتحقق هل صاحب الطلب مدير عام حقيقي للنظام (بت 1 من قناع Role) — بعض إعدادات البث (الحد العام والحد الخاص
 // بمنصب) حساسة ومخصصة للمدير العام فقط، وليس مديري الأقسام أو المفوَّضين. يتحقق من قاعدة البيانات
 // دوماً (لا يعتمد على قيمة isAdmin القادمة من العميل وحدها).
 async function isTrueSystemAdmin(pool, rawUserId) {
@@ -427,7 +427,7 @@ async function isTrueSystemAdmin(pool, rawUserId) {
         INNER JOIN dbo.UserRoles r ON r.UserID = u.UserID
         WHERE ${whereParts.join(' OR ')}
       `);
-    return result.recordset[0]?.Role === 1;
+    return ((result.recordset[0]?.Role ?? 0) & 1) !== 0;
   } catch (_) {
     return false;
   }

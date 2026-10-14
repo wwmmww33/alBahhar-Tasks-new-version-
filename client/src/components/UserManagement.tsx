@@ -18,14 +18,16 @@ type User = {
 type Department = { DepartmentID: number; Name: string; };
 type RankOption = { RankID: number; Name?: string; RankName?: string };
 
-const ROLE_LABELS: Record<number, { label: string; className: string }> = {
-  0: { label: 'مستخدم',    className: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300' },
-  1: { label: 'مدير عام',  className: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
-  2: { label: 'مدير قسم', className: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
-};
+// الصلاحية مخزّنة كقناع بتّات: بت 1 = مدير عام، بت 2 = مدير قسم. يمكن للمستخدم حمل كلتيهما معاً (3).
+const ROLE_BADGES: { bit: number; label: string; className: string }[] = [
+  { bit: 1, label: 'مدير عام',  className: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
+  { bit: 2, label: 'مدير قسم', className: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
+];
+const NO_ROLE_BADGE = { label: 'مستخدم', className: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300' };
 
 const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
-  const currentUserRole = currentUser?.Role ?? 0;
+  // currentUser.IsAdmin هنا "فعّال" (يراعي زر وضع العرض)؛ هذا ما يحدد ظهور أدوات تحرير الصلاحيات.
+  const isSystemAdminViewer = !!currentUser?.IsAdmin;
   const [users, setUsers] = useState<User[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [ranks, setRanks] = useState<RankOption[]>([]);
@@ -100,6 +102,13 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
       body: JSON.stringify({ role }),
     });
     fetchData();
+  };
+
+  // تبديل بت واحد ضمن قناع الصلاحيات (مدير عام / مدير قسم) دون التأثير على البت الآخر.
+  const handleToggleRoleBit = (user: User, bit: number, enabled: boolean) => {
+    const current = user.Role ?? 0;
+    const next = enabled ? (current | bit) : (current & ~bit);
+    handleSetRole(user, next);
   };
 
   // رتبة الشخص نفسه — مستقلة عن رتبة المنصب الذي يشغله حالياً (قد يختلفان).
@@ -185,7 +194,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
             <tbody>
               {users.map(user => {
                 const role = user.Role ?? 0;
-                const roleInfo = ROLE_LABELS[role] ?? ROLE_LABELS[0];
+                const activeBadges = ROLE_BADGES.filter(b => (role & b.bit) !== 0);
                 const isCurrentUser = user.UserID === currentUser?.UserID;
                 return (
                   <tr key={user.UserID} className="border-b border-content/10 hover:bg-content/5">
@@ -198,24 +207,36 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
                     <td className="p-2">{user.FullName}</td>
                     <td className="p-2">{user.DepartmentName || <span className="text-xs text-gray-400">غير محدد</span>}</td>
                     <td className="p-2">
-                      {currentUserRole === 1 && !isCurrentUser ? (
-                        <select
-                          value={role}
-                          onChange={e => handleSetRole(user, parseInt(e.target.value))}
-                          className={`text-xs px-2 py-0.5 rounded border-0 font-semibold cursor-pointer ${roleInfo.className}`}
-                        >
-                          <option value={0}>مستخدم</option>
-                          <option value={1}>مدير عام</option>
-                          <option value={2}>مدير قسم</option>
-                        </select>
+                      {isSystemAdminViewer && !isCurrentUser ? (
+                        <div className="flex flex-col gap-1">
+                          {ROLE_BADGES.map(b => (
+                            <label key={b.bit} className="flex items-center gap-1.5 text-xs cursor-pointer whitespace-nowrap">
+                              <input
+                                type="checkbox"
+                                checked={(role & b.bit) !== 0}
+                                onChange={e => handleToggleRoleBit(user, b.bit, e.target.checked)}
+                                className="w-3.5 h-3.5"
+                              />
+                              <span>{b.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : activeBadges.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {activeBadges.map(b => (
+                            <span key={b.bit} className={`text-xs px-2 py-0.5 rounded font-semibold ${b.className}`}>
+                              {b.label}
+                            </span>
+                          ))}
+                        </div>
                       ) : (
-                        <span className={`text-xs px-2 py-0.5 rounded font-semibold ${roleInfo.className}`}>
-                          {roleInfo.label}
+                        <span className={`text-xs px-2 py-0.5 rounded font-semibold ${NO_ROLE_BADGE.className}`}>
+                          {NO_ROLE_BADGE.label}
                         </span>
                       )}
                     </td>
                     <td className="p-2">
-                      {currentUserRole === 1 ? (
+                      {isSystemAdminViewer ? (
                         <select
                           value={user.RankID ?? ''}
                           onChange={e => handleSetRank(user, e.target.value ? parseInt(e.target.value, 10) : null)}
@@ -235,7 +256,7 @@ const UserManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
                         <button onClick={() => { setEditingUser(user); setNewPassword(''); setEditingServiceId(user.ServiceID || ''); }} className="text-primary hover:text-primary-dark" title="تعديل">
                           <Edit size={16}/>
                         </button>
-                        {currentUserRole === 1 && (
+                        {isSystemAdminViewer && (
                           <button
                             onClick={() => handleRevealPassword(user)}
                             disabled={revealingUserId === user.UserID}

@@ -115,6 +115,7 @@ const {
   ensureTaskQueryPerformanceIndexes,
   ensureSubtaskEndDateColumn,
   ensureUserRolesTable,
+  ensureUserRolesBitmaskSupport,
   ensureRegistrationRequestsVacancyID,
   ensureTaskRelationsTable,
   ensureTaskAssignmentNotificationsColumns,
@@ -246,6 +247,7 @@ const startServer = async () => {
     // --- جدول أدوار المستخدمين ---
     try {
       await ensureUserRolesTable(pool);
+      await ensureUserRolesBitmaskSupport(pool);
     } catch (userRolesErr) {
       console.error('⚠️ Database migration (UserRoles) failed. Server continues running.', userRolesErr);
     }

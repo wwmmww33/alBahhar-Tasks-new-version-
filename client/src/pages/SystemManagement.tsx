@@ -14,9 +14,8 @@ import type { CurrentUser } from '../types';
 type AdminTab = 'departments' | 'users' | 'requests' | 'delegations' | 'announcements' | 'directory' | 'proposals' | 'calendarBroadcast';
 
 const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
-  const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
-  const isSystemAdmin = userRole === 1;
-  const isDeptManager  = userRole === 2;
+  const isSystemAdmin = !!currentUser?.IsAdmin;
+  const isDeptManager  = ((currentUser?.Role ?? 0) & 2) !== 0;
 
   const [activeTab, setActiveTab] = useState<AdminTab>('departments');
   const [bootstrapMsg, setBootstrapMsg] = useState<string | null>(null);
@@ -65,8 +64,8 @@ const SystemManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
         )}
       </div>
 
-      {/* تنبيه تهيئة أول مدير عام — يظهر فقط للمستخدمين بدون دور (Role=0) */}
-      {userRole === 0 && (
+      {/* تنبيه تهيئة أول مدير عام — يظهر فقط للمستخدمين بدون أي صلاحية (Role=0) */}
+      {(currentUser?.Role ?? 0) === 0 && (
         <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 rounded-lg text-right">
           <p className="text-sm text-yellow-800 dark:text-yellow-200 mb-2 font-medium">
             لم يتم تعيين مدير عام للنظام بعد.

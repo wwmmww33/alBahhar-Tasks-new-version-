@@ -1,5 +1,5 @@
 // src/components/Navbar.tsx
-import { Sun, Moon, LogOut, ListTodo, PlusCircle, FileText, Shield, User, FolderOpen, Share2, LayoutGrid, List } from 'lucide-react';
+import { Sun, Moon, LogOut, ListTodo, PlusCircle, FileText, Shield, ShieldCheck, User, FolderOpen, Share2, LayoutGrid, List } from 'lucide-react';
 import { useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { useTheme } from '../contexts/ThemeProvider';
@@ -9,13 +9,17 @@ import SuggestProposalButton from './SuggestProposalButton';
 import type { CurrentUser } from '../types';
 import { getActiveAccount, getActiveUserId, clearActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
+import type { AdminViewMode } from '../utils/roleAccess';
 
 type NavbarProps = {
   currentUser: CurrentUser;
   onLogout: () => void;
+  isRawSystemAdmin: boolean;
+  adminViewMode: AdminViewMode;
+  onToggleAdminView: () => void;
 };
 
-const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
+const Navbar = ({ currentUser, onLogout, isRawSystemAdmin, adminViewMode, onToggleAdminView }: NavbarProps) => {
   // استخدام الطريقة الجديدة مع dispatch
   const { theme, mode, dispatch } = useTheme();
   const [taskLayout, setTaskLayout] = useState<'grid' | 'list'>((localStorage.getItem('task-layout') as 'grid' | 'list') || 'grid');
@@ -89,7 +93,7 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
           <NavLink to="/categories" className={navLinkStyle}><FolderOpen size={18} /><span>التصنيفات</span></NavLink>
           <NavLink to="/delegations" className={navLinkStyle}><Share2 size={18} /><span>التفويضات</span></NavLink>
           <NavLink to="/profile" className={navLinkStyle}><User size={18} /><span>الملف الشخصي</span></NavLink>
-          {(currentUser.IsAdmin || currentUser.Role === 2) && <NavLink to="/system-management" className={navLinkStyle}><Shield size={18} /><span>إدارة النظام</span></NavLink>}
+          {(currentUser.IsAdmin || ((currentUser.Role ?? 0) & 2) !== 0) && <NavLink to="/system-management" className={navLinkStyle}><Shield size={18} /><span>إدارة النظام</span></NavLink>}
         </nav>
       </div>
 
@@ -124,7 +128,23 @@ const Navbar = ({ currentUser, onLogout }: NavbarProps) => {
         <button onClick={handleToggleTaskLayout} title="تبديل عرض المهام: شبكة/قائمة" className="p-2 rounded-full text-content-secondary hover:bg-content/10 hover:text-content transition-colors">
           {taskLayout === 'grid' ? <List size={20} /> : <LayoutGrid size={20} />}
         </button>
-        
+
+        {/* زر التبديل بين الحساب العادي وحساب إدارة النظام — يظهر فقط لمن يحمل صلاحية مدير النظام */}
+        {isRawSystemAdmin && (
+          <button
+            onClick={onToggleAdminView}
+            title={adminViewMode === 'admin' ? 'التبديل إلى الحساب العادي' : 'التبديل إلى حساب إدارة النظام'}
+            className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+              adminViewMode === 'admin'
+                ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
+                : 'text-content-secondary hover:bg-content/10 hover:text-content'
+            }`}
+          >
+            {adminViewMode === 'admin' ? <ShieldCheck size={18} /> : <Shield size={18} />}
+            <span>{adminViewMode === 'admin' ? 'وضع إدارة النظام' : 'حساب عادي'}</span>
+          </button>
+        )}
+
         <div className="h-8 border-l border-content/10"></div>
         <div className="flex items-center gap-6">
             {/* مؤشر الحساب النشط */}

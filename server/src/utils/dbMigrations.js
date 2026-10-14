@@ -489,6 +489,36 @@ module.exports = {
     }
   },
 
+  // توسيع UserRoles.Role إلى قناع بتّات (bitmask): بت 1 = مدير نظام، بت 2 = مدير قسم، القيمة 3 =
+  // كلاهما معاً. القيم 0/1/2 المخزّنة سابقاً متوافقة تماماً بلا حاجة لأي تحويل بيانات — التعديل
+  // الوحيد المطلوب هو توسيع قيد CHECK القديم (IN (0,1,2)) ليسمح أيضاً بالقيمة 3.
+  ensureUserRolesBitmaskSupport: async function ensureUserRolesBitmaskSupport(pool) {
+    try {
+      const check = await pool.request().query(`
+        SELECT cc.name AS ConstraintName, cc.definition AS ConstraintDef
+        FROM sys.check_constraints cc
+        INNER JOIN sys.tables t ON t.object_id = cc.parent_object_id
+        WHERE t.name = 'UserRoles' AND cc.name = 'CK_UserRoles_Role'
+      `);
+      const existing = check.recordset[0];
+      if (existing && /\(3\)/.test(existing.ConstraintDef || '')) {
+        console.log('ℹ️ UserRoles.Role already supports bitmask value 3.');
+        return { changed: false };
+      }
+      if (existing) {
+        await pool.request().query(`ALTER TABLE dbo.UserRoles DROP CONSTRAINT CK_UserRoles_Role;`);
+      }
+      await pool.request().query(`
+        ALTER TABLE dbo.UserRoles ADD CONSTRAINT CK_UserRoles_Role CHECK (Role IN (0, 1, 2, 3));
+      `);
+      console.log('✅ Widened UserRoles.Role CHECK constraint to support bitmask value 3.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed widening UserRoles.Role constraint:', err);
+      throw err;
+    }
+  },
+
   // إنشاء جدول TaskRelations للمهام المرتبطة ببعضها
   ensureTaskRelationsTable: async function ensureTaskRelationsTable(pool) {
     try {

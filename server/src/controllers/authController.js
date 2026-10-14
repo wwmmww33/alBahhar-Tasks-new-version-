@@ -146,7 +146,9 @@ exports.login = async (req, res) => {
         const { PasswordHash, ...userWithoutPassword } = user;
         res.status(200).json({
             message: 'Login successful',
-            user: { ...userWithoutPassword, Role: userRole, IsAdmin: userRole === 1 },
+            // Role قناع بتّات: بت 1 = مدير عام. IsAdmin تُحسب هنا من البت فقط (لا تتأثر بوضع العرض —
+            // ذاك تفضيل عرض محض على العميل، يُطبَّق لاحقاً فوق هذه القيمة الخام).
+            user: { ...userWithoutPassword, Role: userRole, IsAdmin: (userRole & 1) !== 0 },
         });
 
     } catch (error) {

@@ -82,8 +82,8 @@ exports.setUserRank = async (req, res) => {
     }
 };
 
-// يتحقق من كون صاحب الطلب "مدير عام" (Role=1) فعلياً عبر قاعدة البيانات — لا يُعتمد على أي
-// قيمة isAdmin قادمة من العميل، لأن هذا التحقق يحمي ميزة حساسة (عرض كلمة مرور بصيغة واضحة).
+// يتحقق من كون صاحب الطلب "مدير عام" (بت 1 من قناع Role) فعلياً عبر قاعدة البيانات — لا يُعتمد على
+// أي قيمة isAdmin قادمة من العميل، لأن هذا التحقق يحمي ميزة حساسة (عرض كلمة مرور بصيغة واضحة).
 async function isSystemAdmin(pool, rawUserId) {
     const loginId = String(rawUserId || '').trim();
     if (!loginId) return false;
@@ -107,7 +107,7 @@ async function isSystemAdmin(pool, rawUserId) {
                 INNER JOIN dbo.UserRoles r ON r.UserID = u.UserID
                 WHERE ${whereParts.join(' OR ')}
             `);
-        return result.recordset[0]?.Role === 1;
+        return ((result.recordset[0]?.Role ?? 0) & 1) !== 0;
     } catch (_) {
         return false;
     }
@@ -259,7 +259,7 @@ exports.bootstrapAdmin = async (req, res) => {
         if (!s.HasTable) return res.status(400).json({ message: 'UserRoles table does not exist.' });
 
         const adminCheck = await pool.request()
-            .query(`SELECT COUNT(*) AS cnt FROM dbo.UserRoles WHERE Role = 1`);
+            .query(`SELECT COUNT(*) AS cnt FROM dbo.UserRoles WHERE (Role & 1) <> 0`);
         if (adminCheck.recordset[0].cnt > 0) {
             return res.status(403).json({ message: 'يوجد مدير عام بالفعل. لا يمكن استخدام هذه الوظيفة.' });
         }
@@ -268,9 +268,10 @@ exports.bootstrapAdmin = async (req, res) => {
             .input('UserID', sql.NVarChar, String(userId).trim())
             .query(`SELECT TOP 1 UserID FROM dbo.UserRoles WHERE UserID = @UserID`);
         if (existing.recordset[0]) {
+            // دمج بت "مدير عام" مع ما قد يحمله المستخدم من صلاحيات أخرى (مثل مدير قسم) دون استبدالها.
             await pool.request()
                 .input('UserID', sql.NVarChar, String(userId).trim())
-                .query(`UPDATE dbo.UserRoles SET Role = 1 WHERE UserID = @UserID`);
+                .query(`UPDATE dbo.UserRoles SET Role = Role | 1 WHERE UserID = @UserID`);
         } else {
             await pool.request()
                 .input('UserID', sql.NVarChar, String(userId).trim())
@@ -283,13 +284,13 @@ exports.bootstrapAdmin = async (req, res) => {
     }
 };
 
-// تعيين دور مستخدم في UserRoles (0=عادي، 1=مدير عام، 2=مدير قسم)
+// تعيين دور مستخدم في UserRoles — قناع بتّات: بت 1 = مدير عام، بت 2 = مدير قسم، 3 = كلاهما معاً.
 exports.setUserRole = async (req, res) => {
     const pool = req.app.locals.db;
     if (!pool) return res.status(503).json({ message: 'Database connection is not available.' });
     const { id } = req.params;
     const roleNum = parseInt(req.body?.role ?? req.body?.Role, 10);
-    if (![0, 1, 2].includes(roleNum)) return res.status(400).json({ message: 'Role must be 0, 1, or 2.' });
+    if (![0, 1, 2, 3].includes(roleNum)) return res.status(400).json({ message: 'Role must be between 0 and 3.' });
     try {
         const s = await probeUserRolesSchema(pool);
         if (!s.HasTable) return res.status(400).json({ message: 'UserRoles table does not exist.' });

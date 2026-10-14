@@ -51,8 +51,7 @@ type VacantDelegation = {
 };
 
 const DelegationManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
-  const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
-  const isManager = userRole === 1 || userRole === 2; // مدير النظام أو مدير القسم
+  const isManager = !!currentUser?.IsAdmin || ((currentUser?.Role ?? 0) & 2) !== 0; // مدير النظام أو مدير القسم
   const managerDeptId = currentUser?.DepartmentID;
 
   const [delegations, setDelegations] = useState<Delegation[]>([]);

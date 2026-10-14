@@ -91,9 +91,8 @@ function getSubtreeIds(rootId: number, allDepts: Department[]): Set<number> {
 
 
 const DepartmentManagement = ({ currentUser }: { currentUser?: CurrentUser }) => {
-  const userRole = currentUser?.Role ?? (currentUser?.IsAdmin ? 1 : 0);
-  const isSystemAdmin = userRole === 1;
-  const isManager     = userRole === 2;
+  const isSystemAdmin = !!currentUser?.IsAdmin;
+  const isManager     = ((currentUser?.Role ?? 0) & 2) !== 0;
   const [departments, setDepartments] = useState<Department[]>([]);
   const [newDepartmentName, setNewDepartmentName] = useState('');
   const [newDepartmentParentId, setNewDepartmentParentId] = useState<number | null>(null);
