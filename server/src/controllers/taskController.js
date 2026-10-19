@@ -2837,8 +2837,9 @@ const SIMILAR_TASK_THRESHOLD = 0.4;
 const SIMILAR_TASK_CHAR_THRESHOLD = 0.6;
 
 // GET /api/tasks/similar?title=...&userId=...&isAdmin=...&excludeTaskId=...
-// يبحث عن مهام مشابهة العنوان عبر كل قاعدة البيانات (وليس ضمن نطاق وصول المستخدم فقط) لمنع
-// ازدواجية العمل. للمهام التي لا يملك المستخدم صلاحية الوصول إليها، تُعاد تسميتها ومنشئها فقط
+// يبحث عن مهام مشابهة العنوان ضمن القسم المستقل الذي ينتمي إليه مستخدم الطلب فقط (وليس عبر كل
+// قاعدة البيانات) — المهام من أقسام مستقلة أخرى غير ذات صلة ولا يجوز اقتراحها. للمهام ضمن نفس
+// المجموعة المستقلة التي لا يملك المستخدم صلاحية الوصول إليها، تُعاد تسميتها ومنشئها فقط
 // (دون وصف/مهام فرعية/تعليقات) لاقتراح التواصل مع منشئها بدل كشف محتواها.
 exports.findSimilarTasks = async (req, res) => {
     const pool = req.app.locals.db;
@@ -2854,13 +2855,28 @@ exports.findSimilarTasks = async (req, res) => {
         const isAdminFlag = isAdmin === 'true' || isAdmin === true;
         const excludeId = excludeTaskId ? parseInt(excludeTaskId, 10) : null;
 
-        // لا يمكن فلترة العناوين المُعمّاة عبر SQL — نجلب كل المهام غير الشخصية (عمود خفيف) ونقارن بعد فك التعمية
+        // نطاق البحث: القسم المستقل لمستخدم الطلب فقط (جذر المديرية المستقلة + كل أبنائها)
+        const actorCtx = await resolveActorContext(pool, userId);
+        const deptScope = actorCtx?.departmentId != null
+            ? await resolveIndependentDeptGroup(pool, actorCtx.departmentId)
+            : [];
+
+        if (deptScope.length === 0) {
+            return res.json([]);
+        }
+
+        // لا يمكن فلترة العناوين المُعمّاة عبر SQL — نجلب مهام القسم المستقل غير الشخصية (عمود خفيف) ونقارن بعد فك التعمية
         const personalProbe = await pool.request().query(`SELECT COL_LENGTH('dbo.Tasks','PersonalOwnerUserID') AS Len`);
         const hasPersonalCol = !!(personalProbe.recordset[0]?.Len);
-        const personalFilter = hasPersonalCol ? 'WHERE PersonalOwnerUserID IS NULL' : '';
+        const personalFilter = hasPersonalCol ? 'AND PersonalOwnerUserID IS NULL' : '';
 
-        const allResult = await pool.request().query(`
-            SELECT TaskID, Title FROM dbo.Tasks ${personalFilter}
+        const scopeRequest = pool.request();
+        const deptPlaceholders = deptScope.map((id, i) => {
+            scopeRequest.input(`Dept${i}`, sql.Int, id);
+            return `@Dept${i}`;
+        }).join(',');
+        const allResult = await scopeRequest.query(`
+            SELECT TaskID, Title FROM dbo.Tasks WHERE DepartmentID IN (${deptPlaceholders}) ${personalFilter}
         `);
 
         const scored = [];

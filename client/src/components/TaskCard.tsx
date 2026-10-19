@@ -101,14 +101,22 @@ const TaskCard: React.FC<TaskCardProps> = ({
       ? 'border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20 dark:border-red-400'
       : 'border-l-4 border-blue-500 bg-white dark:bg-gray-800 dark:border-blue-400';
 
+  // ترتيب المهام الفرعية من الأقدم إلى الأحدث حسب تاريخ الاستحقاق (بلا تاريخ استحقاق تُعرض أخيراً)
+  const sortByDueDateAsc = (list: Subtask[]) =>
+    [...list].sort((a, b) => {
+      const aTime = a.DueDate ? new Date(a.DueDate).getTime() : Infinity;
+      const bTime = b.DueDate ? new Date(b.DueDate).getTime() : Infinity;
+      return aTime - bTime;
+    });
+
   // الحصول على المهام الفرعية غير المكتملة مع إظهار مهام المستخدم أولاً
   const incompleteSubtasksRaw = task.subtasks?.filter(subtask => !subtask.IsCompleted) || [];
   const incompleteSubtasks = isMySubtask
     ? [
-        ...incompleteSubtasksRaw.filter(st => isMySubtask(st)),
-        ...incompleteSubtasksRaw.filter(st => !isMySubtask(st)),
+        ...sortByDueDateAsc(incompleteSubtasksRaw.filter(st => isMySubtask(st))),
+        ...sortByDueDateAsc(incompleteSubtasksRaw.filter(st => !isMySubtask(st))),
       ]
-    : incompleteSubtasksRaw;
+    : sortByDueDateAsc(incompleteSubtasksRaw);
   
   // تحديد ما إذا كانت البطاقة تحتوي على إشعارات إسناد أو تعليقات
   const hasAssignmentNotifications = (task.HasAssignmentNotifications || 0) > 0;
