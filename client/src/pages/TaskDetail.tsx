@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { writeClipboard, readClipboard } from '../utils/clipboard';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import UnifiedTimeline from '../components/UnifiedTimeline';
-import RelatedTasksSection from '../components/RelatedTasksSection';
+import TaskLinksSection from '../components/TaskLinksSection';
 import MergeTaskModal from '../components/MergeTaskModal';
 import TaskSharingModal from '../components/TaskSharingModal';
 import PublicCalendarDrawer from '../components/PublicCalendarDrawer';
@@ -384,7 +384,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
     }
   };
 
-  const handleCommentSubmit = async (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean; calendarEndDate?: string | null; calendarBroadcastDepartmentId?: number | null }) => {
+  const handleCommentSubmit = async (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean; calendarEndDate?: string | null; calendarBroadcastDepartmentId?: number | null; parentCommentId?: number | null }) => {
     setIsSubmittingComment(true);
     try {
         // التعامل مع البيانات القديمة (string) والجديدة (object)
@@ -393,6 +393,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         let calendarEndDate: string | null = null;
         let calendarBroadcastDepartmentId: number | null = null;
         let showInCalendar = false;
+        let parentCommentId: number | null = null;
 
         if (typeof commentData === 'string') {
             content = commentData;
@@ -401,6 +402,7 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             calendarDisplayDate = commentData.calendarDisplayDate;
             calendarEndDate = commentData.calendarEndDate ?? null;
             calendarBroadcastDepartmentId = commentData.calendarBroadcastDepartmentId ?? null;
+            parentCommentId = commentData.parentCommentId ?? null;
             if (typeof commentData.showInCalendar === 'boolean') {
               showInCalendar = commentData.showInCalendar;
             }
@@ -411,7 +413,8 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
             UserID: actorId,
             ActedBy: _tdDelegateUserId ?? actorId,
             Content: content,
-            ShowInCalendar: showInCalendar
+            ShowInCalendar: showInCalendar,
+            ParentCommentID: parentCommentId
         };
 
         // تاريخ ظهور التعليق في التقويم (مستقل عن تاريخ الإنشاء الفعلي)
@@ -914,14 +917,16 @@ const TaskDetail = ({ currentUser }: TaskDetailProps) => {
         </div>
       </div>
 
-      {/* المهام المرتبطة */}
-      <RelatedTasksSection
+      {/* المهام المرتبطة ونسَب المهمة */}
+      <TaskLinksSection
         taskId={task.TaskID}
-        userId={actorId}
-        isAdmin={currentUser.IsAdmin}
+        userId={String(actorId)}
+        isAdmin={!!currentUser.IsAdmin}
         isPersonal={!!task.PersonalOwnerUserID}
         originalUserId={task.PersonalOwnerUserID ? String(task.PersonalOwnerUserID) : String(currentUser.UserID)}
         deptId={task.DepartmentID ?? null}
+        parentTask={task.ParentTask ?? null}
+        onParentChanged={fetchAllDetails}
       />
 
 

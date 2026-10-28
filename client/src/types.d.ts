@@ -53,6 +53,8 @@ export type Task = {
   Subtasks?: Subtask[];
   PersonalOwnerUserID?: string | null;
   CalendarBroadcastDepartmentID?: number | null;
+  ParentTaskID?: number | null;
+  ParentTask?: { TaskID: number; Title: string; hasAccess: boolean } | null;
 };
 
 // Category related types
@@ -100,6 +102,8 @@ export type Comment = {
   UserName?: string;
   ActedByName?: string;
   Notes?: string | null;
+  ParentCommentID?: number | null;
+  ParentComment?: { CommentID: number; Content: string; UserName?: string } | null;
 };
 
 export type CurrentUser = {

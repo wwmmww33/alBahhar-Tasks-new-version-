@@ -46,7 +46,7 @@ const RelatedTasksSection = ({ taskId, userId, isAdmin, isPersonal = false, orig
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<RelatedTask[]>([]);
   const [isSearching, setIsSearching] = useState(false);
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
   const [selectedToAdd, setSelectedToAdd] = useState<Set<number>>(new Set());
   const [isAdding, setIsAdding] = useState(false);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -55,7 +55,11 @@ const RelatedTasksSection = ({ taskId, userId, isAdmin, isPersonal = false, orig
     setIsLoading(true);
     try {
       const res = await fetch(getApiUrl(`tasks/${taskId}/related`));
-      if (res.ok) setRelatedTasks(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setRelatedTasks(data);
+        if (data.length > 0) setIsExpanded(true);
+      }
     } catch (_) {
       // silent
     } finally {
@@ -125,10 +129,10 @@ const RelatedTasksSection = ({ taskId, userId, isAdmin, isPersonal = false, orig
   const filteredResults = searchResults.filter(t => !linkedIds.has(t.TaskID));
 
   return (
-    <div className="mt-6 border border-content/10 rounded-lg overflow-hidden">
+    <div>
       {/* Header */}
       <div
-        className="flex items-center justify-between px-4 py-3 bg-content/5 cursor-pointer select-none"
+        className="flex items-center justify-between px-4 py-2.5 hover:bg-content/5 cursor-pointer select-none transition-colors"
         onClick={() => setIsExpanded(v => !v)}
       >
         <div className="flex items-center gap-2 text-sm font-semibold text-content">

@@ -551,6 +551,56 @@ module.exports = {
     }
   },
 
+  // عمود "المهمة الأم" (ParentTaskID) — مهمة منبثقة من مهمة أخرى (نسَب/تفرّع، أب واحد فقط لكل
+  // مهمة)، بخلاف TaskRelations (ارتباط أفقي تعريفي بين مهمتين قائمتين). مرجع ذاتي على Tasks نفسها.
+  // SQL Server يرفض ON DELETE SET NULL على FK ذاتي المرجع (قد يتسبب بدورات)، فنتركه NO ACTION
+  // الافتراضي، ونتولّى فكّ ارتباط الأبناء (ParentTaskID = NULL) يدوياً داخل deleteTask قبل الحذف.
+  ensureTaskParentIdColumn: async function ensureTaskParentIdColumn(pool) {
+    try {
+      const check = await pool.request().query(`SELECT COL_LENGTH('dbo.Tasks','ParentTaskID') AS Len`);
+      if (check.recordset[0]?.Len) {
+        console.log('ℹ️ ParentTaskID column already exists in Tasks.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        ALTER TABLE dbo.Tasks ADD ParentTaskID INT NULL
+          CONSTRAINT FK_Tasks_ParentTaskID REFERENCES dbo.Tasks(TaskID);
+      `);
+      await pool.request().query(`
+        CREATE INDEX IX_Tasks_ParentTaskID ON dbo.Tasks(ParentTaskID) WHERE ParentTaskID IS NOT NULL;
+      `);
+      console.log('✅ Added ParentTaskID column (+ index) to Tasks table.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring ParentTaskID column in Tasks:', err);
+      throw err;
+    }
+  },
+
+  // الرد على تعليق: مرجع ذاتي اختياري على نفس جدول Comments (أب واحد لكل رد، بلا حد لعمق التفريع
+  // منطقياً — يُعرض العرض بترتيب زمني مسطّح في الواجهة مع إشارة بصرية لمن يُرَدّ عليه، لا كتفريع شجري).
+  ensureCommentParentIdColumn: async function ensureCommentParentIdColumn(pool) {
+    try {
+      const check = await pool.request().query(`SELECT COL_LENGTH('dbo.Comments','ParentCommentID') AS Len`);
+      if (check.recordset[0]?.Len) {
+        console.log('ℹ️ ParentCommentID column already exists in Comments.');
+        return { changed: false };
+      }
+      await pool.request().query(`
+        ALTER TABLE dbo.Comments ADD ParentCommentID INT NULL
+          CONSTRAINT FK_Comments_ParentCommentID REFERENCES dbo.Comments(CommentID);
+      `);
+      await pool.request().query(`
+        CREATE INDEX IX_Comments_ParentCommentID ON dbo.Comments(ParentCommentID) WHERE ParentCommentID IS NOT NULL;
+      `);
+      console.log('✅ Added ParentCommentID column (+ index) to Comments table.');
+      return { changed: true };
+    } catch (err) {
+      console.error('❌ Failed ensuring ParentCommentID column in Comments:', err);
+      throw err;
+    }
+  },
+
   // جدول سجل إجراءات المهام (إتمام / إلغاء / حذف / دمج)
   ensureTaskAuditLogTable: async function ensureTaskAuditLogTable(pool) {
     try {

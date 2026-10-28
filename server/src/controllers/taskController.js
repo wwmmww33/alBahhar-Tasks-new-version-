@@ -892,7 +892,7 @@ exports.assignTask = async (req, res) => {
 
 exports.createTask = async (req, res) => {
   // createTask المصحح — يدعم مخطط VacancyID الجديد ومخطط UserID القديم، وكذلك المهام الشخصية
-  const { Title, Description, DepartmentID, Priority, DueDate, subtasks, CreatedBy, ActedBy, CategoryID, URL, IsPersonal, PersonalOwnerUserID, CalendarBroadcastDepartmentID, isAdmin } = req.body;
+  const { Title, Description, DepartmentID, Priority, DueDate, subtasks, CreatedBy, ActedBy, CategoryID, URL, IsPersonal, PersonalOwnerUserID, CalendarBroadcastDepartmentID, ParentTaskID, isAdmin } = req.body;
   const encryptedDescription = Description ? encryptionConfig.encrypt(Description) : null;
   const encryptedTitle = encryptionConfig.encrypt(Title);
   const isPersonalTask = !!(IsPersonal);
@@ -968,6 +968,28 @@ exports.createTask = async (req, res) => {
           taskVals.push('@CalendarBroadcastDepartmentID');
           taskRequest.input('CalendarBroadcastDepartmentID', sql.Int, requestedDeptId);
         }
+      }
+    }
+
+    // المهمة الأم (مهمة منبثقة) — تتطلب وجود المهمة الهدف وصلاحية عرضها على الأقل لمن يُنشئ
+    if (ParentTaskID != null && String(ParentTaskID).trim() !== '') {
+      const parentIdInt = parseInt(ParentTaskID, 10);
+      if (!Number.isInteger(parentIdInt)) {
+        await transaction.rollback();
+        return res.status(400).json({ message: 'معرّف المهمة الأم غير صالح.' });
+      }
+      const parentAccess = await checkTaskAccess(pool, parentIdInt, CreatedBy, isAdmin === true || isAdmin === 'true', 'view');
+      if (!parentAccess.hasAccess) {
+        await transaction.rollback();
+        return res.status(400).json({ message: 'المهمة الأم غير موجودة أو لا تملك صلاحية الوصول إليها.' });
+      }
+      const parentColProbe = await (new sql.Request(transaction)).query(
+        `SELECT COL_LENGTH('dbo.Tasks','ParentTaskID') AS Len`
+      );
+      if (parentColProbe.recordset[0]?.Len) {
+        taskCols.push('ParentTaskID');
+        taskVals.push('@ParentTaskID');
+        taskRequest.input('ParentTaskID', sql.Int, parentIdInt);
       }
     }
 
@@ -1150,6 +1172,22 @@ exports.getTaskById = async (req, res) => {
     if (taskData.Title) {
       try { taskData.Title = encryptionConfig.decrypt(taskData.Title); } catch (e) {}
     }
+
+    // معلومات المهمة الأم (مهمة منبثقة) — العنوان فقط، مع إشارة هل يملك الفاعل صلاحية فتحها
+    if (taskData.ParentTaskID != null) {
+      try {
+        const parentAccess = await checkTaskAccess(pool, taskData.ParentTaskID, userId, isAdmin === 'true', 'view');
+        const parentRow = await pool.request().input('ParentTaskID', sql.Int, taskData.ParentTaskID)
+          .query(`SELECT TaskID, Title FROM dbo.Tasks WHERE TaskID = @ParentTaskID`);
+        const p = parentRow.recordset[0];
+        if (p) {
+          let parentTitle = p.Title;
+          try { parentTitle = encryptionConfig.decrypt(parentTitle); } catch (_) {}
+          taskData.ParentTask = { TaskID: p.TaskID, Title: parentTitle, hasAccess: parentAccess.hasAccess };
+        }
+      } catch (_) { /* تجاهل دفاعياً — المهمة الأم قد تكون حُذفت */ }
+    }
+
     res.status(200).json(taskData);
   } catch (error) { 
     console.error('Error fetching task details:', error);
@@ -1349,6 +1387,18 @@ exports.getCommentsForTask = async (req, res) => {
       }
       return c;
     });
+
+    // إرفاق معاينة التعليق الأصل لكل رد (فقط إن كان الأصل ضمن نفس المهمة المُجلَبة هنا)
+    const byId = new Map(comments.map(c => [c.CommentID, c]));
+    for (const c of comments) {
+      if (c.ParentCommentID != null) {
+        const parent = byId.get(c.ParentCommentID);
+        c.ParentComment = parent
+          ? { CommentID: parent.CommentID, Content: parent.Content, UserName: parent.UserName }
+          : null;
+      }
+    }
+
     res.status(200).json(comments);
   } catch (error) { 
     console.error('Error fetching comments:', error);
@@ -1731,6 +1781,12 @@ exports.deleteTask = async (req, res) => {
       .input('TaskID', sql.Int, taskIdInt)
       .query(`IF OBJECT_ID('dbo.TaskRelations','U') IS NOT NULL
                 DELETE FROM dbo.TaskRelations WHERE TaskID1 = @TaskID OR TaskID2 = @TaskID`);
+
+    // فكّ ارتباط أي مهام منبثقة من هذه المهمة (أبناء) بدل منع حذفها بسبب قيد FK الذاتي
+    await new sql.Request(transaction)
+      .input('TaskID', sql.Int, taskIdInt)
+      .query(`IF COL_LENGTH('dbo.Tasks','ParentTaskID') IS NOT NULL
+                UPDATE dbo.Tasks SET ParentTaskID = NULL WHERE ParentTaskID = @TaskID`);
 
     // حذف المهمة الرئيسية
     await new sql.Request(transaction)

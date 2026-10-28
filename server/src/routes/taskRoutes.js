@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const taskController = require('../controllers/taskController');
 const taskRelationController = require('../controllers/taskRelationController');
+const taskLineageController = require('../controllers/taskLineageController');
 
 // --- الترتيب الصحيح للمسارات ---
 
@@ -93,6 +94,10 @@ router.delete('/:id', taskController.deleteTask);
 router.get('/:id/related', taskRelationController.getRelatedTasks);
 router.post('/:id/related', taskRelationController.addRelatedTask);
 router.delete('/:id/related/:relatedId', taskRelationController.removeRelatedTask);
+
+// المهام المنبثقة (نسَب/تفرّع — أب واحد لكل مهمة)
+router.get('/:id/children', taskLineageController.getTaskChildren);
+router.put('/:id/parent', taskLineageController.setTaskParent);
 
 // دمج مهمتين
 router.post('/:id/merge', taskController.mergeTasks);

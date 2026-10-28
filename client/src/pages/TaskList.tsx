@@ -150,6 +150,14 @@ const TaskList = ({ currentUser }: TaskListProps) => {
   const [activityPage, setActivityPage] = useState(0);
   const [activityInfoMsg, setActivityInfoMsg] = useState<string | null>(null);
   const [effectiveActorIdFromApi, setEffectiveActorIdFromApi] = useState<string>('');
+  const [collapsedActivityGroups, setCollapsedActivityGroups] = useState<Set<number>>(new Set());
+  const toggleActivityGroup = (taskId: number) => {
+    setCollapsedActivityGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
+      return next;
+    });
+  };
 
   // حدّ أقصى للعودة للوراء: 52 أسبوعاً (سنة كاملة)
   const ACTIVITY_MAX_PAGES = 52;
@@ -1547,6 +1555,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
               {groupedActivity.map((group) => {
                 const isCompleted = group.TaskStatus === 'completed';
                 const isMulti = group.items.length > 1;
+                const isCollapsed = collapsedActivityGroups.has(group.TaskID);
 
                 return (
                   <div
@@ -1554,11 +1563,16 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     className="border rounded-lg shadow-sm transition-all hover:shadow-md bg-white dark:bg-gray-800 border-content/10 overflow-hidden"
                   >
                     {/* رأس المجموعة — عنوان المهمة + أحدث وقت */}
-                    <div className="flex items-center justify-between gap-2 px-4 py-3 bg-gray-50 dark:bg-gray-700/50 border-b border-content/10">
+                    <div
+                      className="flex items-center justify-between gap-2 px-4 py-3 bg-gray-50 dark:bg-gray-700/50 border-b border-content/10 cursor-pointer select-none"
+                      onClick={() => toggleActivityGroup(group.TaskID)}
+                    >
                       <div className="flex items-center gap-2 min-w-0">
+                        <ChevronDown size={14} className={`text-content-secondary flex-shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
                         <ClipboardList size={16} className="text-blue-500 flex-shrink-0" />
                         <Link
                           to={`/task/${group.TaskID}`}
+                          onClick={(e) => e.stopPropagation()}
                           className={`font-semibold text-sm hover:underline truncate ${isCompleted ? 'text-gray-400 line-through' : 'text-primary'}`}
                         >
                           {group.TaskTitle}
@@ -1582,6 +1596,7 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                     </div>
 
                     {/* قائمة التحديثات داخل المجموعة */}
+                    {!isCollapsed && (
                     <div className={isMulti ? 'divide-y divide-content/5' : ''}>
                       {group.items.map((item) => {
                         const itemKey = `${item.ItemType}-${item.SubtaskID ?? item.CommentID ?? item.TaskID}-${item.CreatedAt}`;
@@ -1649,10 +1664,11 @@ const TaskList = ({ currentUser }: TaskListProps) => {
                         );
                       })}
                     </div>
+                    )}
                   </div>
                 );
               })}
-              
+
               {/* زر تحميل المزيد */}
               {activityHasMore && (
                 <div className="flex justify-center pt-4">

@@ -1,5 +1,5 @@
 // src/components/UnifiedTimeline.tsx
-import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy, ArrowRightLeft, Share2, X, Globe } from 'lucide-react';
+import { Check, Square, Trash2, UserPlus, Calendar, Clock, MessageCircle, CheckSquare, Users, Bell, Copy, ArrowRightLeft, Share2, X, Globe, CornerUpLeft } from 'lucide-react';
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import type { Subtask, User, CurrentUser } from '../types';
 import { useNotification } from '../contexts/NotificationContext';
@@ -63,6 +63,8 @@ type Comment = {
   ShowInCalendar?: boolean;
   SharedDepartmentIds?: number[];
   IsPublicBroadcast?: boolean;
+  ParentCommentID?: number | null;
+  ParentComment?: { CommentID: number; Content: string; UserName?: string } | null;
 };
 
 type TimelineItem = {
@@ -81,7 +83,7 @@ type UnifiedTimelineProps = {
   currentUser: CurrentUser;
   task: any;
   onSubtaskUpdate: () => void;
-  onCommentSubmit: (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean; calendarEndDate?: string | null; calendarBroadcastDepartmentId?: number | null }) => Promise<void>;
+  onCommentSubmit: (commentData: string | { content: string; calendarDisplayDate: string | null; showInCalendar?: boolean; calendarEndDate?: string | null; calendarBroadcastDepartmentId?: number | null; parentCommentId?: number | null }) => Promise<void>;
   isSubmittingComment: boolean;
   onCommentsUpdate: () => void;
   shareDepartmentNamesById?: Record<number, string>;
@@ -233,6 +235,9 @@ const UnifiedTimeline = ({
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [reminderMinutes, setReminderMinutes] = useState(15);
   const [newComment, setNewComment] = useState('');
+  const [replyTargetId, setReplyTargetId] = useState<number | null>(null);
+  const [replyContent, setReplyContent] = useState('');
+  const [isSubmittingReply, setIsSubmittingReply] = useState(false);
   const [showCommentPreview, setShowCommentPreview] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showCommentInCalendar, setShowCommentInCalendar] = useState(false);
@@ -906,6 +911,19 @@ const UnifiedTimeline = ({
     }
   };
 
+  const handleReplySubmit = async (parentCommentId: number) => {
+    const trimmed = replyContent.trim();
+    if (!trimmed || isSubmittingReply) return;
+    setIsSubmittingReply(true);
+    try {
+      await onCommentSubmit({ content: trimmed, calendarDisplayDate: null, parentCommentId });
+      setReplyContent('');
+      setReplyTargetId(null);
+    } finally {
+      setIsSubmittingReply(false);
+    }
+  };
+
   // يُستدعى عند تأكيد التاريخ/الوقت من نافذة اختيار "تاريخ ظهور التعليق في التقويم" —
   // سواء كانت المهمة تفعيل الإظهار لتعليق جديد قيد الكتابة أو لتعليق موجود مسبقاً. إن فُعِّل خيار
   // "حدث ممتد" تُرسَل نهاية أيضاً، فيظهر التعليق كحدث له بداية ونهاية دون إسناده لأي شخص.
@@ -1473,6 +1491,20 @@ const UnifiedTimeline = ({
         </div>
         <div className="flex-grow">
           <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-lg border border-green-200 dark:border-green-800">
+            {comment.ParentCommentID != null && (
+              <div className="relative inline-block group/reply mb-2">
+                <span className="inline-flex items-center gap-1 text-[11px] text-content-secondary bg-content/5 px-1.5 py-0.5 rounded-full cursor-default">
+                  <CornerUpLeft size={10} />
+                  رد {comment.ParentComment?.UserName ? `على ${comment.ParentComment.UserName}` : 'على تعليق'}
+                </span>
+                {comment.ParentComment && (
+                  <div className="absolute z-20 hidden group-hover/reply:block top-full right-0 mt-1 w-64 p-2 rounded-md shadow-lg border border-content/10 bg-white dark:bg-gray-800 text-xs text-content">
+                    <p className="font-medium text-content-secondary mb-1">{comment.ParentComment.UserName || 'تعليق'}:</p>
+                    <p className="whitespace-pre-wrap break-words line-clamp-4">{comment.ParentComment.Content}</p>
+                  </div>
+                )}
+              </div>
+            )}
             {isEditing ? (
               <div className="relative">
                 <textarea
@@ -1609,6 +1641,16 @@ const UnifiedTimeline = ({
                 )}
               </div>
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setReplyContent('');
+                    setReplyTargetId(prev => prev === comment.CommentID ? null : comment.CommentID);
+                  }}
+                  className={replyTargetId === comment.CommentID ? 'text-primary' : 'text-content-secondary hover:text-primary'}
+                  title="الرد على هذا التعليق"
+                >
+                  <CornerUpLeft size={14} />
+                </button>
                 {canManage && (
                   <button
                     onClick={() => setMovingComment(comment)}
@@ -1673,6 +1715,44 @@ const UnifiedTimeline = ({
               })}
             </span>
           </div>
+
+          {replyTargetId === comment.CommentID && (
+            <div className="mt-2 p-2 rounded-lg border border-content/10 bg-content/5">
+              <textarea
+                autoFocus
+                value={replyContent}
+                onChange={(e) => setReplyContent(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleReplySubmit(comment.CommentID);
+                  } else if (e.key === 'Escape') {
+                    setReplyTargetId(null);
+                  }
+                }}
+                placeholder={`الرد على ${comment.UserName || 'هذا التعليق'}...`}
+                className="w-full p-2 border border-content/20 rounded bg-bkg dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 text-sm resize-none"
+                rows={2}
+              />
+              <div className="flex justify-end gap-2 mt-1.5">
+                <button
+                  type="button"
+                  onClick={() => { setReplyTargetId(null); setReplyContent(''); }}
+                  className="text-xs text-content-secondary hover:text-content px-2 py-1"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleReplySubmit(comment.CommentID)}
+                  disabled={!replyContent.trim() || isSubmittingReply}
+                  className="text-xs bg-primary text-white px-3 py-1 rounded hover:bg-primary/90 disabled:bg-gray-400"
+                >
+                  {isSubmittingReply ? 'جاري الإرسال...' : 'رد'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );

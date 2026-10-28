@@ -118,6 +118,8 @@ const {
   ensureUserRolesBitmaskSupport,
   ensureRegistrationRequestsVacancyID,
   ensureTaskRelationsTable,
+  ensureTaskParentIdColumn,
+  ensureCommentParentIdColumn,
   ensureTaskAssignmentNotificationsColumns,
   ensureNotesColumns,
   ensureTaskAuditLogTable,
@@ -264,6 +266,20 @@ const startServer = async () => {
       await ensureTaskRelationsTable(pool);
     } catch (relErr) {
       console.error('⚠️ Database migration (TaskRelations) failed. Server continues running.', relErr);
+    }
+
+    // --- عمود المهمة الأم (مهام منبثقة) ---
+    try {
+      await ensureTaskParentIdColumn(pool);
+    } catch (parentErr) {
+      console.error('⚠️ Database migration (ParentTaskID) failed. Server continues running.', parentErr);
+    }
+
+    // --- عمود الرد على تعليق ---
+    try {
+      await ensureCommentParentIdColumn(pool);
+    } catch (commentParentErr) {
+      console.error('⚠️ Database migration (ParentCommentID) failed. Server continues running.', commentParentErr);
     }
 
     // --- أعمدة إشعارات إسناد المهام الفرعية ---

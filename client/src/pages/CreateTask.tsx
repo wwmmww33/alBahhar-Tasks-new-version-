@@ -1,7 +1,7 @@
 // src/pages/CreateTask.tsx
 import React, { useState, useEffect } from 'react';
 import { readClipboard } from '../utils/clipboard';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import type { CurrentUser } from '../types';
 import { getActiveUserId, getActiveAccount } from '../utils/activeAccount';
 import { resolveCurrentActorId } from '../utils/actorIdentity';
@@ -44,6 +44,7 @@ type CreateTaskProps = {
 
 const CreateTask = ({ currentUser }: CreateTaskProps) => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const actorId = getActiveUserId(resolveCurrentActorId(currentUser) || currentUser.UserID);
   // في وضع التفويض: actorId = معرّف المفوِّض (المالك الحقيقي للمهمة)
   // ActedBy يجب أن يحمل معرّف المفوَّض له (currentUser هو User B المسجَّل فعلياً)
@@ -75,6 +76,23 @@ const CreateTask = ({ currentUser }: CreateTaskProps) => {
   const [canManageBroadcast, setCanManageBroadcast] = useState(false);
   const [ancestorChain, setAncestorChain] = useState<{ DepartmentID: number; Name: string }[]>([]);
   const [broadcastDeptId, setBroadcastDeptId] = useState<number | null>(null);
+
+  // مهمة منبثقة من مهمة أخرى — عند الوصول عبر ?parentTaskId=X (زر "إنشاء مهمة منبثقة" من داخل مهمة موجودة)
+  const [parentTask, setParentTask] = useState<{ TaskID: number; Title: string } | null>(null);
+  useEffect(() => {
+    const parentTaskId = searchParams.get('parentTaskId');
+    if (!parentTaskId) { setParentTask(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(getApiUrl(`tasks/${parentTaskId}?userId=${encodeURIComponent(actorId)}&isAdmin=${currentUser.IsAdmin}`));
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setParentTask({ TaskID: data.TaskID, Title: data.Title });
+      } catch (_) { /* تجاهل — الحقل اختياري */ }
+    })();
+    return () => { cancelled = true; };
+  }, [searchParams, actorId, currentUser.IsAdmin]);
 
   // مستوى بث التقويم الافتراضي للمهمة — متاح فقط لمدير القسم المستقل أو المفوَّض له
   useEffect(() => {
@@ -230,6 +248,7 @@ const handleSubmit = async (e: React.FormEvent) => {
     ...(!isPersonal && canManageBroadcast && broadcastDeptId != null && broadcastDeptId !== currentUser.DepartmentID
       ? { CalendarBroadcastDepartmentID: broadcastDeptId }
       : {}),
+    ...(parentTask ? { ParentTaskID: parentTask.TaskID } : {}),
     isAdmin: currentUser.IsAdmin,
   };
 
@@ -290,6 +309,24 @@ const handleSubmit = async (e: React.FormEvent) => {
       <h1 className="text-3xl font-bold text-content mb-6">إنشاء مهمة جديدة</h1>
       
       <form onSubmit={handleSubmit} className="space-y-6">
+
+        {/* مهمة منبثقة من مهمة أخرى — يظهر فقط عند الوصول عبر زر "إنشاء مهمة منبثقة" من مهمة موجودة */}
+        {parentTask && (
+          <div className="flex items-center justify-between gap-3 p-3 rounded-lg border-2 border-sky-400 bg-sky-50 dark:bg-sky-900/20 dark:border-sky-600">
+            <div className="text-sm">
+              <span className="text-sky-700 dark:text-sky-300 font-medium">مهمة منبثقة من:</span>{' '}
+              <span className="text-content">#{parentTask.TaskID} — {parentTask.Title}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setParentTask(null)}
+              className="text-xs text-sky-600 dark:text-sky-400 hover:underline flex-shrink-0"
+              title="إزالة الربط بالمهمة الأم"
+            >
+              إزالة
+            </button>
+          </div>
+        )}
 
         {/* خيار المهمة الشخصية — لا يظهر في وضع التفويض */}
         {!_isDelegationMode && (

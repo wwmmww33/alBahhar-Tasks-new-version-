@@ -155,7 +155,7 @@ function hasCommentOwnership(existingComment, actorCandidates) {
 
 exports.createComment = async (req, res) => {
     const pool = req.app.locals.db;
-    const { TaskID, UserID, ActedBy, Content, ShowInCalendar, CalendarDisplayDate, CalendarEndDate, CalendarBroadcastDepartmentID, isAdmin } = req.body;
+    const { TaskID, UserID, ActedBy, Content, ShowInCalendar, CalendarDisplayDate, CalendarEndDate, CalendarBroadcastDepartmentID, ParentCommentID, isAdmin } = req.body;
 
     if (!TaskID || !UserID || !Content) {
         return res.status(400).json({ message: 'TaskID, UserID, and Content are required.' });
@@ -172,6 +172,7 @@ exports.createComment = async (req, res) => {
                 CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarDisplayDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentCalendarDisplayDate,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarEndDate') IS NOT NULL THEN 1 ELSE 0 END AS HasCommentCalendarEndDate,
                 CASE WHEN COL_LENGTH('dbo.Comments', 'CalendarBroadcastDepartmentID') IS NOT NULL THEN 1 ELSE 0 END AS HasBroadcastDeptCol,
+                CASE WHEN COL_LENGTH('dbo.Comments', 'ParentCommentID') IS NOT NULL THEN 1 ELSE 0 END AS HasParentCommentID,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyVacancy,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'NotifyUserID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifyUser,
                 CASE WHEN COL_LENGTH('dbo.CommentNotifications', 'CommentedByVacancyID') IS NOT NULL THEN 1 ELSE 0 END AS HasNotifCommentedByVacancy,
@@ -198,6 +199,19 @@ exports.createComment = async (req, res) => {
         const accessCheck = await checkTaskAccess(pool, TaskID, actorIdForRequest, isAdmin === true || isAdmin === 'true', 'view');
         if (!accessCheck.hasAccess) {
             return res.status(403).json({ message: accessCheck.reason || 'ليس لديك صلاحية إضافة تعليق على هذه المهمة.' });
+        }
+
+        // الرد على تعليق: يجب أن يكون التعليق الأصل موجوداً ومن نفس المهمة (منع ربط رد بتعليق من مهمة أخرى)
+        let parentCommentIdForStorage = null;
+        if (schema.HasParentCommentID && ParentCommentID != null) {
+            const parentCheck = await pool.request()
+                .input('ParentCommentID', sql.Int, ParentCommentID)
+                .input('TaskID', sql.Int, TaskID)
+                .query('SELECT TOP 1 CommentID FROM Comments WHERE CommentID = @ParentCommentID AND TaskID = @TaskID');
+            if (!parentCheck.recordset.length) {
+                return res.status(400).json({ message: 'التعليق المردود عليه غير موجود ضمن هذه المهمة.' });
+            }
+            parentCommentIdForStorage = ParentCommentID;
         }
 
         // تاريخ الإنشاء الفعلي دائماً هو اللحظة الحالية — لا يُسمح بتمريره من العميل (راجع
@@ -306,6 +320,12 @@ exports.createComment = async (req, res) => {
             insertRequest.input('CalendarBroadcastDepartmentID', sql.Int, requestedBroadcastDeptId);
             insertColumns.push('CalendarBroadcastDepartmentID');
             insertValues.push('@CalendarBroadcastDepartmentID');
+        }
+
+        if (schema.HasParentCommentID) {
+            insertRequest.input('ParentCommentID', sql.Int, parentCommentIdForStorage);
+            insertColumns.push('ParentCommentID');
+            insertValues.push('@ParentCommentID');
         }
 
         await insertRequest.query(`
@@ -627,6 +647,14 @@ exports.deleteComment = async (req, res) => {
         await new sql.Request(transaction)
             .input('CommentID', sql.Int, commentId)
             .query('DELETE FROM CommentNotifications WHERE CommentID = @CommentID');
+
+        // فكّ ربط أي ردود كانت تشير لهذا التعليق كأب قبل حذفه (FK ذاتي بلا SET NULL تلقائي)
+        await new sql.Request(transaction)
+            .input('CommentID', sql.Int, commentId)
+            .query(`
+                IF COL_LENGTH('dbo.Comments','ParentCommentID') IS NOT NULL
+                    UPDATE Comments SET ParentCommentID = NULL WHERE ParentCommentID = @CommentID;
+            `);
 
         await new sql.Request(transaction)
             .input('CommentID', sql.Int, commentId)
